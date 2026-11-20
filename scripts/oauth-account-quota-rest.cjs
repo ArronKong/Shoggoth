@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { CodexRuntimeHost } = require("../app/agent-service/codex-runtime-host");
@@ -16,7 +17,7 @@ function fixtureCodex(schemaContract, accountId, percent, resetsAt) {
   const calls = [];
   const account = { type: "chatgpt", planType: "plus", email: `${accountId.split("-")[0]}@example.test` };
   const limits = { limitId: "codex", primary: { usedPercent: percent, windowDurationMins: 300, resetsAt } };
-  const state = { account, quota: {
+  const state = { account, workspaceId: accountId, quota: {
     accountId, rateLimits: limits, rateLimitResetCredits: { availableCount: 2, credits: null }, rateLimitsByLimitId: {
       codex: { ...limits, secondary: { usedPercent: 110, windowDurationMins: 10_080, resetsAt } },
       "codex-extra": { limitName: "Extra models", primary: { usedPercent: 0 } },
@@ -29,7 +30,10 @@ function fixtureCodex(schemaContract, accountId, percent, resetsAt) {
       calls.push(method);
       if (method === "account/read") {
         assert.deepEqual(params, { refreshToken: false });
-        return { account: state.account, requiresOpenaiAuth: true };
+        return { account: state.account, requiresOpenaiAuth: true, ...(state.account.type === "chatgpt" ? {
+          workspaceRouting: { chatgptAccountId: state.workspaceId, backendOrigin: "https://example.test",
+            accountRoutingOverride: "NO_CONSTRAINT" },
+        } : {}) };
       }
       assert.equal(method, "account/rateLimits/read");
       assert.equal(params, undefined);
@@ -67,7 +71,8 @@ function fixtureOpenClaw(resetAt) {
 }
 
 async function run() {
-  const fixture = await openHandoffFixture({ builtinCliProfiles: true, validateHandles: true });
+  const fixture = await openHandoffFixture({ builtinCliProfiles: true, validateHandles: true,
+    catalogs: { codex: ["fixture-model"] } });
   let server;
   try {
     const schema = new CodexSchemaContract();
@@ -80,18 +85,33 @@ async function run() {
     manager.acquire = async (binding, options) => {
       const handle = await acquire(binding, options);
       const codex = binding.runtimeAccountId === MANAGED ? managed : binding.runtimeAccountId === NATIVE ? native : null;
-      if (codex) handle.host.accountQuotaRead = () => codex.host.accountQuotaRead();
+      if (codex) {
+        handle.host.accountRead = input => codex.host.accountRead(input);
+        handle.host.accountQuotaRead = () => codex.host.accountQuotaRead();
+      }
       return handle;
     };
     const registry = new BackendRegistry();
-    const backend = new ShoggothBackend({ paths: fixture.paths });
+    const backend = new ShoggothBackend({ paths: fixture.paths, runtimeCliAuth: [MANAGED, NATIVE].map(runtimeAccountId => ({
+      runtimeAccountId, runtime: "codex", name: runtimeAccountId, binaryPath: process.execPath,
+      accountHome: fixture.root, processHome: fixture.root, homeEnv: null,
+      accountKind: runtimeAccountId === MANAGED ? "shoggoth-managed" : "native-user",
+      credentialProbe: "runtime", credentialFile: null, loginArgs: [], logoutArgs: [], docsUrl: "https://example.test",
+    })) });
+    for (const profile of fixture.service.productStore.listAgentProfiles()) backend._profilesByAgent.set(profile.id, profile);
     let disabled = [];
     const originalRuns = fixture.service.workRunCoordinator.listRuns().length;
     registry.register(backend);
     registry.register(openClaw.backend);
     registry.setDisabledBackendsProvider(() => disabled);
-    server = await startStaticServer(0, { registry, homeDir: fixture.root, userDataRoot: path.join(fixture.root, "ui") });
+    const userDataRoot = path.join(fixture.root, "ui");
+    fs.mkdirSync(userDataRoot, { mode: 0o700 });
+    const startServer = () => startStaticServer(0, { registry, homeDir: fixture.root, userDataRoot });
+    server = await startServer();
     const nativeQuota = (provider = MANAGED, options) => fetch(`${server.url}/__api/oauth/quota?backend=shoggoth&provider=${provider}`, options);
+    const nativeAccount = async (provider = MANAGED, quotaOnly = true) => (await (await fetch(
+      `${server.url}/__api/oauth?backend=shoggoth${quotaOnly ? "&view=quota" : ""}`,
+    )).json()).providers.find(entry => entry.id === provider);
     const gatewayAccount = async (quotaOnly = false) => (await (await fetch(
       `${server.url}/__api/oauth?backend=openclaw${quotaOnly ? "&view=quota" : ""}`,
     )).json()).providers[0];
@@ -110,9 +130,46 @@ async function run() {
       { label: "Extra models", durationMinutes: null, usedPercent: 0, resetsAt: null },
     ]);
     assert.doesNotMatch(JSON.stringify(snapshot), /managed-private-id/);
+    assert.match(snapshot.quotaScope, /^[a-f0-9]{64}$/u);
     const nativeSnapshot = await (await nativeQuota(NATIVE)).json();
     assert.equal(nativeSnapshot.accountName, "native@example.test");
     assert.equal(nativeSnapshot.windows[0].usedPercent, 61);
+
+    const cacheFile = path.join(userDataRoot, "ui-state", "oauth-account-quotas.json");
+    assert.equal(fs.statSync(cacheFile).mode & 0o777, 0o600);
+    assert.doesNotMatch(fs.readFileSync(cacheFile, "utf8"), /managed-private-id|native-private-id/);
+    await server.close();
+    server = await startServer();
+    const accountReads = managed.host.calls.filter(method => method === "account/rateLimits/read").length;
+    assert.deepEqual((await nativeAccount()).cachedQuota, snapshot);
+    assert.deepEqual((await nativeAccount(MANAGED, false)).cachedQuota, snapshot);
+    assert.deepEqual((await nativeAccount(NATIVE)).cachedQuota, nativeSnapshot);
+    assert.equal(managed.host.calls.filter(method => method === "account/rateLimits/read").length, accountReads,
+      "restored quota is available without waiting for a provider read");
+
+    const rerouted = Promise.withResolvers();
+    const oldRequestStarted = Promise.withResolvers();
+    managed.state.read = () => { oldRequestStarted.resolve(); return rerouted.promise; };
+    const staleRead = nativeQuota();
+    try {
+      await Promise.race([oldRequestStarted.promise, staleRead.then(() => assert.fail("quota did not reach Codex"))]);
+      // Two workspaces can have the same email and share the same RuntimeAccount slot.
+      managed.state.workspaceId = "switched-private-id";
+      const switched = await nativeAccount();
+      assert.notEqual(switched.quotaScope, snapshot.quotaScope);
+      assert.equal(switched.cachedQuota, undefined);
+      assert.deepEqual((await nativeAccount(NATIVE)).cachedQuota, nativeSnapshot);
+      assert.doesNotMatch(fs.readFileSync(cacheFile, "utf8"), /managed@example\.test/);
+      managed.state.workspaceId = "managed-private-id";
+      assert.equal((await nativeAccount()).cachedQuota, undefined, "switching back still needs a fresh read");
+    } finally { rerouted.resolve(managed.state.quota); }
+    assert.deepEqual(await (await staleRead).json(), { status: "unavailable" });
+    managed.state.read = undefined;
+    const refreshed = await (await nativeQuota()).json();
+    managed.state.read = () => { throw new Error("fixture quota service unavailable"); };
+    assert.deepEqual(await (await nativeQuota()).json(), { status: "unavailable" });
+    assert.deepEqual((await nativeAccount()).cachedQuota, refreshed, "temporary failure preserves a successful snapshot");
+    managed.state.read = undefined;
 
     native.state.quota = { rateLimits: native.limits }; // Legacy single-bucket response.
     assert.equal((await (await nativeQuota(NATIVE)).json()).windows.length, 1);
@@ -120,9 +177,14 @@ async function run() {
     const nativeCalls = native.host.calls.length;
     assert.deepEqual(await (await nativeQuota(NATIVE)).json(), { status: "unsupported" });
     assert.deepEqual(native.host.calls.slice(nativeCalls), ["account/read"]);
+    const apiKeyAccount = await nativeAccount(NATIVE);
+    assert.equal(apiKeyAccount.quotaScope, null);
+    assert.equal(apiKeyAccount.cachedQuota, undefined);
+    assert.doesNotMatch(fs.readFileSync(cacheFile, "utf8"), /native@example\.test/);
+    const disabledCalls = native.host.calls.length;
     disabled = ["codex"];
     assert.deepEqual(await (await nativeQuota(NATIVE)).json(), { status: "unsupported" });
-    assert.equal(native.host.calls.length, nativeCalls + 1, "a disconnected CLI is never read");
+    assert.equal(native.host.calls.length, disabledCalls, "a disconnected CLI is never read");
     assert.equal((await nativeQuota("bad/provider")).status, 400);
     assert.equal((await nativeQuota(MANAGED, { method: "POST" })).status, 405);
 
@@ -162,12 +224,14 @@ async function run() {
     assert.equal(gateway.accountName, "main-selected@example.test");
     assert.deepEqual(gateway.windows, [{ label: "5h", durationMinutes: null, usedPercent: 25, resetsAt: resetsAt * 1_000 }]);
     assert.equal(openClaw.calls.slice(beforeQuota).every(params => params.refreshUsage === true), true);
+    assert.match(gateway.quotaScope, /^[a-f0-9]{64}$/u);
+    assert.deepEqual((await gatewayAccount()).cachedQuota, gateway);
     openClaw.state.owner = "oauth:other";
     assert.deepEqual(await gatewayQuota(), { status: "unsupported" }, "another account's quota cannot be borrowed across scopes");
     openClaw.state.oldGateway = true;
     assert.deepEqual(await gatewayQuota(), { status: "unsupported" });
     assert.equal((await gatewayAccount()).status.loggedIn, true);
-    console.log("PASS account quota over REST and Service IPC, Codex isolation and OpenClaw account attribution");
+    console.log("PASS account quota over REST and Service IPC, restart recovery, account changes, late reads, and OpenClaw attribution");
   } finally {
     try { await server?.close(); } finally { await fixture.close(); }
   }

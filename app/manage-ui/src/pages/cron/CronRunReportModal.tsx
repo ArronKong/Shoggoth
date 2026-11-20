@@ -50,7 +50,6 @@ export default function CronRunReportModal({
   agentName,
   run,
   model,
-  bodyLabel,
   children,
   onAskInChat,
   onEdit,
@@ -68,7 +67,6 @@ export default function CronRunReportModal({
   run?: Pick<CronRun, "status" | "summary" | "startedAt" | "finishedAt" | "durationMs"> | null;
   // 这次运行用的模型；页面负责回退（任务配置 / 默认模型文案），缺省显示「—」。
   model?: string;
-  bodyLabel?: ReactNode;
   children: ReactNode;
   // 没有可追问的会话或正文时不传，图标随之隐藏。
   onAskInChat?: () => void;
@@ -138,7 +136,6 @@ export default function CronRunReportModal({
           </>
         ) : (
           <>
-            {bodyLabel && <h4 className={styles.cardLabel}>{bodyLabel}</h4>}
             {children}
             {open && backendId && agentId && runId && <ManagedRunFiles backend={backendId} agentId={agentId} runId={runId} />}
           </>

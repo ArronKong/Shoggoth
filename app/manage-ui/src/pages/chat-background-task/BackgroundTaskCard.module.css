@@ -1,52 +1,70 @@
 .card {
-  --task-accent: light-dark(#607184, #b8c9dd);
+  --task-accent: light-dark(#6b7280, #b0b5be);
+  --task-start: light-dark(#fafafa, #23252a);
+  --task-end: light-dark(#ffffff, #2a2d33);
+  --task-gradient-angle: 104.021deg;
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
   align-self: flex-start;
-  width: 360px;
+  gap: 4px;
+  width: fit-content;
+  min-width: min(320px, 100%);
   max-width: 100%;
   box-sizing: border-box;
   margin-top: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--skin-hairline);
-  border-radius: 14px;
-  background: light-dark(#fffefd, #242429);
-  /* Paired with the card surface, not inherited: immersive bubbles use light text. */
-  color: light-dark(#2f2b25, #f2eee7);
-  box-shadow: var(--ui-shadow-card);
+  padding: 24px;
+  border: 0;
+  border-radius: 0 24px 24px 24px;
+  background: linear-gradient(var(--task-gradient-angle), var(--task-start), var(--task-end));
+  color: light-dark(#000000, #f4f4f5);
   font: inherit;
   text-align: start;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
-.card:hover { background: light-dark(#f6f3ee, #2c2c32); }
+
+.card:hover { filter: brightness(0.985); }
 .card:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
-.card[data-tone="active"] { --task-accent: light-dark(#3b6fd8, #8db1ff); }
-.card[data-tone="attention"] { --task-accent: light-dark(#a66a12, #e8b761); }
-.card[data-tone="done"] { --task-accent: light-dark(#2f8a57, #7fd3a2); }
-.card[data-tone="error"] { --task-accent: light-dark(#aa4b48, #efaaa5); }
+.card[data-tone="active"] { --task-accent: light-dark(#000000, #f4f4f5); }
+.card[data-tone="attention"] {
+  --task-accent: light-dark(#b45309, #f2a66b);
+  --task-start: light-dark(#ffeee5, #38291f);
+  --task-end: light-dark(#fff7f3, #2c2522);
+  --task-gradient-angle: 180deg;
+}
+.card[data-tone="done"] {
+  --task-accent: light-dark(#2e9b57, #7fd3a2);
+  --task-start: light-dark(#e5ffe8, #20372a);
+  --task-end: light-dark(#f6fff7, #222c26);
+  --task-gradient-angle: 180deg;
+}
+.card[data-tone="error"] {
+  --task-accent: light-dark(#e5484d, #efaaa5);
+  --task-start: light-dark(#ffebe5, #3b2728);
+  --task-end: light-dark(#fef7f5, #2d2427);
+  --task-gradient-angle: 180deg;
+}
 
-.indicator {
+.meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.status { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--task-accent); }
+.loader {
   flex: none;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--task-accent);
+  height: 16px;
+  /* The visible balls start inside the SVG box. Align their left edge with the title. */
+  margin-inline-start: -4px;
+  --fusion-loader-color: var(--task-accent);
 }
-.card[data-tone="active"] .indicator { animation: pulse 1.6s ease-in-out infinite; }
-@keyframes pulse { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) { .card[data-tone="active"] .indicator { animation: none; } }
-
-.body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.label { color: light-dark(#71695e, #c0b9af); font-size: 12px; line-height: 16px; }
-.title {
-  overflow: hidden;
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex: none; }
-.status { color: var(--task-accent); font-size: 12px; line-height: 16px; font-weight: 600; }
-.report { color: light-dark(#71695e, #c0b9af); font-size: 11px; line-height: 14px; }
+.icon { display: block; flex: none; }
+.dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.label { text-align: end; }
+.label, .report { color: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.64)); }
+.title { font-size: 14px; line-height: 20px; }
+.report { font-size: 11px; line-height: 14px; }

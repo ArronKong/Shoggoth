@@ -11,7 +11,7 @@ export const mcpRecommendationOrder = [
   "clickup", "todoist", "1password", "cloudflare", "zapier", "replit", "vercel", "supabase",
   "webflow", "linear", "home-assistant", "huggingface", "intercom", "klaviyo", "shop-pay",
   "shopify-ucp", "sentry", "netlify", "tailscale", "lovable", "plaid", "withings", "kiwi",
-  "posthog", "amplitude", "neon", "highlevel", "granola", "readwise", "raindrop", "fantastical",
+  "product-hunt", "posthog", "amplitude", "neon", "highlevel", "granola", "readwise", "raindrop", "fantastical",
   "day-one", "attio", "link-by-stripe", "tessie", "pocket", "healthex", "composio",
   "chrome-devtools", "context7", "storybook", "filesystem", "time", "n8n", "baidu-maps", "variflight", "stockmap", "eastmoney", "ifind", "wind", "rollinggo-hotel",
 ] as const;

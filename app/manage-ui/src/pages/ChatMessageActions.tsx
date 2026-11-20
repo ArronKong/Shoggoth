@@ -35,16 +35,32 @@ export function IconQuote({ className }: { className?: string }) {
   </svg>;
 }
 
+function IconTaskDetails() {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h4" />
+  </svg>;
+}
+
+export function ChatTaskDetailsButton({ className, onOpen }: { className: string; onOpen(): void }) {
+  const { t } = useTranslation();
+  const label = t("backgroundTask.openDetails");
+  return <button type="button" className={className} data-chat-footer-icon=""
+    aria-haspopup="dialog" aria-label={label} title={label} onClick={onOpen}>
+    <IconTaskDetails />
+  </button>;
+}
+
 /** The same bubble actions and keyboard behavior in direct and group chats. */
-export function ChatMessageContextMenu({ x, y, onClose, onCopy, onCopyContinuation, onQuote, quoteDisabled, onPin, pinned, onDelete, extra }: {
+export function ChatMessageContextMenu({ x, y, onClose, onCopy, onCopyContinuation, onQuote, quoteDisabled, onOpenTaskDetails, onPin, pinned, onDelete, extra }: {
   x: number; y: number; onClose(): void;
   onCopy?: () => void; onCopyContinuation?: () => void; onQuote?: () => void; quoteDisabled?: boolean;
+  onOpenTaskDetails?: () => void;
   onPin?: () => void; pinned?: boolean; onDelete?: () => void; extra?: ReactNode;
 }) {
   const { t } = useTranslation();
   const deleteMessage = MESSAGE_DELETION_ENABLED ? onDelete : undefined;
   const copyContinuation = MESSAGE_CONTINUATION_COPY_ENABLED ? onCopyContinuation : undefined;
-  const hasActions = !!(onCopy || copyContinuation || onQuote || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
+  const hasActions = !!(onCopy || copyContinuation || onQuote || onOpenTaskDetails || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose); closeRef.current = onClose;
   const [position, setPosition] = useState({ left: x, top: y });
@@ -82,6 +98,9 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onCopyContinuati
     }}>
       {onCopy && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onCopy)}><IconCopy /><span>{t("chat.copy")}</span></button>}
       {onQuote && <button type="button" role="menuitem" className="chat-ctxmenu__item" disabled={quoteDisabled} onClick={() => select(onQuote)}><IconQuote /><span>{t("chat.quote")}</span></button>}
+      {onOpenTaskDetails && <button type="button" role="menuitem" className="chat-ctxmenu__item" aria-haspopup="dialog" onClick={() => select(onOpenTaskDetails)}>
+        <IconTaskDetails /><span>{t("backgroundTask.openDetails")}</span>
+      </button>}
       {copyContinuation && <button type="button" role="menuitem" className="chat-ctxmenu__item" title={t("chat.copyContinuationReferenceHint")} onClick={() => select(copyContinuation)}><IconCopy /><span>{t("chat.copyContinuationReference")}</span></button>}
       {extra}
       {MESSAGE_PINNING_ENABLED && onPin && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onPin)}><IconPin /><span>{t(pinned ? "chat.unpin" : "chat.pin")}</span></button>}

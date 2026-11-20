@@ -3,6 +3,8 @@
 // Fixture-only overlay for the official app-server. Keep production Host,
 // provider/model selection, account authority and registered secrets intact.
 const fs = require("node:fs"), path = require("node:path");
+const { isCodexRetiredFeatureMarker } = require("../app/agent-service/codex-runtime-adapter");
+const { CODEX_VERSION } = require("../app/agent-service/codex-schema-contract");
 function fixtureError(code) { return Object.assign(new Error(code), { code }); }
 const SHELL_FEATURES = Object.freeze(["shell_tool", "unified_exec"]);
 const CONTEXT_GUARD_FEATURES = Object.freeze(["skip_host_skill_discovery"]);
@@ -89,11 +91,12 @@ function boundedLocalFeatureConfig(features, { allowShell = true } = {}) {
   }
   return config;
 }
-function assertOwnedFeatureInventory(features, { allowShell = true } = {}) {
+function assertOwnedFeatureInventory(features, { allowShell = true, runtimeVersion = CODEX_VERSION } = {}) {
   const permitted = boundedLocalFeatureConfig(features, { allowShell });
   // 0.159.2 reports unified_exec on even when disabled. The production
   // isolated-generation path proves it adds no tool with shell_tool off.
   if (features.some(feature => !PRESENTATION_FEATURES.includes(feature.name)
+    && !isCodexRetiredFeatureMarker(feature, runtimeVersion)
     && !(allowShell === false && feature.name === "unified_exec") && feature.enabled !== (feature.name === "code_mode_host" ? true
       : feature.name === "multi_agent_v2" ? false : permitted[`features.${feature.name}`] ?? false)))
     throw fixtureError("CODEX_OWNED_FEATURE_POLICY_UNVERIFIED");

@@ -5,7 +5,8 @@ import { BridgeRuntime } from "../resources/deepseek-harness/shoggoth-dsh-bridge
 
 test("reads only the active DeepSeek account's positive recharge and bonus balances", async () => {
   let account;
-  const bridge = new BridgeRuntime({ get: name => name === "deepseekAccount" ? account : null });
+  const bridge = new BridgeRuntime({ get: name => name === "deepseekAccount" ? account : null,
+    credentials: { describe: async () => null, listRecords: async () => [{}] } });
   const quota = () => bridge.dispatch("quota/read", { version: "0.1.1-rc.2" });
   assert.deepEqual(await quota(), { status: "unsupported" });
   let state = "signed-out";
@@ -28,6 +29,19 @@ test("reads only the active DeepSeek account's positive recharge and bonus balan
     { kind: "recharge", amount: 2.45, unit: "CNY" },
     { kind: "bonus", amount: 5, unit: "CNY" },
   ] });
+  let accountId = "private-account-a";
+  account.getPlatformSession = async () => ({ origin: "https://example.test", accountId });
+  const auth = () => bridge.dispatch("auth/read", { includeQuotaScope: true });
+  const first = await auth();
+  assert.match(first.quotaScope, /^[a-f0-9]{64}$/u);
+  assert.equal((await quota()).quotaScope, first.quotaScope);
+  const readBalance = account.getBalance;
+  account.getBalance = async client => {
+    accountId = "private-account-b";
+    return readBalance(client);
+  };
+  assert.deepEqual(await quota(), { status: "unavailable" });
+  assert.notEqual((await auth()).quotaScope, first.quotaScope);
   balance = null;
   assert.deepEqual(await quota(), { status: "unavailable" });
 });

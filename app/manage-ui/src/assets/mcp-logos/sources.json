@@ -825,6 +825,19 @@
       "sha256": "954cfcf316c982f68380c1a08e7174813cb12416e9722289f328a6b24f2eb7d6"
     },
     {
+      "id": "product-hunt",
+      "page": "https://www.producthunt.com/mcp/install",
+      "asset": "product-hunt.png",
+      "assetUrl": "https://mcp.producthunt.com/mcp",
+      "originalType": "image/svg+xml",
+      "originalWidth": 40,
+      "originalHeight": 40,
+      "bytes": 3447,
+      "sha256": "5ff92a99f92d382e6337ab6b645c4fab8f8e75a32cadf13de29ad30f3559e99e",
+      "retrievedAt": "2026-11-20",
+      "normalization": "Rasterized the SVG icon returned by the official MCP server in initialize."
+    },
+    {
       "id": "quickbooks",
       "asset": "quickbooks.png",
       "page": "https://www.intuit.com/company/press-room/logos/",

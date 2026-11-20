@@ -224,17 +224,17 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 ### OpenAI Codex
 
 - License: Apache-2.0.
-- Source: https://github.com/openai/codex/tree/rust-v0.167.1
-- Revision / evidence: 0.167.1.
-- Local files: `schemas/codex-app-server/0.167.1`, `build/codex-runtime-manifest.json`, `app/agent-service/prompts/codex-0.167.1-model-fallback.md`.
+- Source: https://github.com/openai/codex/tree/rust-v0.170.0
+- Revision / evidence: 0.170.0.
+- Local files: `schemas/codex-app-server/0.170.0`, `build/codex-runtime-manifest.json`, `app/agent-service/prompts/codex-0.167.1-model-fallback.md`.
 - Full text: [CODEX-LICENSE.txt](CODEX-LICENSE.txt), [CODEX-NOTICE.txt](CODEX-NOTICE.txt).
-- Changes / provenance: Pinned unmodified runtime and fallback model prompt (codex-rs/models-manager/prompt.md from the same tag); generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately.
+- Changes / provenance: Pinned unmodified runtime; generated protocol declarations retain upstream provenance. The fallback prompt is an unmodified copy of codex-rs/models-manager/prompt.md, identical in rust-v0.167.1 and rust-v0.170.0. Additional bundled programs are listed separately.
 
 ### Codex native voice libraries
 
 - License: LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib.
-- Source: https://github.com/openai/codex/tree/rust-v0.167.1/third_party/voice
-- Revision / evidence: Codex 0.167.1; library versions and source archive hashes in codex-voice/sources.json.
+- Source: https://github.com/openai/codex/tree/rust-v0.170.0/third_party/voice
+- Revision / evidence: Codex 0.170.0; library versions and source archive hashes in codex-voice/sources.json.
 - Local files: `.vendor/codex/arm64/package/codex-resources/voice`, `.vendor/codex/x64/package/codex-resources/voice`.
 - Full text: [NOTICE.md](licenses/source/codex-voice/NOTICE.md), [LGPL-2.1.txt](licenses/source/codex-voice/LGPL-2.1.txt), [Opus.txt](licenses/source/codex-voice/Opus.txt), [PCRE2.md](licenses/source/codex-voice/PCRE2.md), [libffi.txt](licenses/source/codex-voice/libffi.txt), [proxy-libintl.txt](licenses/source/codex-voice/proxy-libintl.txt), [sljit.txt](licenses/source/codex-voice/sljit.txt), [zlib.txt](licenses/source/codex-voice/zlib.txt).
 - Changes / provenance: Unmodified upstream dynamic libraries and selected GStreamer plugins. Complete upstream notices and licenses are retained here and in the runtime package. Corresponding source archive URLs, versions and SHA-256 digests are retained in codex-voice/sources.json; build source and commit are identified in codex-voice/manifest.json. Build tools in sources.json are not bundled runtime libraries.

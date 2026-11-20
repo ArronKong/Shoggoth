@@ -1,15 +1,31 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import Modal from "../../components/Modal";
 import ChatMarkdown from "../../components/ChatMarkdown";
-import ChatPromptCard, { type ChatPromptEntry, type ChatPromptResponse } from "../ChatPromptCard";
+import type { ChatPromptEntry, ChatPromptResponse } from "../ChatPromptCard";
+import { IconSend, IconStop } from "../chatIcons";
 import { controlBackgroundTask, getBackgroundTask } from "../../api/client";
-import type { BackgroundTaskControl, BackgroundTaskDetail, BackgroundTaskStatus } from "../../types";
+import type { BackgroundTaskControl, BackgroundTaskDetail, BackgroundTaskMessage, BackgroundTaskStatus } from "../../types";
+import type { ConnectBackgroundChat } from "./backgroundTaskChat";
 import { backgroundTaskTone } from "./BackgroundTaskCard";
 import styles from "./BackgroundTaskModal.module.css";
 
 const LIVE: BackgroundTaskStatus[] = ["starting", "queued", "running", "stopping", "waiting_approval", "waiting_input", "needs_verification"];
 const STOPPABLE: BackgroundTaskStatus[] = ["starting", "queued", "running", "waiting_approval", "waiting_input"];
+
+export interface BackgroundTaskConversationProps {
+  sessionKey: string;
+  taskId: string;
+  detail: BackgroundTaskDetail;
+  briefId?: string;
+  setBrief(brief: BackgroundTaskMessage | null): void;
+  refreshKey: string;
+  scrollRef: RefObject<HTMLDivElement>;
+  agentName?: string;
+  respond(entry: ChatPromptEntry, response: ChatPromptResponse): Promise<void>;
+  quote(text: string): void;
+  connect?: ConnectBackgroundChat;
+}
 
 function errorText(t: (key: string, options?: Record<string, unknown>) => string, error: unknown) {
   const code = (error as { code?: string } | null)?.code;
@@ -20,10 +36,13 @@ function errorText(t: (key: string, options?: Record<string, unknown>) => string
 }
 
 /** Details of one background task opened from its card or report in the source chat. */
-export default function BackgroundTaskModal({ sessionKey, taskId, agentName, revision, onChanged, onClose }: {
+export default function BackgroundTaskModal({ sessionKey, taskId, agentName, revision, onChanged, onClose, initialFocus, Conversation, connectChat }: {
   sessionKey: string;
   taskId: string;
   agentName?: string;
+  initialFocus?: boolean;
+  Conversation: ComponentType<BackgroundTaskConversationProps>;
+  connectChat?: ConnectBackgroundChat;
   /** Changes when the Service reports a task change for this chat. */
   revision: number;
   /** A control changed the task; the chat refreshes its cards. */
@@ -36,8 +55,34 @@ export default function BackgroundTaskModal({ sessionKey, taskId, agentName, rev
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<"send" | "stop" | "respond" | null>(null);
   const [reload, setReload] = useState(0);
+  const [canonicalBrief, setBrief] = useState<BackgroundTaskMessage | null | undefined>(undefined);
   const pending = useRef(false);
   const alive = useRef(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [scrollBody, setScrollBody] = useState<HTMLDivElement | null>(null);
+  const attachScrollBody = useCallback((element: HTMLDivElement | null) => {
+    scrollRef.current = element;
+    setScrollBody(element);
+  }, []);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    if (!scrollBody) return;
+    const updateFade = () => {
+      const { scrollTop, scrollHeight, clientHeight } = scrollBody;
+      scrollBody.toggleAttribute("data-scrolled", scrollTop > 1);
+      scrollBody.toggleAttribute("data-more", scrollHeight - scrollTop > clientHeight + 1);
+    };
+    updateFade();
+    const observer = new ResizeObserver(updateFade);
+    observer.observe(scrollBody);
+    if (scrollBody.firstElementChild) observer.observe(scrollBody.firstElementChild);
+    scrollBody.addEventListener("scroll", updateFade, { passive: true });
+    return () => {
+      observer.disconnect();
+      scrollBody.removeEventListener("scroll", updateFade);
+    };
+  }, [scrollBody]);
 
   useEffect(() => {
     let current = true, timer: ReturnType<typeof setTimeout> | undefined;
@@ -61,9 +106,10 @@ export default function BackgroundTaskModal({ sessionKey, taskId, agentName, rev
     if (pending.current) return;
     pending.current = true; setBusy(kind);
     try {
-      await controlBackgroundTask(sessionKey, taskId, crypto.randomUUID(), value);
+      const { task: updatedTask } = await controlBackgroundTask(sessionKey, taskId, crypto.randomUUID(), value);
       if (!alive.current) return;
-      if (kind === "send") setMessage("");
+      if (value.action === "send") setMessage(draft => draft.trim() === value.message ? "" : draft);
+      setDetail(current => current && updatedTask.generation >= current.task.generation ? { ...current, task: updatedTask } : current);
       setError(null); setReload(next => next + 1); onChanged?.();
     } catch (cause) {
       if (alive.current) setError(errorText(t, cause));
@@ -85,8 +131,19 @@ export default function BackgroundTaskModal({ sessionKey, taskId, agentName, rev
   };
 
   const task = detail?.task;
+  const messages = detail?.messages ?? [];
+  const brief = canonicalBrief === undefined ? messages[0]?.role === "user" ? messages[0] : null : canonicalBrief;
   const when = (value: number | null) => value ? new Date(value).toLocaleString(i18n.language) : "";
   const finished = task && !LIVE.includes(task.status);
+  const sending = busy === "send";
+  const stopping = busy === "stop" || task?.status === "stopping";
+  const showStop = task && (stopping || sending || STOPPABLE.includes(task.status));
+  const sendLabel = t("backgroundTask.send");
+  const stopLabel = t(stopping ? "backgroundTask.stoppingAction" : sending ? "backgroundTask.sending" : "backgroundTask.stop");
+  const draft = message.trim();
+  const sendDraft = () => {
+    if (draft) void control("send", { action: "send", message: draft });
+  };
   const subtitle = task ? [
     t(`backgroundTask.status.${task.status}`),
     t("backgroundTask.runtime", { runtime: task.runtime }),
@@ -97,42 +154,56 @@ export default function BackgroundTaskModal({ sessionKey, taskId, agentName, rev
   const fileLinks = detail?.files.filter(file => file.url).map(file => `- [${file.name.replace(/[\\[\]]/gu, "\\$&")}](${file.url})`).join("\n");
 
   return <Modal open title={task?.title || t("backgroundTask.detailTitle")} subtitle={subtitle} width={720} onClose={onClose}
-    footer={task ? <div className={styles.footer}>
-      <textarea className={styles.input} rows={2} value={message} disabled={busy !== null}
+    className={`chat-surface ${styles.panel}`} initialFocus={initialFocus} bodyRef={attachScrollBody} bodyClassName={styles.scrollBody}
+    footer={task ? <div className={`chat-surface chat-composer ${styles.composer}`}>
+      <textarea ref={inputRef} className="chat-composer__input" rows={2} value={message}
         placeholder={t("backgroundTask.supplementPlaceholder")} aria-label={t("backgroundTask.supplementPlaceholder")}
         onChange={event => setMessage(event.target.value)}
         onKeyDown={event => {
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && message.trim()) {
-            event.preventDefault(); void control("send", { action: "send", message: message.trim() });
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault(); sendDraft();
           }
         }} />
-      <div className={styles.actions}>
-        {STOPPABLE.includes(task.status) ? <button type="button" className="btn" disabled={busy !== null}
-          onClick={() => void control("stop", { action: "cancel" })}>
-          {busy === "stop" ? t("backgroundTask.stoppingAction") : t("backgroundTask.stop")}</button> : null}
-        <button type="button" className="btn-primary" disabled={busy !== null || !message.trim()}
-          onClick={() => void control("send", { action: "send", message: message.trim() })}>
-          {busy === "send" ? t("backgroundTask.sending") : t("backgroundTask.send")}</button>
+      <div className="chat-composer__bar">
+        <div className="chat-composer__right">
+          {showStop ? (
+            <button type="button" className="chat-iconbtn chat-send chat-stop" disabled={busy !== null || stopping}
+              aria-label={stopLabel} title={stopLabel} aria-busy={stopping || sending}
+              onClick={() => void control("stop", { action: "cancel" })}>
+              <IconStop />
+            </button>
+          ) : (
+            <button type="button" className="chat-iconbtn chat-send" disabled={busy !== null || !draft}
+              aria-label={sendLabel} title={sendLabel} onClick={sendDraft}>
+              <IconSend />
+            </button>
+          )}
+        </div>
       </div>
     </div> : undefined}>
     <div className={styles.body} data-tone={task ? backgroundTaskTone(task.status) : undefined}>
       {error ? <p className={styles.error} role="alert">{error}</p> : null}
       {!detail && !error ? <p className={styles.muted}>{t("backgroundTask.loading")}</p> : null}
       {detail?.queueReason && task?.status === "queued" ? <p className={styles.muted}>{t("backgroundTask.queueReason", { reason: detail.queueReason })}</p> : null}
-      {detail?.interaction ? <section className={styles.section}>
-        <p className={styles.hint}>{t("backgroundTask.waitingHint")}</p>
-        <ChatPromptCard entry={{ ...detail.interaction.payload, id: detail.interaction.payload.requestId }} onRespond={respond}
-          agentName={agentName} />
-      </section> : null}
+      {detail?.queuedFollowUps ? <p className={styles.hint} role="status">{t("backgroundTask.queuedFollowUps", { count: detail.queuedFollowUps })}</p> : null}
       {detail ? <section className={styles.section} aria-label={t("backgroundTask.progress")}>
-        {detail.messages.length ? detail.messages.map((item, index) => {
-          const label = item.role === "user" ? index === 0 ? t("backgroundTask.brief") : t("backgroundTask.supplement")
-            : item.activity ? t("backgroundTask.progress") : t("backgroundTask.reply");
-          return <article key={item.id} className={styles.message} data-role={item.role} data-activity={item.activity || undefined}>
-            <header className={styles.messageHead}><span>{label}</span><time>{when(item.at)}</time></header>
-            <ChatMarkdown className="chat-md" text={item.text} />
-          </article>;
-        }) : <p className={styles.muted}>{t("backgroundTask.noMessages")}</p>}
+        {brief && <article className={styles.message} data-role="user">
+          <header className={styles.messageHead}><span>{t("backgroundTask.brief")}</span><time>{when(brief.at)}</time></header>
+          <ChatMarkdown className="chat-md" text={brief.text} />
+        </article>}
+        {detail.interaction && <p className={styles.hint}>{t("backgroundTask.waitingHint")}</p>}
+        <div className={styles.conversation}>
+          <Conversation sessionKey={sessionKey} taskId={taskId} detail={detail} briefId={brief?.id} setBrief={setBrief}
+            refreshKey={`${revision}:${reload}:${detail.task.generation}:${detail.task.status}`}
+            scrollRef={scrollRef} agentName={agentName} respond={respond} connect={connectChat}
+            quote={text => {
+              if (!text.trim()) return;
+              const block = text.trim().split("\n").map(line => `> ${line}`).join("\n");
+              setMessage(value => `${block}\n\n${value}`);
+              inputRef.current?.focus();
+            }} />
+        </div>
+        {!messages.length && <p className={styles.muted}>{t("backgroundTask.noMessages")}</p>}
       </section> : null}
       {fileLinks ? <section className={styles.section}>
         <h3 className={styles.heading}>{t("backgroundTask.files")}</h3>

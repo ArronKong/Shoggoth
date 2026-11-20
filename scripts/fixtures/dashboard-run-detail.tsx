@@ -15,8 +15,10 @@ const language = options.get("language") || "zh-CN", theme = options.get("theme"
 const now = Date.now(), createdAt = now - 80_000, startedAt = now - 42_000;
 const runId = "preview-task", title = "Tibo 额度重置监测";
 let stage = options.get("state") === "completed" ? 4 : 0, outage = false, detailReads = 0, summaryReads = 0;
+let fullReportAvailable = true;
 const resultText = "### 监测结果\n\n官方公告与生效时区已核对，本次监测已完成。\n\n- **公告来源**：已核对\n- **生效时间**：已完成时区换算\n\n这是一条用于查看界面效果的示例任务。";
 const reportEnding = "这是一条用于查看界面效果的示例任务。";
+const summaryOnlyText = "已核对公告摘要。";
 const events: any[] = [
   { type: "status", status: "running" },
   { type: "performance.stage" },
@@ -56,7 +58,9 @@ state.fetch = async (url: unknown, init: RequestInit = {}) => {
   else if (p.pathname === "/__api/dashboard/activities") value = summary().activityPage;
   else if (p.pathname === "/__api/cron/jobs" && p.searchParams.get("id") === "shoggoth:preview-job"
     && p.searchParams.get("action") === "result" && p.searchParams.get("runId") === runId) {
-    value = { ...resultRun(), fullText: resultText, source: "transcript" };
+    value = fullReportAvailable
+      ? { ...resultRun(), fullText: resultText, source: "transcript" }
+      : { ...resultRun(), summary: `### 监测结果\n\n${summaryOnlyText}`, source: "summary" };
   }
   else if (p.pathname.startsWith("/__api/dashboard/runs/")) {
     detailReads++;
@@ -128,8 +132,15 @@ state.runFixture = async () => {
   if (document.documentElement.scrollWidth > window.innerWidth + 1) throw Error("Page overflows horizontally");
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
   if (dialog.scrollWidth > dialog.clientWidth + 1) throw Error("Dialog overflows horizontally");
+  const markdown = () => document.querySelector('[role="dialog"] .cron-delivery-md');
+  fullReportAvailable = false;
   await state.openResultFixture();
-  await wait(() => body().includes(reportEnding) && body().includes(i18n.t("dashboard.fullTextTitle")), "Completed result did not load the full report by run ID");
+  await wait(() => markdown()?.textContent?.includes(summaryOnlyText), "Completed result did not load the summary by run ID");
+  if (markdown()?.previousElementSibling) throw Error("An extra heading appeared before the summary");
+  fullReportAvailable = true;
+  await state.openResultFixture();
+  await wait(() => markdown()?.textContent?.includes(reportEnding), "Completed result did not load the full report by run ID");
+  if (markdown()?.previousElementSibling) throw Error("An extra heading appeared before the full report");
   if (document.querySelectorAll('[role="dialog"] .cron-delivery-md h3').length !== 1) throw Error("Existing result Markdown missing");
   if (body().includes(i18n.t("turnLab.processLabel"))) throw Error("Execution activity leaked into result dialog");
   if (!document.querySelector(`[role="dialog"] button[aria-label="${i18n.t("cron.askInChat")}"]`)) throw Error("Existing result follow-up action missing");

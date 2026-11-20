@@ -1631,15 +1631,23 @@ function startProxyGateway({
         // Never forward its opaque cursor or `page` selector to a gateway.
         if (frame.method === "chat.history" && frame.params?.page === true) {
           if (!authed) { denyUnauthed(frame.id); return; }
-          const sessionKey = frame.params.sessionKey;
+          const sourceKey = frame.params.sessionKey;
+          const taskId = frame.params.backgroundTaskId;
+          const taskView = Object.hasOwn(frame.params, "backgroundTaskId");
           const firstPage = frame.params.cursor == null;
+          let sessionKey;
           let watchGeneration;
           try {
-            if (!isPlainRecord(frame.params) || Object.keys(frame.params).some(key => !["sessionKey", "page", "cursor", "limit"].includes(key))
-              || typeof sessionKey !== "string" || !/^agent:[^:]+:.+$/u.test(sessionKey)) {
+            if (!isPlainRecord(frame.params) || Object.keys(frame.params).some(key => !["sessionKey", "page", "cursor", "limit", "backgroundTaskId"].includes(key))
+              || typeof sourceKey !== "string" || !/^agent:[^:]+:.+$/u.test(sourceKey)
+              || (taskView && (typeof taskId !== "string" || !/^bgt-[a-f0-9]{48}$/u.test(taskId)))) {
               throw Object.assign(new Error("历史分页参数无效"), { code: "INVALID_PARAMS" });
             }
-            if (!registry?.getChatHistoryPage) throw Object.assign(new Error("历史分页暂不可用"), { code: "BACKEND_NOT_READY" });
+            // A background observer emits to this viewer under a display-only key.
+            sessionKey = taskView ? `background-task:${sourceKey}:${taskId}` : sourceKey;
+            if (typeof registry?.[taskView ? "getBackgroundTaskChatPage" : "getChatHistoryPage"] !== "function") {
+              throw Object.assign(new Error("历史分页暂不可用"), { code: "BACKEND_NOT_READY" });
+            }
             if (firstPage) {
               if (!historyWatchGenerations.has(sessionKey) && historyWatchGenerations.size >= MAX_CLIENT_HISTORY_WATCHES) {
                 throw Object.assign(new Error("活动会话恢复请求过多，请稍后重试"), { code: "BACKEND_BUSY" });
@@ -1647,18 +1655,19 @@ function startProxyGateway({
               watchGeneration = ++historyWatchSequence;
               historyWatchGenerations.set(sessionKey, watchGeneration);
             }
-            const { payload, observer } = await registry.getChatHistoryPage(sessionKey, {
-              cursor: frame.params.cursor, limit: frame.params.limit,
-            });
+            const options = { cursor: frame.params.cursor, limit: frame.params.limit };
+            const { payload, observer } = taskView
+              ? await registry.getBackgroundTaskChatPage(sourceKey, taskId, options)
+              : await registry.getChatHistoryPage(sourceKey, options);
             if (clientWatchersClosed) return;
             sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
             if (firstPage && historyWatchGenerations.get(sessionKey) === watchGeneration) {
-              const prompts = typeof observer.getPendingChatPrompts === "function"
+              const prompts = typeof observer?.getPendingChatPrompts === "function"
                 ? observer.getPendingChatPrompts(sessionKey) : [livePromptsBySession.get(sessionKey)].filter(Boolean);
               for (const livePrompt of prompts) sendToClient(JSON.stringify({ type: "event", event: "chat", payload: {
                 runId: livePrompt.runId, sessionKey, state: "prompt", prompt: livePrompt.prompt,
               } }));
-              if (typeof observer.watchSession === "function") queueSessionWatcher(observer, sessionKey, watchGeneration, payload);
+              if (typeof observer?.watchSession === "function") queueSessionWatcher(observer, sessionKey, watchGeneration, payload);
               else if (historyWatchGenerations.get(sessionKey) === watchGeneration) historyWatchGenerations.delete(sessionKey);
             }
           } catch (error) {

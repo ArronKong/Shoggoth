@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.352",
+      "version": "0.8.357",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.352",
-      "purl": "pkg:generic/shoggoth@0.8.352",
+      "bom-ref": "pkg:generic/shoggoth@0.8.357",
+      "purl": "pkg:generic/shoggoth@0.8.357",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -100,12 +100,12 @@
     {
       "type": "application",
       "name": "OpenAI Codex",
-      "version": "0.167.1",
-      "bom-ref": "pkg:generic/openai-codex@0.167.1?platform=darwin-arm64",
+      "version": "0.170.0",
+      "bom-ref": "pkg:generic/openai-codex@0.170.0?platform=darwin-arm64",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "5bcbc5866cbca19f9299f7884e9b39b9ccb5469969c170b1f2d2cd6fc4b1ee72"
+          "content": "975524bf13aedd1b122d8d0e00c09ee67091b8f688c0b374943dbb3cf22c7893"
         }
       ],
       "licenses": [
@@ -115,11 +115,11 @@
           }
         }
       ],
-      "purl": "pkg:generic/openai-codex@0.167.1?platform=darwin-arm64",
+      "purl": "pkg:generic/openai-codex@0.170.0?platform=darwin-arm64",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://releases.openai.com/codex/releases/0.167.1/codex-package-aarch64-apple-darwin.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.170.0/codex-package-aarch64-apple-darwin.tar.gz"
         }
       ],
       "properties": [
@@ -132,12 +132,12 @@
     {
       "type": "application",
       "name": "OpenAI Codex",
-      "version": "0.167.1",
-      "bom-ref": "pkg:generic/openai-codex@0.167.1?platform=darwin-x64",
+      "version": "0.170.0",
+      "bom-ref": "pkg:generic/openai-codex@0.170.0?platform=darwin-x64",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ade991ce7fef5b4f4af884c154b9455d493cd0caf13789fc3ff9f842897b55d3"
+          "content": "2e971524460a570b913dbdc9b49e5e9c14556e44e7f62f00b95b4a8f1e2cdf25"
         }
       ],
       "licenses": [
@@ -147,11 +147,11 @@
           }
         }
       ],
-      "purl": "pkg:generic/openai-codex@0.167.1?platform=darwin-x64",
+      "purl": "pkg:generic/openai-codex@0.170.0?platform=darwin-x64",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://releases.openai.com/codex/releases/0.167.1/codex-package-x86_64-apple-darwin.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.170.0/codex-package-x86_64-apple-darwin.tar.gz"
         }
       ],
       "properties": [
@@ -13302,7 +13302,7 @@
     {
       "type": "library",
       "name": "Codex native voice libraries",
-      "version": "Codex 0.167.1; library versions and source archive hashes in codex-voice/sources.json",
+      "version": "Codex 0.170.0; library versions and source archive hashes in codex-voice/sources.json",
       "bom-ref": "source:Codex native voice libraries",
       "licenses": [
         {
@@ -13467,7 +13467,7 @@
     {
       "type": "library",
       "name": "OpenAI Codex",
-      "version": "0.167.1",
+      "version": "0.170.0",
       "bom-ref": "source:OpenAI Codex",
       "licenses": [
         {
@@ -13479,7 +13479,7 @@
       "properties": [
         {
           "name": "shoggoth:local-files",
-          "value": "schemas/codex-app-server/0.167.1,build/codex-runtime-manifest.json,app/agent-service/prompts/codex-0.167.1-model-fallback.md"
+          "value": "schemas/codex-app-server/0.170.0,build/codex-runtime-manifest.json,app/agent-service/prompts/codex-0.167.1-model-fallback.md"
         }
       ]
     },
@@ -13613,12 +13613,12 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.352",
+      "ref": "pkg:generic/shoggoth@0.8.357",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
-        "pkg:generic/openai-codex@0.167.1?platform=darwin-arm64",
-        "pkg:generic/openai-codex@0.167.1?platform=darwin-x64",
+        "pkg:generic/openai-codex@0.170.0?platform=darwin-arm64",
+        "pkg:generic/openai-codex@0.170.0?platform=darwin-x64",
         "pkg:npm/%40babel/runtime@7.29.7",
         "pkg:npm/%40base-ui/react@1.5.0",
         "pkg:npm/%40base-ui/utils@0.2.9",

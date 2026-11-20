@@ -1,6 +1,7 @@
 "use strict";
 
 const { serviceError } = require("./security");
+const { validQuotaScope } = require("../core/oauth-account-quota");
 
 const RUNTIME_CAPABILITY_KEYS = Object.freeze([
   "session.start",
@@ -131,8 +132,9 @@ function ownDataValue(value, key) {
   }
 }
 
-function authenticationState(status) {
-  return Object.freeze({ status });
+function authenticationState(status, quotaScope) {
+  return Object.freeze({ status,
+    ...(status === "authenticated" && (quotaScope === null || validQuotaScope(quotaScope)) ? { quotaScope } : {}) });
 }
 
 function authenticationReadError(cause) {
@@ -150,7 +152,7 @@ function authenticationReadError(cause) {
   return error;
 }
 
-async function readRuntimeAuthenticationState(handle, { allowDeferred = false } = {}) {
+async function readRuntimeAuthenticationState(handle, { allowDeferred = false, includeQuotaScope = false } = {}) {
   if (!handle || (typeof handle !== "object" && typeof handle !== "function")) {
     throw runtimeError("RUNTIME_AUTH_STATUS_INVALID", "Runtime auth status is invalid");
   }
@@ -165,7 +167,7 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
   if (typeof accountRead === "function") {
     let raw;
     try {
-      raw = await accountRead.call(handle, { refreshToken: false });
+      raw = await accountRead.call(handle, { refreshToken: false, ...(includeQuotaScope ? { includeQuotaScope } : {}) });
     } catch (error) {
       throw authenticationReadError(error);
     }
@@ -176,12 +178,12 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
       throw runtimeError("RUNTIME_AUTH_STATUS_INVALID", "Runtime auth status is invalid");
     }
     return authenticationState(account !== null || requiresOpenaiAuth === false
-      ? "authenticated" : "unauthenticated");
+      ? "authenticated" : "unauthenticated", includeQuotaScope ? ownDataValue(raw, "quotaScope") : undefined);
   }
   if (typeof runtimeAuthenticationState === "function") {
     let raw;
     try {
-      raw = await runtimeAuthenticationState.call(handle, { allowDeferred });
+      raw = await runtimeAuthenticationState.call(handle, { allowDeferred, ...(includeQuotaScope ? { includeQuotaScope } : {}) });
     } catch (error) {
       throw authenticationReadError(error);
     }
@@ -193,7 +195,7 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
       if (!["authenticated", "unauthenticated", "unverified"].includes(status)) {
         throw runtimeError("RUNTIME_AUTH_STATUS_INVALID", "Runtime auth status is invalid");
       }
-      return authenticationState(status);
+      return authenticationState(status, includeQuotaScope ? ownDataValue(raw, "quotaScope") : undefined);
     }
     // An adapter may let its executing CLI authenticate the request instead
     // of doing a second network login check. Settings still require an actual
@@ -209,7 +211,8 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
     }
     return authenticationState(authenticated
       ? "authenticated"
-      : credentialPresent === true ? "unverified" : "unauthenticated");
+      : credentialPresent === true ? "unverified" : "unauthenticated",
+    includeQuotaScope ? ownDataValue(raw, "quotaScope") : undefined);
   }
   return authenticationState("unsupported");
 }

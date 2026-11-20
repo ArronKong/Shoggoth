@@ -214,7 +214,7 @@ test("config writer 原子生成真实 custom provider TOML，使用内部 alias
   assert.equal(fs.statSync(codexHome).mode & 0o777, 0o700);
 });
 
-test("Codex 0.167.1 本地解析生成的 update/shell env policy 语法", () => {
+test("Codex 0.170.0 本地解析生成的 update/shell env policy 语法", () => {
   const fixture = fixturePaths();
   const writer = new CodexRuntimeConfigWriter({ paths: fixture.paths });
   const codexHome = prepareCodexHome(fixture.paths, "strict-config");
@@ -254,7 +254,7 @@ test("Codex 0.167.1 本地解析生成的 update/shell env policy 语法", () =>
   assert.match(result.stdout, /^memories\s+stable\s+false$/m);
 });
 
-test("六种 Provider TOML 使用准确 wire/built-in/AWS 语义并由真实 Codex 0.167.1 离线解析", () => {
+test("六种 Provider TOML 使用准确 wire/built-in/AWS 语义并由真实 Codex 0.170.0 离线解析", () => {
   const fixture = fixturePaths();
   const writer = new CodexRuntimeConfigWriter({ paths: fixture.paths });
   const common = {
@@ -663,7 +663,7 @@ test("官方 MiMo 的冻结执行来源加载本地目录并将审批交给用�
     const profile = resources.productStore.getAgentProfile("runtime-mimo");
     const binding = { runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId };
     const { captureExecutionProviderRoute } = require("../app/agent-service/execution-provider-route");
-    const prepare = (providerRef, runtimeVersion = "0.167.1") => resources.bridge.prepareRuntime({ ...binding, runtimeVersion, executionContract: {
+    const prepare = (providerRef, runtimeVersion = "0.170.0") => resources.bridge.prepareRuntime({ ...binding, runtimeVersion, executionContract: {
       ...captureExecutionProviderRoute({ productStore: resources.productStore, secretStore: resources.secretStore,
         profile, providerRef, modelRef: model }), ...binding,
     } });
@@ -673,7 +673,7 @@ test("官方 MiMo 的冻结执行来源加载本地目录并将审批交给用�
       structuredOutput: "unsupported",
       approvalReviewer: "user",
     });
-    assert.equal(mimo.modelCatalog.runtimeVersion, "0.167.1");
+    assert.equal(mimo.modelCatalog.runtimeVersion, "0.170.0");
     assert.match(mimo.modelCatalog.digest, /^[a-f0-9]{64}$/u);
     const prefix = "model_catalog_json=";
     const catalogPath = JSON.parse(mimo.configArgs.find(value => value.startsWith(prefix)).slice(prefix.length));
@@ -683,6 +683,9 @@ test("官方 MiMo 的冻结执行来源加载本地目录并将审批交给用�
     const originalInode = fs.statSync(catalogPath).ino;
     assert.deepEqual((await prepare("mimo")).configArgs, mimo.configArgs);
     assert.equal(fs.statSync(catalogPath).ino, originalInode, "an identical catalog is reused");
+    const previous = await prepare("mimo", "0.167.1");
+    assert.equal(previous.modelCatalog.runtimeVersion, "0.167.1");
+    assert.equal(previous.modelCatalog.digest, mimo.modelCatalog.digest);
     const prior = await prepare("mimo", "0.159.2");
     assert.deepEqual(prior.providerCapabilities, mimo.providerCapabilities);
     assert.equal(prior.modelCatalog, undefined);

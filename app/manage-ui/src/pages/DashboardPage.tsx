@@ -691,9 +691,6 @@ export default function DashboardPage() {
         agentName={openRun?.agentId ? currentAgentName(openRun.agentId, openRun.backendId) : undefined}
         run={openRun}
         model={openRun?.model}
-        bodyLabel={visibleRunText
-          ? (runHandoff.isFullText ? t("dashboard.fullTextTitle") : t("dashboard.summaryTitle"))
-          : undefined}
         onAskInChat={openRun && runSessionKey && visibleRunText && visibleRunText.trim()
           ? () => askInChat(openRun.backendId, runSessionKey, visibleRunText)
           : undefined}

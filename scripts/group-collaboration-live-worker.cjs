@@ -257,7 +257,7 @@ function installOwnedNativeToolPolicies({ service, root, profiles, sourceRepo, c
             instructionSources: response.instructionSources,
             provenance: "actual-owned-Host-effective-configRead-by-cwd-plus-thread-model-provider-response;no-pinned-thread-layer-or-original-Home-resolution-claim" });
           const afterFeatures = await collectOwnedCodexFeatures(host, threadId);
-          permissions.assertOwnedFeatureInventory(afterFeatures, { allowShell });
+          permissions.assertOwnedFeatureInventory(afterFeatures, { allowShell, runtimeVersion: host.runtimeVersion });
           evidence.afterFeatureInventories ??= [];
           evidence.afterFeatureInventories.push({ threadId, features: afterFeatures, digest: sha(JSON.stringify(afterFeatures)) });
           const inventory = await collectOwnedCodexMcpInventory(host, threadId);

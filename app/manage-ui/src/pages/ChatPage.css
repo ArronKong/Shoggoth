@@ -11,7 +11,8 @@
  * (node 6377:264) the backdrop is a flat light-grey gradient (no wallpaper).
  */
 
-.chat-shell {
+/* The background task dialog portals out of the chat shell but shares its colors and typography. */
+.chat-shell, .chat-surface {
   --bg: #ffffff;
   --bg-accent: #f7f7f7;
   --bg-elevated: #fbfbfb;
@@ -68,7 +69,9 @@
   --skin-gutter: 20px;
   /* full-window backdrop — flat light grey (#f4f4f4), no gradient/wallpaper */
   --skin-app-bg: #f4f4f4;
+}
 
+.chat-shell {
   display: grid;
   /* 左侧贴齐导航栏；320 = 300 卡片 + 8 右内边距 + 12 滚动槽。 */
   grid-template-columns: 320px minmax(0, 1fr);
@@ -83,7 +86,7 @@
 }
 
 /* dark theme (driven by data-theme, was prefers-color-scheme) */
-:root[data-theme="dark"] .chat-shell {
+:root[data-theme="dark"] :is(.chat-shell, .chat-surface) {
     --bg: #0f1115;
     --bg-accent: #1a1d23;
     --bg-elevated: #22252b;

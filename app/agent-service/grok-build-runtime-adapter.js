@@ -55,7 +55,7 @@ class GrokBuildRuntimeHandle {
     return Array.isArray(this.host.registeredSecrets) ? [...this.host.registeredSecrets] : [];
   }
 
-  authenticationState() { return this.host.authenticationState(); }
+  authenticationState(input) { return this.host.authenticationState(input); }
   accountQuotaRead() { return this.host.accountQuotaRead(); }
   generateModelOnly(input) { return require("./acp-model-only").generateAcpModelOnly(this.host, input); }
   subscribe(listener) { return this.host.subscribe(listener); }

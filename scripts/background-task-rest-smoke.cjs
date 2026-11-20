@@ -5,6 +5,8 @@
 // ShoggothBackend → Service. The preview fixture has one finished task with a
 // delivered report and one running task in the same source chat.
 const assert = require("node:assert/strict");
+const { once } = require("node:events");
+const { WebSocket } = require("ws");
 const { startPreview } = require("./shoggoth-background-task-preview.cjs");
 const { waitUntil } = require("./fixtures/runtime-bridge-harness.cjs");
 
@@ -15,6 +17,66 @@ async function json(base, method, pathname, body) {
   let value = null;
   try { value = JSON.parse(text); } catch {}
   return { status: response.status, body: value };
+}
+
+async function verifyTaskChat(preview) {
+  const { base, sessionKey, tasks, fixture } = preview;
+  const socket = new WebSocket(`${base.replace(/^http/u, "ws")}/__chatws`, { origin: base });
+  const frames = [];
+  socket.on("message", data => { frames.push(JSON.parse(data.toString())); });
+  try {
+    await once(socket, "open");
+    let sequence = 0;
+    async function history(key, backgroundTaskId) {
+      const id = `task-history-${++sequence}`;
+      socket.send(JSON.stringify({ type: "req", id, method: "chat.history", params: {
+        sessionKey: key, page: true, limit: 50, cursor: null,
+        ...(backgroundTaskId ? { backgroundTaskId } : {}),
+      } }));
+      const response = () => frames.find(frame => frame.type === "res" && frame.id === id);
+      await waitUntil(response, "background chat page", 8_000);
+      return response();
+    }
+    const page = await history(sessionKey, tasks.pricing);
+    assert.equal(page.ok, true, JSON.stringify(page.error));
+    assert.match(page.payload.brief.text, /^比较产品 A、B、C 的定价/u);
+    assert.match(page.payload.messages[0].content[0].text, /^比较产品 A、B、C 的定价/u);
+    assert(!JSON.stringify(page.payload).includes("[Shoggoth background task]"));
+    const child = fixture.service.backgroundTaskStore.get(tasks.pricing).childSessionKey;
+    const childKey = sessionKey.replace(/:[0-9a-f-]{36}$/u, `:${child}`);
+    assert.equal((await history(childKey)).ok, false, "child stays off the ordinary session route");
+    assert.equal((await history(sessionKey, { toString: null })).error.code, "INVALID_PARAMS");
+    assert.equal((await history(sessionKey, `bgt-${"0".repeat(48)}`)).error.code, "BACKGROUND_TASK_NOT_FOUND");
+
+    const result = await history(sessionKey, tasks.research);
+    assert.equal(result.ok, true, JSON.stringify(result.error));
+    const viewKey = `background-task:${sessionKey}:${tasks.research}`;
+    const record = fixture.service.backgroundTaskStore.get(tasks.research);
+    const run = fixture.service.workRunCoordinator.getRun(record.generations[0].runId);
+    await waitUntil(() => frames.some(frame => frame.event === "chat" && frame.payload?.sessionKey === viewKey
+      && frame.payload?.nativeRunId === run.id), "scoped live observer attached", 8_000);
+    const host = fixture.transport.hosts.get("codex");
+    const tool = { kind: "commandExecution", input: "printf preview", status: "inProgress" };
+    const common = { known: true, threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
+      toolCallId: "background-trajectory", itemId: "background-trajectory" };
+    host.emit({ ...common, type: "tool_start", method: "item/started", tool });
+    await waitUntil(() => frames.some(frame => frame.event === "session.tool" && frame.payload?.sessionKey === viewKey
+      && frame.payload.data?.toolCallId === common.toolCallId && frame.payload.data?.phase === "start"), "live child tool", 8_000);
+    host.emit({ ...common, type: "tool_result", method: "item/completed", tool: {
+      ...tool, status: "completed", result: "fixture stdout",
+    } });
+    await waitUntil(() => frames.some(frame => frame.event === "session.tool" && frame.payload?.sessionKey === viewKey
+      && frame.payload.data?.toolCallId === common.toolCallId && frame.payload.data?.phase === "result"), "live child tool result", 8_000);
+    const refreshed = await history(sessionKey, tasks.research);
+    assert.equal(refreshed.ok, true);
+    assert(refreshed.payload.messages.some(message => message.content.some(part =>
+      part.type === "toolResult" && part.toolCallId === common.toolCallId)), "completed tool is in normal chat history");
+    assert(!frames.some(frame => frame.event === "session.tool" && frame.payload.sessionKey === sessionKey
+      && frame.payload.data?.toolCallId === common.toolCallId));
+    console.log("PASS background chat reuses scoped history and live tool events without entering the foreground");
+  } finally {
+    socket.terminate();
+  }
 }
 
 async function run() {
@@ -39,6 +101,8 @@ async function run() {
     assert.equal(detail.body.files[0].name, "pricing.csv");
     assert.equal(Object.hasOwn(detail.body.files[0], "path"), false, "local paths stay out of the UI");
     console.log("PASS background-tasks detail returns brief, reply and file links");
+
+    await verifyTaskChat(preview);
 
     const steered = await json(base, "POST", "/__api/background-tasks/control",
       { sessionKey, taskId: tasks.research, operationId: "smoke-send-1", action: "send", message: "每家附上来源。" });

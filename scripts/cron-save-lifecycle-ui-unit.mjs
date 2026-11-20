@@ -81,6 +81,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   const backendIds = backends.map(({ id }) => id);
   const state = { updates: [], creates: [], deletes: [], confirmations: [], refreshes: [], successes: [], errors: [], infos: [], gates: new Map(),
     allJobs: fixtureJobs, listRequests: [], runRequests: [], detailRequests: [], deliveryRequests: [],
+    delivery: { fullText: "Report" },
     pageRegistrations: [], dialogCloses: 0, dialogChanges: 0,
     details: new Map(fixtureJobs.map(job => [job.id, job])) };
   options.configure?.(state);
@@ -153,7 +154,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
         await state.gates.get(`detail:${id}`)?.promise;
         return state.details.get(id);
       },
-      getCronLatestDelivery: async (id, at) => { state.deliveryRequests.push({ id, at }); return { fullText: "Report" }; },
+      getCronLatestDelivery: async (id, at) => { state.deliveryRequests.push({ id, at }); return state.delivery; },
       getModelCatalog: async () => ({}),
       updateCronJob: async (id, input) => { state.updates.push({ id, input }); await state.gates.get(id)?.promise; },
       createCronJob: async input => { state.creates.push(input); await state.gates.get("new")?.promise; },
@@ -257,6 +258,8 @@ for (const command of [
   const report = () => f.renderer.root.findByType("report-modal");
   assert.equal(report().props.open, true, "a chat dialog checks fresh run state before choosing the result");
   assert.equal(report().props.title, nativeJob.name);
+  assert.equal(Object.hasOwn(report().props, "bodyLabel"), false);
+  assert.equal(report().findByProps({ className: "chat-md cron-delivery-md" }).props.dangerouslySetInnerHTML.__html, "Report");
   await act(async () => { report().props.onEdit(); await flush(); });
   assert.equal(f.renderer.root.findByType("native-form").props.draft.prompt, "Complete native task prompt");
   act(() => report().props.onOpenChangeComplete(false));
@@ -394,11 +397,15 @@ for (const [stored, expected] of [["rrule", "all"], ["on-exit", "all"], ["stream
   const past = Date.now() - 3600000;
   const job = { ...nativeJob, lastRunAt: past };
   const f = await fixture(undefined, [job]);
+  f.state.delivery = { summary: "Run summary", source: "summary" };
   act(() => f.renderer.root.findByProps({ ariaLabel: "cron.viewToggle" }).props.onChange("calendar"));
   const calendar = f.renderer.root.findByType("calendar");
   await act(async () => { await calendar.props.onJobClick(job, past); });
   const report = f.renderer.root.findByType("report-modal");
   assert.equal(report.props.open, true, "a past run still opens its report");
+  assert.equal(Object.hasOwn(report.props, "bodyLabel"), false);
+  assert.equal(report.findByProps({ className: "chat-md cron-delivery-md" }).props.dangerouslySetInnerHTML.__html, "Run summary");
+  assert.equal(report.findAllByType("report-note").length, 0, "a summary is displayed directly in the result card");
   assert.deepEqual(f.state.deliveryRequests, [{ id: job.id, at: past }]);
   assert.equal(f.formModal(), undefined);
   act(() => report.props.onClose());

@@ -23,6 +23,8 @@ import { listBackgroundTasks } from "../api/client";
 import type { BackgroundTask, BackgroundTaskReportMeta, BackgroundTaskStatus } from "../types";
 import BackgroundTaskCard from "./chat-background-task/BackgroundTaskCard";
 import BackgroundTaskModal from "./chat-background-task/BackgroundTaskModal";
+import type { BackgroundTaskConversationProps } from "./chat-background-task/BackgroundTaskModal";
+import { connectBackgroundChat, type BackgroundChatConnection, type BackgroundChatEvent } from "./chat-background-task/backgroundTaskChat";
 import { publishSystemIssue } from "../lib/system-issues";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
@@ -190,7 +192,7 @@ import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import "./ChatPage.css";
 import GroupChatPanel, { GroupChatAvatar } from "./GroupChatPanel";
 import { GroupMemberConnectionContext } from "./GroupMemberAvatar";
-import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconQuote, IconTrash, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
+import { ChatMessageContextMenu, ChatPinnedMessages, ChatTaskDetailsButton, IconCopy, IconPin, IconQuote, IconTrash, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
 import { createGroupPanelCache } from "../lib/groupPanelCache";
 import GroupChatCreateModal from "./GroupChatCreateModal";
 import { emitGroupConnection } from "../lib/groupSendJournal";
@@ -701,6 +703,13 @@ function activityOwnerOf(message: ChatMsg) {
 function renderActivityBubble(activity: ChatTurnActivity | undefined, openTimeline: (activity: ChatTurnActivity) => void) {
   if (!activity?.steps.length) return null;
   return <TurnTimeline steps={activity.steps} status={activity.live ? "running" : "done"} onOpenPreview={() => openTimeline(activity)} />;
+}
+
+// Absorbed timelines contain only the progress omitted from the thread.
+function visibleTimelineSteps(steps: TurnStep[], projected = false) {
+  return withoutPlanSteps(steps).filter(step =>
+    step.kind !== "user" && step.kind !== "final" && (step.kind !== "text" || projected && step.activity)
+    && (step.kind !== "thinking" || !!step.text?.trim()));
 }
 
 // ---- pure helpers -------------------------------------------------------
@@ -2505,6 +2514,794 @@ function slashIconBody(name: string) {
   }
 }
 
+function keyThreadGroups(groups: ReturnType<typeof keyedChatGroups<Group>>) {
+  return groups.map((group) => ({
+    ...group,
+    messages: keyedChatMessages(group.item.msgs).map((message) => ({
+      ...message,
+      images: message.item.images?.length ? keyedChatChildren(message.item, "image", message.item.images) : [],
+      files: message.item.files?.length ? keyedChatChildren(message.item, "file", message.item.files) : [],
+      parts: keyedChatChildren(message.item, "part", message.item.parts),
+    })),
+  }));
+}
+
+interface ChatThreadViewProps {
+  keyedThreadGroups: ReturnType<typeof keyThreadGroups>;
+  t: TFn;
+  standaloneActivityFor(message: ChatMsg): ChatTurnActivity | undefined;
+  footerActivityFor(group: Group, message: ChatMsg): ChatTurnActivity | undefined;
+  openTimelineModal(activity: ChatTurnActivity): void;
+  respondPrompt(entry: ChatPromptEntry, response: ChatPromptResponse): Promise<void>;
+  liveTurn?: { group: Group; pending: ChatMsg; activity?: ChatTurnActivity };
+  liveBubble?: { preview: ReactNode; onOpen?: () => void };
+  runWait?: ChatRunWaitState;
+  agentName?: string;
+  groupRefs?: { current: Map<string, HTMLDivElement> };
+  openMenu?: (event: ReactMouseEvent, group: Group, text?: string, attachment?: MessageAttachment) => void;
+  searchTargetGroupKey?: string | null;
+  setLightbox?: (value: { src: string; kind: "image" | "video" }) => void;
+  revealAttachmentFile?: (file: ChatFile) => Promise<void>;
+  activeBackend?: string;
+  activeKey?: string | null;
+  activeBackendDescriptor?: { surfaces: { agentHarness?: boolean } };
+  activeLegacyHtmlPolicy?: Parameters<typeof ChatMarkdown>[0]["htmlArtifactPolicy"];
+  immersive?: boolean;
+  latestNativeUiSourceEventId?: string;
+  send?: (method: string, params: unknown) => Promise<unknown>;
+  sendCanvasWidgetPrompt?: (ownerSessionKey: string, text: string) => void;
+  canPinActiveCanvas?: boolean;
+  pinnedSessionBoardWidgets?: Set<string>;
+  sessionBoardMutating?: boolean;
+  pinCanvasWidget?: (spec: { name: string; docId: string }) => void;
+  jumpToQuoted?: (snippet: string) => void;
+  latestUserMessageKey?: string;
+  latestAssistantMessageKeys?: Set<string>;
+  imageContext?: { backendId: string; sessionKey: string };
+  renderGroupContinuation?: (message: ChatMsg) => ReactNode;
+  renderBackgroundTasks?: (message: ChatMsg) => ReactNode;
+  openTaskDetails?: (taskId: string) => void;
+  sending?: boolean;
+  retryErrorGroup?: (group: Group) => void;
+  copyText?: (text: string, media: MessageAttachment[]) => void;
+  quoteGroup?: (group: Group, msgIndex?: number, partIndex?: number) => void;
+  pinnedIds?: Set<string>;
+  pinGroup?: (group: Group) => void;
+  deleteGroup?: (group: Group) => void;
+}
+
+function ChatThreadView({
+  keyedThreadGroups, t, standaloneActivityFor, footerActivityFor, openTimelineModal, respondPrompt, liveTurn, liveBubble,
+  runWait, agentName, groupRefs, openMenu, searchTargetGroupKey, setLightbox, revealAttachmentFile,
+  activeBackend = "shoggoth", activeKey, activeBackendDescriptor, activeLegacyHtmlPolicy, immersive, latestNativeUiSourceEventId,
+  send, sendCanvasWidgetPrompt, canPinActiveCanvas, pinnedSessionBoardWidgets, sessionBoardMutating, pinCanvasWidget,
+  jumpToQuoted, latestUserMessageKey, latestAssistantMessageKeys, imageContext, renderGroupContinuation,
+  renderBackgroundTasks, openTaskDetails, sending, retryErrorGroup, copyText, quoteGroup, pinnedIds, pinGroup, deleteGroup,
+}: ChatThreadViewProps) {
+  const livePending = liveTurn?.pending;
+  return keyedThreadGroups.map(({ item: g, key: groupRenderKey, messages: keyedMessages }) => {
+    if (g.msgs.length === 1 && g.msgs[0].divider) {
+      const d = g.msgs[0].divider;
+      const when = d.sealedAt ? absTime(d.sealedAt) : "";
+      return (
+        <div key={groupRenderKey} className="chat-reset-divider">
+          <span className="chat-reset-divider__label">
+            {d.fromReset ? t("chat.archiveResetAt", { time: when }) : t("chat.archiveEarlierAt", { time: when })}
+            {d.truncated ? ` · ${t("chat.archiveTruncated")}` : ""}
+          </span>
+        </div>
+      );
+    }
+    // Backend timeline notice — a quiet divider line, same
+    // shape as the archive divider. The backend's raw marker text (the
+    // string the MODEL sees) stays on the hover title only.
+    if (g.msgs.length === 1 && g.msgs[0].notice) {
+      const n = g.msgs[0];
+      return (
+        <div key={groupRenderKey} className="chat-reset-divider">
+          <span className="chat-reset-divider__label" title={n.parts.find((p) => p.text)?.text || undefined}>
+            {t(n.notice === "contextCompacted" ? "chat.compactedCtx"
+              : n.notice === "runInterrupted" ? "chat.runInterruptedNotice"
+              : n.notice === "processComplete" ? "chat.processCompleteNotice" : "chat.modelSwitchedNotice")}
+            {n.notice === "modelSwitch" && n.model ? ` · ${n.model}` : ""}
+          </span>
+        </div>
+      );
+    }
+    const last = g.msgs[g.msgs.length - 1];
+    const reportTaskId = last.backgroundReport?.taskId;
+    const cls = g.role === "user" ? "is-user" : g.role === "toolResult" ? "is-tool" : "is-assistant";
+    // A saved pin can belong to any message after groups merge.
+    const pinIds = g.msgs.map((m) => m.actionId).filter((id): id is string => !!id);
+    const metadata = [...g.msgs].reverse().find(message => message.responseMetadata)?.responseMetadata;
+    // Skip empty groups after folding their activity into a reply's footer.
+    const isMsgVisible = (m: ChatMsg) =>
+      m.pending ||
+      (m.images?.length ?? 0) > 0 ||
+      (m.files?.length ?? 0) > 0 ||
+      m.parts.some((p) =>
+        p.type === "canvas" || p.type === "ui_artifact"
+          ? true
+          : p.type === "prompt"
+          ? !!p.promptEntry
+          : p.type === "toolCall" || p.type === "toolResult"
+            ? true
+            : p.type === "timeline"
+              ? !!standaloneActivityFor(m)
+              : !!p.text?.trim(),
+      );
+    if (!g.msgs.some(isMsgVisible)) return null;
+    // Footer 时间 = 组内最后一条可见消息的时间（不是组首 g.ts）：footer 渲染在组尾，
+    // 必须与用户看到的末条内容、以及列表/头部 badge 的 updatedAt 对齐。组首兜底仅在
+    // 全组消息都无 ts 时生效。
+    const footerTs = [...g.msgs].reverse().find((m) => isMsgVisible(m) && m.ts)?.ts ?? g.ts;
+    const liveMessage = g.msgs.find((message) => message.pending);
+    const liveActivity = liveMessage && liveMessage === liveTurn?.pending ? liveTurn.activity : undefined;
+    const waitingForPrompt = liveMessage?.parts.some(part => part.type === "prompt" && part.promptEntry
+      && chatPromptAttentionOf([part.promptEntry]));
+    const footerMedia = last.pending ? [] : g.msgs.flatMap(messageMedia);
+    const hasText = !last.pending && g.msgs.some(m => m.parts.some(p => p.text?.trim()));
+    const quoteTarget = hasText ? lastQuoteableBubble(g) : undefined;
+    const footerActivity = footerTs && hasText ? footerActivityFor(g, last) : undefined;
+    return (
+      <div
+        key={groupRenderKey}
+        ref={(el) => {
+          // 渲染 key 恒有 → 无 id 组（cron 投递等）也能被引用跳转锚定（R155）。
+          // 同时注册各条消息的操作 ID，让已有置顶在组归并后仍能定位。
+          if (!groupRefs) return;
+          if (el) {
+            groupRefs.current.set(groupRenderKey, el);
+            pinIds.forEach((id) => groupRefs.current.set(id, el));
+          } else {
+            groupRefs.current.delete(groupRenderKey);
+            pinIds.forEach((id) => groupRefs.current.delete(id));
+          }
+        }}
+        onContextMenu={(e) => openMenu?.(e, g)}
+      >
+        <div className={`chat-group ${cls}${searchTargetGroupKey === groupRenderKey ? " is-search-target" : ""}`}>
+          <div className="chat-group__stack">
+            {/* display:contents 包装不产生盒子（stack 的 flex/gap 不受影响），
+                只为右键菜单提供 data-mi 落点定位（R154 按气泡引用） */}
+            {keyedMessages.map(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => (
+              <div key={messageRenderKey} data-mi={mi} data-message-key={messageRenderKey} data-chat-message-id={m.actionId} style={{ display: "contents" }}>
+                {m.images?.length ? (
+                  <div className="chat-att-row">
+                    {keyedImages.map(({ item: src, key: imageRenderKey }, imageIndex) => (
+                      <img
+                        key={imageRenderKey}
+                        className="chat-att-thumb"
+                        src={src}
+                        alt=""
+                        onContextMenu={e => openMenu?.(e, g, undefined, messageImage(m, src, imageIndex))}
+                        onClick={() => setLightbox?.({ src, kind: "image" })}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {m.files?.length ? (
+                  <div className="chat-att-row">
+                    {keyedFiles.map(({ item: f, key: fileRenderKey }) =>
+                      // 视频（带 src）= 可播放的预览窗，点击进 lightbox；
+                      // 其余（含大到没缓存 src 的视频）= 文件 chip。
+                      f.kind === "video" && f.src ? (
+                        <span
+                          key={fileRenderKey}
+                          className="chat-att-videowrap"
+                          title={attachmentChipTitle(f)}
+                          onContextMenu={e => openMenu?.(e, g, undefined, messageFile(m, f))}
+                          onClick={() => setLightbox?.({ src: f.src as string, kind: "video" })}
+                        >
+                          <video
+                            className="chat-att-thumb chat-att-video"
+                            src={f.src}
+                            preload="metadata"
+                            muted
+                            playsInline
+                          />
+                          <span className="chat-att-play">▶</span>
+                        </span>
+                      ) : (
+                        <ChatFileButton key={fileRenderKey} name={f.name}
+                          title={`${t("chat.artifactsRevealInFolder")} · ${attachmentChipTitle(f)}`}
+                          onContextMenu={e => openMenu?.(e, g, undefined, messageFile(m, f))}
+                          onClick={() => void revealAttachmentFile?.(f)} />
+                      ),
+                    )}
+                  </div>
+                ) : null}
+                {m.role === "user" && m.connectorSelection?.length ? (
+                  <div className="chat-plugin-selection-badge" title={t("chat.connectorChosenHint")}>
+                    {t("chat.connectorChosen")} · {m.connectorSelectionSnapshot?.length
+                      ? m.connectorSelectionSnapshot.map(item => `${item.service} · ${item.label}`).join("、")
+                      : m.connectorSelection.length}
+                  </div>
+                ) : null}
+                {m.role === "user" && m.legacyPluginSelection?.length ? (
+                  <div className="chat-plugin-selection-badge" title={t("chat.legacyPluginChosenHint")}>
+                    {t("chat.legacyPluginChosen")}
+                  </div>
+                ) : null}
+                {m === liveMessage && runWait
+                  && runWait.kind === "retrying" && (
+                  <div className="chat-bubble is-error" data-testid="chat-retry-status">
+                    <ChatRunWait state={runWait} />
+                  </div>
+                )}
+                {keyedParts.map(({ item: p, key: k }, pi) => {
+                if (p.type === "timeline") {
+                  const preview = pi === m.parts.findIndex(part => part.type === "timeline")
+                    ? renderActivityBubble(standaloneActivityFor(m), openTimelineModal) : null;
+                  return preview ? <div key={k} className="chat-bubble is-activity-loading">{preview}</div> : null;
+                }
+                if (p.type === "ui_artifact" && p.uiArtifact) {
+                  return <ChatUiArtifact key={k} part={p.uiArtifact} backend={activeBackend}
+                  agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible={!immersive} autoActivate={p.uiArtifact.sourceEventId === latestNativeUiSourceEventId} onCancel={send && (runId => send("chat.abort", { sessionKey: activeKey, runId }))} />;
+                }
+                if (p.type === "canvas") {
+                  if (!sendCanvasWidgetPrompt) return null;
+                  return (
+                    <ChatWidget
+                      key={`${activeKey ?? ""}:${k}`}
+                      part={p.preview ? p as ChatCanvasWidgetPart : null}
+                      backendId={activeBackend}
+                      sessionKey={activeKey ?? ""}
+                      onSendPrompt={sendCanvasWidgetPrompt}
+                      canPin={canPinActiveCanvas}
+                      pinned={p.preview?.boardWidgetName
+                        ? pinnedSessionBoardWidgets?.has(p.preview.boardWidgetName)
+                        : false}
+                      pinning={sessionBoardMutating}
+                      onPinCanvas={pinCanvasWidget}
+                    />
+                  );
+                }
+                // Live thought/tool activity stays in the timeline; plans use the composer dock.
+                if (m === liveMessage && liveActivity && (p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult")) return null;
+                if (p.type === "prompt") {
+                  if (!p.promptEntry) return null;
+                  return <ChatPromptCard key={k} entry={p.promptEntry} onRespond={respondPrompt}
+                    agentName={agentName} />;
+                }
+                if (p.type === "thinking") {
+                  if (!p.text?.trim()) return null;
+                  return (
+                    <div key={k} className="chat-thinking">
+                      <span className="chat-thinking__ico"><IconBulb /></span>
+                      <ChatMarkdown
+                        className="chat-thinking__body chat-md"
+                        text={formatReasoningMarkdown(p.text)}
+                      />
+                    </div>
+                  );
+                }
+                if (p.type === "toolCall") {
+                  const title = toolActivityTitle(p.toolName, p.toolArgs, t);
+                  // …and make the card expandable to reveal the raw input args
+                  // (OpenClaw's "TOOL INPUT" panel), like the output cards.
+                  const argsBody =
+                    p.toolArgs && typeof p.toolArgs === "object" && Object.keys(p.toolArgs).length
+                      ? JSON.stringify(p.toolArgs, null, 2)
+                      : undefined;
+                  return (
+                    <Card
+                      key={k}
+                      icon={<IconWrench />}
+                      name={title}
+                      body={argsBody}
+                      diff={p.diff}
+                      diffText={p.diffText}
+                    />
+                  );
+                }
+                if (p.type === "toolResult") {
+                  // Per-part error flag (set by normalize/live), NOT the message's —
+                  // a failed tool renders the red "Tool error <name>" card, matching
+                  // OpenClaw; a success renders "Tool output <name>".
+                  const err = toolResultFailed(p.text, p.isError ?? (m.isError ? true : undefined));
+                  const action = toolActivityTitle(p.toolName, p.toolArgs, t);
+                  const name = err
+                    ? p.toolName
+                      ? t("chat.toolErrorNamed", { tool: action })
+                      : t("chat.toolError")
+                    : p.toolName
+                      ? t("chat.toolOutputNamed", { tool: action })
+                      : t("chat.toolOutput");
+                  return (
+                    <Card
+                      key={k}
+                      icon={<IconWrench />}
+                      name={name}
+                      status={err ? t("common.error") : p.durationS != null ? `${p.durationS >= 10 ? Math.round(p.durationS) : p.durationS.toFixed(1)}s` : undefined}
+                      body={p.text}
+                      summary={formatToolResultSummary(p.text)}
+                      diff={p.diff}
+                      diffText={p.diffText}
+                      isError={err}
+                    />
+                  );
+                }
+                // local (client-generated) slash-command result → neutral markdown info bubble
+                if (m.local) {
+                  if (!p.text?.trim()) return null;
+                  return (
+                    <ChatMarkdown
+                      key={k}
+                      className="chat-bubble chat-md is-local"
+                      data-qp={pi}
+                      text={p.text}
+                    />
+                  );
+                }
+                // text part: settled text renders as markdown; while streaming we now
+                // also render markdown (so code blocks/lists/bold take shape live), with
+                // the cursor trailing the rendered HTML.
+                if (m.pending) {
+                  const isLoading = !p.text?.trim() && pi === m.parts.length - 1;
+                  if (!p.text?.trim() && (!isLoading || waitingForPrompt || (m === livePending && liveBubble))) return null;
+                  return (
+                    <div key={k} className="chat-bubble is-streaming" data-qp={pi}>
+                      {p.text?.trim() ? (
+                        <ChatMarkdown
+                          className="chat-md"
+                          text={p.text}
+                          htmlArtifactPolicy={m.role === "assistant" ? activeLegacyHtmlPolicy : "source"}
+                          streamingCursor={!waitingForPrompt && pi === m.parts.length - 1}
+                        />
+                      ) : null}
+                      {isLoading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
+                    </div>
+                  );
+                }
+                if (m.role === "system" || m.stopReason === "error" || m.isError) {
+                  // Known gateway error strings are rewritten via i18n at render
+                  // time (so they follow language switches); raw English stays on
+                  // the hover title for triage. Unknown strings pass through as-is.
+                  const rawErr = p.text ?? "";
+                  const translated = rawErr ? translateGatewayError(rawErr, t) : "";
+                  const shownErr = m.errPrefix ? t(m.errPrefix, { msg: translated || t("chat.unknown") }) : translated;
+                  return (
+                    <div key={k} className="chat-bubble is-error" data-qp={pi} data-selectable-text title={translated !== rawErr && rawErr ? rawErr : undefined}>
+                      {shownErr}
+                      {pi === m.parts.length - 1 && (m.repeat ?? 1) > 1 ? (
+                        <span
+                          className="chat-bubble__repeat"
+                          title={t("chat.repeatedErrors", { count: m.repeat })}
+                        >
+                          ×{m.repeat}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                }
+                if (!p.text?.trim()) return null;
+                // System-injected automation prompt (cron/heartbeat envelope) →
+                // compact expandable row instead of a giant user bubble (黄墙).
+                if (m.role === "user" && isInjectedPrompt(m)) {
+                  return <InjectedRow key={k} text={p.text} />;
+                }
+                // A sent user message that carries a quote → collapse each leading
+                // blockquote to one clickable line (jump to the quoted message) and
+                // render the body normally, instead of a full markdown blockquote.
+                const qr = m.role === "user" ? parseQuoteFromText(p.text) : null;
+                if (qr) {
+                  return (
+                    <Fragment key={k}>
+                      {keyedChatChildren(m, "quote", qr.quotes).map(({ item: q, key: quoteRenderKey }) => (
+                        <button
+                          key={quoteRenderKey}
+                          type="button"
+                          className="chat-quote-ref"
+                          // 悬停展示引用文本核对（R152 全文引用可达 2 万字，显示层限长——
+                          // 行 300 / tooltip 600，payload 不受影响），再附跳转提示
+                          title={`${q.length > 600 ? `${q.slice(0, 600)}…` : q}\n\n${t("chat.jumpToQuoted")}`}
+                          onClick={() => jumpToQuoted?.(q)}
+                        >
+                          <IconQuote className="chat-quote-icon" />
+                          <span className="chat-quote-ref__text">{q.length > 300 ? `${q.slice(0, 300)}…` : q}</span>
+                        </button>
+                      ))}
+                      {qr.body.trim() ? (
+                        <ChatMarkdown
+                          className={`chat-bubble chat-md${messageRenderKey === latestUserMessageKey ? " is-latest-send" : ""}`}
+                          data-qp={pi}
+                          text={qr.body}
+                        />
+                      ) : null}
+                    </Fragment>
+                  );
+                }
+                // Agent replies may carry OpenClaw `MEDIA:<path/url>` directive
+                // lines (its way of attaching images); the gateway returns them as
+                // raw text, so pull them out and render the images ourselves (local
+                // paths via /__media, URLs directly). See lib/agentMedia.ts.
+                const media =
+                  m.role === "assistant"
+                    ? extractAgentMedia(p.text, imageContext)
+                    : { text: p.text, srcs: [] as string[] };
+                return (
+                  <Fragment key={k}>
+                    {media.srcs.length ? (
+                      <div className="chat-att-row">
+                        {keyedChatChildren(m, "media", media.srcs).map(({ item: src, key: mediaRenderKey }) => (
+                          <img
+                        key={mediaRenderKey}
+                        className="chat-att-thumb"
+                        src={src}
+                        alt=""
+                        onClick={() => setLightbox?.({ src, kind: "image" })}
+                      />
+                        ))}
+                      </div>
+                    ) : null}
+                    {media.text.trim() ? (
+                      <ChatMarkdown
+                        className={`chat-bubble chat-md${messageRenderKey === latestUserMessageKey ? " is-latest-send" : ""}${latestAssistantMessageKeys?.has(messageRenderKey) ? " is-latest-reply" : ""}${m.keepLiveLayout ? " is-streamed-reply" : ""}`}
+                        data-qp={pi} /* R154：右键引用按这条气泡取文 */
+                        text={media.text}
+                        htmlArtifactPolicy={m.role === "assistant" ? activeLegacyHtmlPolicy : "source"}
+                      />
+                    ) : null}
+                    {activeBackendDescriptor?.surfaces.agentHarness === true && pi === m.parts.map(part => part.type).lastIndexOf("text")
+                      ? nativeUiLegacySources(m).map(({ text, sourceEventId }) => <LegacyChatUi key={`legacy:${sourceEventId}`} text={text}
+                        sourceEventId={sourceEventId} backend={activeBackend} agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible={!immersive} />) : null}
+                  </Fragment>
+                );
+                })}
+                {renderGroupContinuation?.(m)}
+                {renderBackgroundTasks?.(m)}
+              </div>
+            ))}
+            {g === liveTurn?.group && liveBubble && <ChatLiveActivityBubble className="chat-bubble" {...liveBubble} />}
+          </div>
+          {g.role !== "toolResult" && (
+          <div className="chat-group__footer">
+            {footerTs ? (
+              <>
+                <span className="dot">·</span>
+                <span>{absTime(footerTs)}</span>
+              </>
+            ) : null}
+            <ChatResponseMetadata metadata={metadata} fallbackModel={last.model} />
+            {!last.pending && last.automation !== "cron" && isErrorTurn(last) && retryErrorGroup && (
+              <button
+                type="button"
+                className="chat-copybtn chat-retrybtn"
+                title={t("chat.retry")}
+                disabled={sending}
+                onClick={() => retryErrorGroup(g)}
+              >
+                <IconRetry />
+              </button>
+            )}
+            {(!last.proactiveNoticeId && !last.backgroundReport && footerActivity && !footerActivity.live) && (
+              <button type="button" className="chat-copybtn" data-chat-footer-icon="" aria-haspopup="dialog"
+                aria-label={t("turnLab.processOpen")} title={t("turnLab.processOpen")}
+                onClick={() => footerActivity && openTimelineModal(footerActivity)}>
+                <IconTrajectory />
+              </button>
+            )}
+            {reportTaskId && openTaskDetails && <ChatTaskDetailsButton className="chat-copybtn" onOpen={() => openTaskDetails(reportTaskId)} />}
+            {copyText && (hasText || footerMedia.length > 0) && (
+              <button
+                type="button"
+                className="chat-copybtn"
+                data-chat-footer-icon=""
+                title={t(footerMedia.length ? "chat.copy" : "chat.copyAsMarkdown")}
+                onClick={() => copyText(groupCopyText(g), footerMedia)}
+              >
+                <IconCopy />
+              </button>
+            )}
+            {quoteGroup && (quoteTarget || footerMedia.length > 0) && (
+              <button type="button" className="chat-copybtn" data-chat-footer-icon=""
+                aria-label={t("chat.quote")} title={t("chat.quote")} onClick={() => quoteGroup(g, quoteTarget?.[0], quoteTarget?.[1])}>
+                <IconQuote />
+              </button>
+            )}
+            {(MESSAGE_PINNING_ENABLED || MESSAGE_DELETION_ENABLED) && !last.pending && pinIds.length > 0 && (
+              <>
+                {MESSAGE_PINNING_ENABLED && pinGroup && <button
+                  type="button"
+                  className={g.msgs.some((m) => m.actionId && pinnedIds?.has(m.actionId)) ? "chat-copybtn is-pinned" : "chat-copybtn"}
+                  title={g.msgs.some((m) => m.actionId && pinnedIds?.has(m.actionId)) ? t("chat.unpin") : t("chat.pin")}
+                  onClick={() => pinGroup(g)}
+                >
+                  <IconPin />
+                </button>}
+                {MESSAGE_DELETION_ENABLED && deleteGroup && <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} onClick={() => deleteGroup(g)}>
+                  <IconTrash />
+                </button>}
+              </>
+            )}
+          </div>
+          )}
+        </div>
+      </div>
+    );
+  });
+}
+
+function ChatProcessDialog({ open, steps, status, timing, notice, pluginConversation, onClose }: {
+  open: boolean;
+  steps: TurnStep[];
+  status: TurnTimelineState["status"];
+  timing?: TurnTiming;
+  notice?: ReactNode;
+  pluginConversation?: Parameters<typeof TurnTimeline>[0]["pluginConversation"];
+  onClose(): void;
+}) {
+  const { t } = useTranslation();
+  const stats = open ? getTurnProcessStats(steps) : null;
+  return <Modal open={open} title={t("turnLab.processLabel")} variant="activity" width={640} onClose={onClose}
+    subtitle={stats && <TurnProcessSummary stats={stats} timing={timing} live={status === "running"} />}>
+    {notice || (open && <TurnTimeline steps={steps} status={status} showDurations={stats?.showDurations}
+      autoFollow={status === "running"} detail pluginConversation={pluginConversation} />)}
+  </Modal>;
+}
+
+type BackgroundChatRun = {
+  id?: string;
+  active: boolean | null;
+  timeline: TurnTimelineState;
+  text: string;
+  finalReply?: boolean;
+  recent: ChatMsg[];
+  wait?: ChatRunWaitState;
+  plan?: PlanEntry[];
+};
+
+const emptyBackgroundRun = (id?: string): BackgroundChatRun => ({
+  id, active: null, timeline: createTimeline(), text: "", recent: [],
+});
+
+function updateBackgroundRun(previous: BackgroundChatRun, { event, payload }: BackgroundChatEvent) {
+  const id = typeof payload.nativeRunId === "string" ? payload.nativeRunId : previous.id;
+  const state = id !== previous.id ? emptyBackgroundRun(id) : previous;
+  let live = { ...state };
+  const kind = typeof payload.state === "string" ? payload.state : "";
+  const message = payload.message as { content?: unknown } | undefined;
+  const text = contentToText(message?.content) || contentToText(message);
+  let step: TurnEvent | undefined;
+  if (event === "session.tool") {
+    const tool = payload.data as { toolCallId?: string; id?: string; name?: string; phase?: string; args?: unknown; result?: unknown;
+      partialResult?: unknown; isError?: boolean; durationS?: number; diff?: ToolEntry["diff"]; diffText?: string; pluginAppCallId?: unknown } | undefined;
+    const toolCallId = tool?.toolCallId || tool?.id;
+    if (!tool || !toolCallId) return state;
+    step = { ...tool, kind: "tool", toolCallId, phase: tool.phase === "result" ? "result" : tool.phase === "update" ? "update" : "start",
+      pluginAppCallId: validPluginAppCallId(tool.pluginAppCallId) };
+    live.active = true;
+  } else if (kind === "status") {
+    const status = String(payload.statusKind ?? "");
+    if (status === "idle") live.active = false;
+    else if (["queued", "starting", "running", "waiting_approval", "waiting_input", "retrying"].includes(status)) live.active = true;
+    step = { kind: "status", status: { kind: status } };
+  } else if (kind === "thinking" && typeof payload.thinking === "string") {
+    live.active = true;
+    step = { kind: "thinking", text: payload.thinking };
+  } else if (kind === "plan" && Array.isArray(payload.plan)) {
+    const entries = planEntriesFromBlock({ planEntries: payload.plan });
+    live.active = true;
+    live.plan = entries;
+    step = { kind: "plan", entries };
+  } else if (kind === "delta") {
+    live.active = true;
+    live.finalReply = payload.replyPhase === "final_answer" ? true : payload.replyPhase === "commentary" ? false : live.finalReply;
+    live.text = mergeLiveText(live.text, text);
+    step = { kind: "delta", text };
+  } else if (kind === "interim" && message) {
+    const canonical = normalize(message);
+    const progress = canonical.parts.find(part => part.type === "text" && part.activity);
+    live.active = true;
+    live.text = "";
+    live.finalReply = undefined;
+    if (!state.recent.some(item => item.nativeRunId === id && msgText(item) === text)) {
+      live.recent = [...state.recent.slice(-49), { ...canonical, nativeRunId: canonical.nativeRunId ?? id }];
+    }
+    step = { kind: "interim", text, activity: progress?.activity, activityId: progress?.segmentId };
+  } else if (kind === "final" || kind === "aborted" || kind === "error") {
+    live.active = false;
+    const finalText = text || (kind === "error" && typeof payload.errorMessage === "string" ? payload.errorMessage : "");
+    if (finalText) live.recent = [...state.recent, {
+      ...normalize(message ?? { role: kind === "error" ? "system" : "assistant", content: finalText, timestamp: Date.now() }),
+      nativeRunId: id,
+    }];
+    live.text = "";
+    step = kind === "error" ? { kind: "error", message: finalText }
+      : kind === "aborted" ? { kind: "aborted" } : { kind: "final", text: finalText };
+  } else if (kind === "prompt") {
+    live.active = true;
+    const prompt = payload.prompt as Extract<TurnEvent, { kind: "prompt" }>["prompt"] | undefined;
+    if (typeof prompt?.kind === "string") step = { kind: "prompt", prompt };
+  } else if (kind === "promptExpire" && typeof payload.requestId === "string") {
+    step = { kind: "promptExpire", requestId: payload.requestId };
+  }
+  if (step) live.timeline = reduceTimeline(live.timeline, step, Date.now());
+  const hasOutput = !!live.text || live.timeline.steps.length > 0;
+  live.wait = updateChatRunWait(live.wait, { ...payload, state: kind }, hasOutput);
+  return live;
+}
+
+/** This view uses the same chat renderer and turn projection without changing the foreground selection. */
+export function BackgroundTaskConversation({ sessionKey, taskId, detail, briefId, setBrief, refreshKey, scrollRef, agentName,
+  respond, quote, connect = connectBackgroundChat }: BackgroundTaskConversationProps) {
+  const { t } = useTranslation();
+  const [history, setHistory] = useState<unknown[] | null>(null);
+  const [historyError, setHistoryError] = useState(false);
+  const [earlier, setEarlier] = useState(false);
+  const [run, setRun] = useState(() => emptyBackgroundRun());
+  const [process, setProcess] = useState<ChatTurnActivity | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; kind: "image" | "video" } | null>(null);
+  const [planExpanded, setPlanExpanded] = useState(false);
+  const [dismissedPlan, setDismissedPlan] = useState<string | null>(null);
+  const connectionRef = useRef<BackgroundChatConnection | null>(null);
+  const ready = useRef(false);
+  const scrollFollow = useRef(true);
+  const positioned = useRef(false);
+  const preserveTop = useRef<number | null>(null);
+  const scope = `${sessionKey}:${taskId}`;
+  const pager = useMemo(() => createChatHistoryPager<unknown>({
+    request: async (_key, cursor) => {
+      const connection = connectionRef.current;
+      if (!connection) throw new Error("Background chat disconnected");
+      const page = await connection.history(cursor);
+      if (cursor === null && connectionRef.current === connection && page.brief !== undefined) setBrief(page.brief);
+      return page;
+    },
+    window: chatHistoryWindow,
+    id: rawHistoryId,
+  }), [setBrief]);
+
+  const load = useCallback(async (older = false) => {
+    const connection = connectionRef.current;
+    if (!connection || !ready.current) return;
+    if (older) setEarlier(true);
+    try {
+      const rows = await (older ? pager.earlier(scope) : pager.refresh(scope));
+      if (connectionRef.current !== connection) { pager.release(rows); return; }
+      if (older && scrollRef.current) preserveTop.current = scrollRef.current.scrollHeight;
+      if (pager.commit(rows)) {
+        setHistory(rows);
+        setHistoryError(false);
+      }
+    } catch {
+      if (connectionRef.current === connection) setHistoryError(true);
+    } finally {
+      if (older && connectionRef.current === connection) setEarlier(false);
+    }
+  }, [pager, scope, scrollRef]);
+
+  useEffect(() => {
+    pager.reset(scope);
+    const connection = connect({ sessionKey, taskId }, {
+      ready: () => { ready.current = true; setRun(emptyBackgroundRun()); void load(); },
+      event: frame => {
+        setRun(previous => updateBackgroundRun(previous, frame));
+        if (frame.event === "chat" && ["final", "aborted", "error"].includes(String(frame.payload.state))) void load();
+      },
+      disconnected: () => { ready.current = false; setHistoryError(true); },
+    });
+    connectionRef.current = connection;
+    return () => { ready.current = false; connectionRef.current = null; connection.close(); pager.reset(""); };
+  }, [connect, load, pager, scope, sessionKey, taskId]);
+  useEffect(() => { void load(); }, [refreshKey, load]);
+
+  const interaction = detail.interaction?.payload;
+  const fallbackMessages = history === null ? detail.messages : undefined;
+  const prompt = useMemo(() => interaction ? { ...interaction, id: interaction.requestId } : null, [interaction]);
+  const messages = useMemo(() => {
+    const raw = history ?? fallbackMessages?.map(item => ({
+      id: item.id, role: item.role, timestamp: item.at,
+      content: [{ type: "text", text: item.text, activity: item.activity, segmentId: item.id }],
+      shoggoth: { nativeUiVersion: 1, runId: item.runId, sourceEventId: item.id },
+    })) ?? [];
+    const saved = groupNativeUiHistory(raw).map(normalize);
+    const savedText = new Set(saved.filter(item => item.role !== "user").map(item => `${item.nativeRunId ?? ""}:\0${msgText(item)}`));
+    const recent = run.recent.filter(item => !savedText.has(`${item.nativeRunId ?? ""}:\0${msgText(item)}`));
+    // Give the original instruction to the normal turn reducer, then keep its
+    // one presentation in the task brief above this conversation.
+    const sequence = [...saved, ...recent];
+    const active = run.active ?? ["starting", "queued", "running", "stopping", "waiting_input", "waiting_approval"].includes(detail.task.status);
+    if (active || prompt) {
+      sequence.push({ role: "assistant", nativeRunId: run.id ?? detail.interaction?.runId ?? saved.at(-1)?.nativeRunId,
+        pending: true, finalReplyStreaming: run.finalReply, parts: composePendingParts([], run.text, "", [], prompt ? [prompt] : []) });
+    }
+    return { sequence, active };
+  }, [fallbackMessages, detail.task.status, detail.interaction?.runId, history, prompt, run.active, run.finalReply, run.id, run.recent, run.text]);
+
+  const projection = useMemo(() => {
+    const pending = messages.sequence.at(-1)?.pending ? messages.sequence.at(-1) : undefined;
+    const timing = { startedAt: detail.task.startedAt ?? detail.task.createdAt, finishedAt: detail.task.finishedAt ?? undefined };
+    const timeline = run.id && pending ? { ...run.timeline, nativeRunId: run.id, timing } : undefined;
+    const normalized = absorbTurnTimelines(chatMessagesWithoutPlans(messages.sequence), undefined, timeline)
+      .filter(message => !briefId || message.canonicalSourceEventId !== briefId && message.id !== briefId);
+    const groups = groupMessages(normalized);
+    const tail = groups.at(-1);
+    const pendingGroup = tail?.msgs.some(message => message.pending) ? tail : undefined;
+    const livePending = pendingGroup?.msgs.find(message => message.pending);
+    const owners = new Map<ReturnType<typeof activityOwnerOf>, ChatTurnActivity>();
+    const footerGroups = new Map<ReturnType<typeof activityOwnerOf>, Group>();
+    for (const group of groups) for (const message of group.msgs) {
+      const owner = activityOwnerOf(message);
+      const part = message.parts.find(part => part.type === "timeline" && part.steps?.length);
+      if (part?.steps) owners.set(owner, { steps: visibleTimelineSteps(part.steps, true), runId: message.nativeRunId, timing: part.turnTiming,
+        live: part.liveTimeline });
+      if (!message.pending && group.role !== "user" && message.parts.some(part => part.type === "text" && !part.activity && part.text?.trim()))
+        footerGroups.set(owner, group);
+    }
+    const runId = livePending?.nativeRunId;
+    const maintenanceWait = run.wait?.kind === "queued" || run.wait?.stage === "reconnecting"
+      ? chatRunWaitActivity(run.wait) : undefined;
+    const activity = livePending && !livePending.finalReplyStreaming ? {
+      steps: withStartupWait(owners.get(activityOwnerOf(livePending))?.steps
+        ?? visibleTimelineSteps(run.timeline.steps, true), maintenanceWait), runId, live: true, timing,
+    } : undefined;
+    return { keyed: keyThreadGroups(keyedChatGroups(groups)), liveTurn: pendingGroup && livePending ? { group: pendingGroup, pending: livePending, activity } : undefined,
+      owners, footerGroups, activity };
+  }, [briefId, detail.task.createdAt, detail.task.finishedAt, detail.task.startedAt, messages.sequence, run.id, run.timeline, run.wait]);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const onScroll = () => { scrollFollow.current = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 48; };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => scroller.removeEventListener("scroll", onScroll);
+  }, [scrollRef]);
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    if (preserveTop.current !== null) {
+      scroller.scrollTop += scroller.scrollHeight - preserveTop.current;
+      preserveTop.current = null;
+    } else if (positioned.current && scrollFollow.current) scroller.scrollTop = scroller.scrollHeight;
+    positioned.current = true;
+  }, [projection.keyed, scrollRef]);
+
+  const activeOwner = projection.liveTurn && activityOwnerOf(projection.liveTurn.pending);
+  const openProcess = (activity: ChatTurnActivity) => setProcess(activity);
+  const preview = renderActivityBubble(projection.activity, openProcess);
+  const openActivity = process?.live
+    ? projection.activity?.runId === process.runId ? projection.activity ?? process
+      : [...projection.owners.values()].find(item => item.runId === process.runId) ?? process
+    : process;
+  const plan = run.plan ?? latestChatPlan(messages.sequence);
+  const showPlan = plan.length > 0 && dismissedPlan !== (run.id ?? scope);
+  return <>
+    {pager.hasMore && <button className="chat-archive-bar is-retry" type="button" disabled={earlier}
+      onClick={() => void load(true)}>{t(earlier ? "chat.historyLoadingEarlier" : "chat.messageNavigatorEarlier")}</button>}
+    {historyError && <button className="chat-archive-bar is-retry" type="button" onClick={() => void load()}>
+      {t("chat.historyRetry")}</button>}
+    <ChatThreadView keyedThreadGroups={projection.keyed} t={t} agentName={agentName} respondPrompt={respond}
+      liveTurn={projection.liveTurn} liveBubble={projection.liveTurn && (preview || !prompt && !run.text.trim())
+        ? { preview, onOpen: projection.activity?.steps.length ? () => openProcess(projection.activity!) : undefined } : undefined}
+      runWait={run.wait} openTimelineModal={openProcess}
+      standaloneActivityFor={message => {
+        const owner = activityOwnerOf(message);
+        return owner !== activeOwner && !projection.footerGroups.has(owner) ? projection.owners.get(owner) : undefined;
+      }}
+      footerActivityFor={(group, message) => {
+        const owner = activityOwnerOf(message);
+        return owner !== activeOwner && projection.footerGroups.get(owner) === group ? projection.owners.get(owner) : undefined;
+      }}
+      copyText={(text, media) => { void writeChatClipboard(text, media, () => true).catch(() => {}); }}
+      quoteGroup={(group, mi, pi) => {
+        const part = mi !== undefined && pi !== undefined ? group.msgs[mi]?.parts[pi] : undefined;
+        quote(part ? quoteTextOfParts([part]) : groupQuoteText(group));
+      }}
+      setLightbox={setLightbox}
+      revealAttachmentFile={async file => { if (file.path) await revealPath(file.path); else if (file.src) await revealAttachment(file.name, file.src); }} />
+    {showPlan ? <ChatPlanDock entries={plan} expanded={planExpanded} onToggle={() => setPlanExpanded(value => !value)}
+      onDismiss={() => setDismissedPlan(run.id ?? scope)} /> : null}
+    <ChatProcessDialog open={!!openActivity} steps={openActivity?.steps ?? []} timing={openActivity?.timing}
+      status={openActivity?.live && messages.active ? "running" : "done"} onClose={() => setProcess(null)} />
+    {lightbox && <div className="chat-lightbox" role="dialog" aria-modal="true" onClick={() => setLightbox(null)}>
+      {lightbox.kind === "video" ? <video className="chat-lightbox__video" src={lightbox.src} controls autoPlay />
+        : <img className="chat-lightbox__img" src={lightbox.src} alt="" />}
+    </div>}
+  </>;
+}
+
 // ---- main ---------------------------------------------------------------
 
 function ChatPageApp() {
@@ -2716,10 +3513,6 @@ function ChatPageApp() {
       timeline: live ? liveTimelinesRef.current.get(sessionKey) : undefined });
   }, []);
   useEffect(() => { setTimelineModal(null); }, [activeKey, activeGroupId]);
-  // Absorbed timelines contain only the progress omitted from the thread.
-  const visibleTimelineSteps = (steps: TurnStep[], projected = false) => withoutPlanSteps(steps).filter((s) =>
-    s.kind !== "user" && s.kind !== "final" && (s.kind !== "text" || projected && s.activity)
-    && (s.kind !== "thinking" || !!s.text?.trim()));
   // A native Run already has a single projection across its user/assistant bubbles.
   const liveStepsFor = (m: ChatMsg): TurnStep[] => {
     if (!m.pending) return [];
@@ -3338,6 +4131,7 @@ function ChatPageApp() {
   const [quote, setQuote] = useState<{ key: string; text: string; media?: MessageAttachment[] } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; group: Group; copyText: string; media: MessageAttachment[];
     attachmentTarget?: MessageAttachment; msgIndex?: number; partIndex?: number;
+    backgroundTask?: { key: string; taskId: string };
     continuation?: { sessionKey: string; reference: ContinuationReference } } | null>(null);
   const [advancedProbe, setAdvancedProbe] = useState<{
     key: string;
@@ -4810,7 +5604,7 @@ function ChatPageApp() {
         } else if (p.state === "status") {
           // 压缩归入当前会话的实时动态；纯 status 流也要创建/刷新 pending 气泡。
           if (sk && typeof p.statusKind === "string" && p.statusKind !== "idle") {
-            timelineFeed(sk, { kind: "status", status: { kind: p.statusKind, text: typeof p.text === "string" ? p.text : undefined } });
+            timelineFeed(sk, { kind: "status", status: { kind: p.statusKind, text: typeof p.text === "string" ? p.text : undefined } }, nativeRunId);
             renderLiveStateForSession(sk);
           }
         } else if (p.state === "prompt") {
@@ -7632,7 +8426,7 @@ function ChatPageApp() {
     );
     if (hit) scrollToMessage(hit.key);
   };
-  // Right-click context menu (复制/引用/置顶/删除) on a message group.
+  // Right-click actions for the selected message or attachment.
   const openMenu = (e: ReactMouseEvent, g: Group, copyTextOverride?: string, attachmentTarget?: MessageAttachment,
     segmentMedia?: MessageAttachment[], singleSegmentMessage?: ChatMsg) => {
     e.preventDefault();
@@ -7646,6 +8440,7 @@ function ChatPageApp() {
     const reference = attachmentTarget ? attachmentTarget.continuationReference : Number.isNaN(pi)
       ? continuationMessageReference(singleSegmentMessage) : continuationMessageReference(g.msgs[mi], pi);
     const sessionKey = activeKeyRef.current;
+    const reportTaskId = (singleSegmentMessage ?? g.msgs[mi] ?? (g.msgs.length === 1 ? g.msgs[0] : undefined))?.backgroundReport?.taskId;
     setMenu({
       x: e.clientX,
       y: e.clientY,
@@ -7656,6 +8451,7 @@ function ChatPageApp() {
       attachmentTarget,
       msgIndex: Number.isNaN(mi) ? undefined : mi,
       partIndex: Number.isNaN(pi) ? undefined : pi,
+      backgroundTask: reportTaskId && sessionKey ? { key: sessionKey, taskId: reportTaskId } : undefined,
       continuation: reference && sessionKey && backendOfSession(sessionKey) === "shoggoth" && !activeGroupIdRef.current
         && active?.kind === "direct" && !active.inspirationId && active.source !== "codex-desktop"
         && !groupInternalKeys.has(sessionKey) ? { sessionKey, reference } : undefined,
@@ -8895,7 +9691,6 @@ function ChatPageApp() {
         ? runWaitBySession[modalTimeline.sessionKey] : undefined) : visibleTimelineSteps(modalTimeline.steps, true), modalTimeline.runId) : [];
   const modalStatus = modalTimeline?.timeline?.status ?? "done";
   const modalTiming = modalTimeline?.timeline?.timing ?? modalTimeline?.timing;
-  const modalStats = modalTimeline ? getTurnProcessStats(modalSteps) : null;
   // The native host shows one document per window. Restore the newest card
   // directly instead of letting older history mounts replace it asynchronously.
   const latestNativeUiSourceEventId = useMemo(() => {
@@ -8916,15 +9711,7 @@ function ChatPageApp() {
   // settled transcript. Rebuild only when its projection changes; keep the same
   // key helpers so streaming slots, duplicate ids and archive prepends retain
   // their existing identity rules.
-  const keyedThreadGroups = useMemo(() => keyedShownGroups.map((group) => ({
-    ...group,
-    messages: keyedChatMessages(group.item.msgs).map((message) => ({
-      ...message,
-      images: message.item.images?.length ? keyedChatChildren(message.item, "image", message.item.images) : [],
-      files: message.item.files?.length ? keyedChatChildren(message.item, "file", message.item.files) : [],
-      parts: keyedChatChildren(message.item, "part", message.item.parts),
-    })),
-  })), [keyedShownGroups]);
+  const keyedThreadGroups = useMemo(() => keyThreadGroups(keyedShownGroups), [keyedShownGroups]);
   const showMessageNavigator = !!(activeKey && historyVisible && !activeGroupId && !immersive && !activeAgentHeaderPanel
     && (!showSessionBoard || sessionBoardViewMode === "chat"));
   const messageNavigation = useMemo(() => {
@@ -9193,21 +9980,17 @@ function ChatPageApp() {
     }
     return anchors;
   }, [backgroundTasks, keyedShownGroups]);
+  const openTaskDetails = useCallback((taskId: string) => {
+    if (activeKey && activeKey === activeKeyRef.current && !activeGroupIdRef.current) setOpenBackgroundTask({ key: activeKey, taskId });
+  }, [activeKey]);
   const renderBackgroundTasks = useCallback((message: ChatMsg) => {
-    if (!activeKey) return null;
-    const report = message.backgroundReport;
-    if (report) {
-      return <button key={`background-report:${report.taskId}:${report.generation}`} type="button" className="chat-continuation-action"
-        onClick={() => setOpenBackgroundTask({ key: activeKey, taskId: report.taskId })}>
-        {t("backgroundTask.reportFrom")} · {report.title} · {t("backgroundTask.openDetails")}
-      </button>;
-    }
+    if (!activeKey || message.backgroundReport) return null;
     const runId = message.nativeRunId;
     if (!runId || backgroundTaskAnchors.get(runId) !== message || backgroundTasks?.key !== activeKey) return null;
     return backgroundTasks.tasks.filter(task => task.sourceRunId === runId).map(task =>
       <BackgroundTaskCard key={`background-task:${task.taskId}`} task={task}
-        onOpen={() => setOpenBackgroundTask({ key: activeKey, taskId: task.taskId })} />);
-  }, [activeKey, backgroundTaskAnchors, backgroundTasks, t]);
+        onOpen={() => openTaskDetails(task.taskId)} />);
+  }, [activeKey, backgroundTaskAnchors, backgroundTasks, openTaskDetails]);
 
   const immersiveMessages = useMemo(() => {
     if (!immersive) return [];
@@ -9322,7 +10105,8 @@ function ChatPageApp() {
         );
         const liveMessage = seg.msgs.find(message => message.pending);
         const activity = seg.cls === "chat" ? footerActivityFor(g, seg.msgs[seg.msgs.length - 1]) : undefined;
-        const proactiveNoticeId = seg.cls === "chat" ? seg.msgs[0].proactiveNoticeId ?? seg.msgs[0].backgroundReport?.taskId : undefined;
+        const reportTaskId = seg.cls === "chat" ? seg.msgs[0].backgroundReport?.taskId : undefined;
+        const proactiveNoticeId = seg.cls === "chat" ? seg.msgs[0].proactiveNoticeId : undefined;
         const awaitingPrompt = chatPromptAttentionOf(prompts);
         const pendingTail = liveMessage?.parts.at(-1);
         const loadingReply = !livePreview && !awaitingPrompt && pendingTail?.type === "text" && !pendingTail.text?.trim();
@@ -9370,7 +10154,8 @@ function ChatPageApp() {
           // 悬浮操作/右键：无参闭包捕获 Group，动作与普通模式同一套 handler
           onCopy: segText || segmentMedia.length ? () => copyText(segText, segmentMedia) : undefined,
           onQuote: segText || segmentMedia.length ? () => quoteGroup(g) : undefined,
-          onOpenActivity: !proactiveNoticeId && activity && !activity.live ? () => openTimelineModal(activity) : undefined,
+          onOpenActivity: !proactiveNoticeId && !reportTaskId && activity && !activity.live ? () => openTimelineModal(activity) : undefined,
+          onOpenTaskDetails: reportTaskId ? () => openTaskDetails(reportTaskId) : undefined,
           onPin: MESSAGE_PINNING_ENABLED && hasId ? () => pinGroup(g) : undefined,
           pinned: MESSAGE_PINNING_ENABLED && hasId ? g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) : undefined,
           onDelete: hasId ? () => deleteGroup(g) : undefined,
@@ -9391,7 +10176,7 @@ function ChatPageApp() {
       out.push(...kept);
     }
     return out;
-  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession, renderGroupContinuation, renderBackgroundTasks]);
+  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession, renderGroupContinuation, renderBackgroundTasks, openTaskDetails]);
   // 沉浸模式的 agent 状态相位（背景媒体层 + 轻量状态行共用）。判据全部是「事件到没到」，
   // 零后端特判（铁律 1）：OpenClaw 不发 thinking/prompt 事件 → 对应相位自然不出现，由
   // 素材回退链兜退化。这是未滞回的原始相位——防抖/最短展示在 ImmersiveBackdrop 内做
@@ -10086,6 +10871,7 @@ function ChatPageApp() {
       )}
     </>
   );
+  const menuBackgroundTask = menu?.backgroundTask;
   const menuForkEntryId = menu
     ? forkEntryIdAt(menu.group.msgs, menu.msgIndex, activeAdvancedMethods)
     : null;
@@ -10200,7 +10986,7 @@ function ChatPageApp() {
     <ChatMediaContext.Provider value={imageContext}>
     {openBackgroundTask && openBackgroundTask.key === activeKey ? (
       <BackgroundTaskModal key={openBackgroundTask.taskId} sessionKey={openBackgroundTask.key} taskId={openBackgroundTask.taskId}
-        agentName={chatAgentDisplayName(agentOf(openBackgroundTask.key))} revision={backgroundRevision}
+        agentName={chatAgentDisplayName(agentOf(openBackgroundTask.key))} revision={backgroundRevision} Conversation={BackgroundTaskConversation}
         onChanged={() => setBackgroundPoll(value => value + 1)} onClose={() => setOpenBackgroundTask(null)} />
     ) : null}
     {advancedProbe && advancedProbe.key === activeKey ? (
@@ -10331,25 +11117,9 @@ function ChatPageApp() {
         </div>
       </div>
     </Modal>
-    <Modal
-      open={!!modalTimeline}
-      title={t("turnLab.processLabel")}
-      subtitle={modalStats && <TurnProcessSummary stats={modalStats} timing={modalTiming} live={modalStatus === "running"} />}
-      onClose={() => setTimelineModal(null)}
-      variant="activity"
-      width={640}
-    >
-      {modalTimeline?.noticeState ? <p role="status">{t(`turnLab.proactiveActivity.${modalTimeline.noticeState}`)}</p> : modalTimeline ? (
-        <TurnTimeline
-          steps={modalSteps}
-          status={modalStatus}
-          showDurations={modalStats?.showDurations}
-          autoFollow={modalStatus === "running"}
-          detail
-          pluginConversation={activePluginConversation}
-        />
-      ) : null}
-    </Modal>
+    <ChatProcessDialog open={!!modalTimeline} steps={modalSteps} timing={modalTiming} status={modalStatus}
+      notice={modalTimeline?.noticeState ? <p role="status">{t(`turnLab.proactiveActivity.${modalTimeline.noticeState}`)}</p> : undefined}
+      pluginConversation={activePluginConversation} onClose={() => setTimelineModal(null)} />
     {lightbox ? (
       <div
         className="chat-lightbox"
@@ -10719,444 +11489,22 @@ function ChatPageApp() {
               onKeyDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}>
               <div className="chat-thread__inner">
                 {historyControl}
-                {keyedThreadGroups.map(({ item: g, key: groupRenderKey, messages: keyedMessages }) => {
-                  if (g.msgs.length === 1 && g.msgs[0].divider) {
-                    const d = g.msgs[0].divider;
-                    const when = d.sealedAt ? absTime(d.sealedAt) : "";
-                    return (
-                      <div key={groupRenderKey} className="chat-reset-divider">
-                        <span className="chat-reset-divider__label">
-                          {d.fromReset ? t("chat.archiveResetAt", { time: when }) : t("chat.archiveEarlierAt", { time: when })}
-                          {d.truncated ? ` · ${t("chat.archiveTruncated")}` : ""}
-                        </span>
-                      </div>
-                    );
-                  }
-                  // Backend timeline notice — a quiet divider line, same
-                  // shape as the archive divider. The backend's raw marker text (the
-                  // string the MODEL sees) stays on the hover title only.
-                  if (g.msgs.length === 1 && g.msgs[0].notice) {
-                    const n = g.msgs[0];
-                    return (
-                      <div key={groupRenderKey} className="chat-reset-divider">
-                        <span className="chat-reset-divider__label" title={n.parts.find((p) => p.text)?.text || undefined}>
-                          {t(n.notice === "contextCompacted" ? "chat.compactedCtx"
-                            : n.notice === "runInterrupted" ? "chat.runInterruptedNotice"
-                            : n.notice === "processComplete" ? "chat.processCompleteNotice" : "chat.modelSwitchedNotice")}
-                          {n.notice === "modelSwitch" && n.model ? ` · ${n.model}` : ""}
-                        </span>
-                      </div>
-                    );
-                  }
-                  const last = g.msgs[g.msgs.length - 1];
-                  const cls = g.role === "user" ? "is-user" : g.role === "toolResult" ? "is-tool" : "is-assistant";
-                  // A saved pin can belong to any message after groups merge.
-                  const pinIds = g.msgs.map((m) => m.actionId).filter((id): id is string => !!id);
-                  const metadata = [...g.msgs].reverse().find(message => message.responseMetadata)?.responseMetadata;
-                  // Skip empty groups after folding their activity into a reply's footer.
-                  const isMsgVisible = (m: ChatMsg) =>
-                    m.pending ||
-                    (m.images?.length ?? 0) > 0 ||
-                    (m.files?.length ?? 0) > 0 ||
-                    m.parts.some((p) =>
-                      p.type === "canvas" || p.type === "ui_artifact"
-                        ? true
-                        : p.type === "prompt"
-                        ? !!p.promptEntry
-                        : p.type === "toolCall" || p.type === "toolResult"
-                          ? true
-                          : p.type === "timeline"
-                            ? !!standaloneActivityFor(m)
-                            : !!p.text?.trim(),
-                    );
-                  if (!g.msgs.some(isMsgVisible)) return null;
-                  // Footer 时间 = 组内最后一条可见消息的时间（不是组首 g.ts）：footer 渲染在组尾，
-                  // 必须与用户看到的末条内容、以及列表/头部 badge 的 updatedAt 对齐。组首兜底仅在
-                  // 全组消息都无 ts 时生效。
-                  const footerTs = [...g.msgs].reverse().find((m) => isMsgVisible(m) && m.ts)?.ts ?? g.ts;
-                  const liveMessage = g.msgs.find((message) => message.pending);
-                  const liveActivity = liveMessage && liveMessage === liveTurn?.pending ? liveTurn.activity : undefined;
-                  const waitingForPrompt = liveMessage?.parts.some(part => part.type === "prompt" && part.promptEntry
-                    && chatPromptAttentionOf([part.promptEntry]));
-                  const footerMedia = last.pending ? [] : g.msgs.flatMap(messageMedia);
-                  const hasText = !last.pending && g.msgs.some(m => m.parts.some(p => p.text?.trim()));
-                  const quoteTarget = hasText ? lastQuoteableBubble(g) : undefined;
-                  const footerActivity = footerTs && hasText ? footerActivityFor(g, last) : undefined;
-                  return (
-                    <div
-                      key={groupRenderKey}
-                      ref={(el) => {
-                        // 渲染 key 恒有 → 无 id 组（cron 投递等）也能被引用跳转锚定（R155）。
-                        // 同时注册各条消息的操作 ID，让已有置顶在组归并后仍能定位。
-                        if (el) {
-                          groupRefs.current.set(groupRenderKey, el);
-                          pinIds.forEach((id) => groupRefs.current.set(id, el));
-                        } else {
-                          groupRefs.current.delete(groupRenderKey);
-                          pinIds.forEach((id) => groupRefs.current.delete(id));
-                        }
-                      }}
-                      onContextMenu={(e) => openMenu(e, g)}
-                    >
-                      <div className={`chat-group ${cls}${searchTargetGroupKey === groupRenderKey ? " is-search-target" : ""}`}>
-                        <div className="chat-group__stack">
-                          {/* display:contents 包装不产生盒子（stack 的 flex/gap 不受影响），
-                              只为右键菜单提供 data-mi 落点定位（R154 按气泡引用） */}
-                          {keyedMessages.map(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => (
-                            <div key={messageRenderKey} data-mi={mi} data-message-key={messageRenderKey} data-chat-message-id={m.actionId} style={{ display: "contents" }}>
-                              {m.images?.length ? (
-                                <div className="chat-att-row">
-                                  {keyedImages.map(({ item: src, key: imageRenderKey }, imageIndex) => (
-                                    <img
-                                      key={imageRenderKey}
-                                      className="chat-att-thumb"
-                                      src={src}
-                                      alt=""
-                                      onContextMenu={e => openMenu(e, g, undefined, messageImage(m, src, imageIndex))}
-                                      onClick={() => setLightbox({ src, kind: "image" })}
-                                    />
-                                  ))}
-                                </div>
-                              ) : null}
-                              {m.files?.length ? (
-                                <div className="chat-att-row">
-                                  {keyedFiles.map(({ item: f, key: fileRenderKey }) =>
-                                    // 视频（带 src）= 可播放的预览窗，点击进 lightbox；
-                                    // 其余（含大到没缓存 src 的视频）= 文件 chip。
-                                    f.kind === "video" && f.src ? (
-                                      <span
-                                        key={fileRenderKey}
-                                        className="chat-att-videowrap"
-                                        title={attachmentChipTitle(f)}
-                                        onContextMenu={e => openMenu(e, g, undefined, messageFile(m, f))}
-                                        onClick={() => setLightbox({ src: f.src as string, kind: "video" })}
-                                      >
-                                        <video
-                                          className="chat-att-thumb chat-att-video"
-                                          src={f.src}
-                                          preload="metadata"
-                                          muted
-                                          playsInline
-                                        />
-                                        <span className="chat-att-play">▶</span>
-                                      </span>
-                                    ) : (
-                                      <ChatFileButton key={fileRenderKey} name={f.name}
-                                        title={`${t("chat.artifactsRevealInFolder")} · ${attachmentChipTitle(f)}`}
-                                        onContextMenu={e => openMenu(e, g, undefined, messageFile(m, f))}
-                                        onClick={() => void revealAttachmentFile(f)} />
-                                    ),
-                                  )}
-                                </div>
-                              ) : null}
-                              {m.role === "user" && m.connectorSelection?.length ? (
-                                <div className="chat-plugin-selection-badge" title={t("chat.connectorChosenHint")}>
-                                  {t("chat.connectorChosen")} · {m.connectorSelectionSnapshot?.length
-                                    ? m.connectorSelectionSnapshot.map(item => `${item.service} · ${item.label}`).join("、")
-                                    : m.connectorSelection.length}
-                                </div>
-                              ) : null}
-                              {m.role === "user" && m.legacyPluginSelection?.length ? (
-                                <div className="chat-plugin-selection-badge" title={t("chat.legacyPluginChosenHint")}>
-                                  {t("chat.legacyPluginChosen")}
-                                </div>
-                              ) : null}
-                              {m === liveMessage && activeRunInFlight && activeKey && runWaitBySession[activeKey]
-                                && runWaitBySession[activeKey].kind === "retrying" && (
-                                <div className="chat-bubble is-error" data-testid="chat-retry-status">
-                                  <ChatRunWait state={runWaitBySession[activeKey]} />
-                                </div>
-                              )}
-                              {keyedParts.map(({ item: p, key: k }, pi) => {
-                              if (p.type === "timeline") {
-                                const preview = pi === m.parts.findIndex(part => part.type === "timeline")
-                                  ? renderActivityBubble(standaloneActivityFor(m), openTimelineModal) : null;
-                                return preview ? <div key={k} className="chat-bubble is-activity-loading">{preview}</div> : null;
-                              }
-                              if (p.type === "ui_artifact" && p.uiArtifact) {
-                                return <ChatUiArtifact key={k} part={p.uiArtifact} backend={activeBackend}
-                                  agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible={!immersive} autoActivate={p.uiArtifact.sourceEventId === latestNativeUiSourceEventId} onCancel={runId => send("chat.abort", { sessionKey: activeKey, runId })} />;
-                              }
-                              if (p.type === "canvas") {
-                                return (
-                                  <ChatWidget
-                                    key={`${activeKey ?? ""}:${k}`}
-                                    part={p.preview ? p as ChatCanvasWidgetPart : null}
-                                    backendId={activeBackend}
-                                    sessionKey={activeKey ?? ""}
-                                    onSendPrompt={sendCanvasWidgetPrompt}
-                                    canPin={canPinActiveCanvas}
-                                    pinned={p.preview?.boardWidgetName
-                                      ? pinnedSessionBoardWidgets.has(p.preview.boardWidgetName)
-                                      : false}
-                                    pinning={sessionBoardMutating}
-                                    onPinCanvas={pinCanvasWidget}
-                                  />
-                                );
-                              }
-                              // Live thought/tool activity stays in the timeline; plans use the composer dock.
-                              if (m === liveMessage && liveActivity && (p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult")) return null;
-                              if (p.type === "prompt") {
-                                if (!p.promptEntry) return null;
-                                return <ChatPromptCard key={k} entry={p.promptEntry} onRespond={respondPrompt}
-                                  agentName={active ? sessionName(active) : undefined} />;
-                              }
-                              if (p.type === "thinking") {
-                                if (!p.text?.trim()) return null;
-                                return (
-                                  <div key={k} className="chat-thinking">
-                                    <span className="chat-thinking__ico"><IconBulb /></span>
-                                    <ChatMarkdown
-                                      className="chat-thinking__body chat-md"
-                                      text={formatReasoningMarkdown(p.text)}
-                                    />
-                                  </div>
-                                );
-                              }
-                              if (p.type === "toolCall") {
-                                const title = toolActivityTitle(p.toolName, p.toolArgs, t);
-                                // …and make the card expandable to reveal the raw input args
-                                // (OpenClaw's "TOOL INPUT" panel), like the output cards.
-                                const argsBody =
-                                  p.toolArgs && typeof p.toolArgs === "object" && Object.keys(p.toolArgs).length
-                                    ? JSON.stringify(p.toolArgs, null, 2)
-                                    : undefined;
-                                return (
-                                  <Card
-                                    key={k}
-                                    icon={<IconWrench />}
-                                    name={title}
-                                    body={argsBody}
-                                    diff={p.diff}
-                                    diffText={p.diffText}
-                                  />
-                                );
-                              }
-                              if (p.type === "toolResult") {
-                                // Per-part error flag (set by normalize/live), NOT the message's —
-                                // a failed tool renders the red "Tool error <name>" card, matching
-                                // OpenClaw; a success renders "Tool output <name>".
-                                const err = toolResultFailed(p.text, p.isError ?? (m.isError ? true : undefined));
-                                const action = toolActivityTitle(p.toolName, p.toolArgs, t);
-                                const name = err
-                                  ? p.toolName
-                                    ? t("chat.toolErrorNamed", { tool: action })
-                                    : t("chat.toolError")
-                                  : p.toolName
-                                    ? t("chat.toolOutputNamed", { tool: action })
-                                    : t("chat.toolOutput");
-                                return (
-                                  <Card
-                                    key={k}
-                                    icon={<IconWrench />}
-                                    name={name}
-                                    status={err ? t("common.error") : p.durationS != null ? `${p.durationS >= 10 ? Math.round(p.durationS) : p.durationS.toFixed(1)}s` : undefined}
-                                    body={p.text}
-                                    summary={formatToolResultSummary(p.text)}
-                                    diff={p.diff}
-                                    diffText={p.diffText}
-                                    isError={err}
-                                  />
-                                );
-                              }
-                              // local (client-generated) slash-command result → neutral markdown info bubble
-                              if (m.local) {
-                                if (!p.text?.trim()) return null;
-                                return (
-                                  <ChatMarkdown
-                                    key={k}
-                                    className="chat-bubble chat-md is-local"
-                                    data-qp={pi}
-                                    text={p.text}
-                                  />
-                                );
-                              }
-                              // text part: settled text renders as markdown; while streaming we now
-                              // also render markdown (so code blocks/lists/bold take shape live), with
-                              // the cursor trailing the rendered HTML.
-                              if (m.pending) {
-                                const isLoading = !p.text?.trim() && pi === m.parts.length - 1;
-                                if (!p.text?.trim() && (!isLoading || waitingForPrompt || (m === livePending && liveBubble))) return null;
-                                return (
-                                  <div key={k} className="chat-bubble is-streaming" data-qp={pi}>
-                                    {p.text?.trim() ? (
-                                      <ChatMarkdown
-                                        className="chat-md"
-                                        text={p.text}
-                                        htmlArtifactPolicy={m.role === "assistant" ? activeLegacyHtmlPolicy : "source"}
-                                        streamingCursor={!waitingForPrompt && pi === m.parts.length - 1}
-                                      />
-                                    ) : null}
-                                    {isLoading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
-                                  </div>
-                                );
-                              }
-                              if (m.role === "system" || m.stopReason === "error" || m.isError) {
-                                // Known gateway error strings are rewritten via i18n at render
-                                // time (so they follow language switches); raw English stays on
-                                // the hover title for triage. Unknown strings pass through as-is.
-                                const rawErr = p.text ?? "";
-                                const translated = rawErr ? translateGatewayError(rawErr, t) : "";
-                                const shownErr = m.errPrefix ? t(m.errPrefix, { msg: translated || t("chat.unknown") }) : translated;
-                                return (
-                                  <div key={k} className="chat-bubble is-error" data-qp={pi} data-selectable-text title={translated !== rawErr && rawErr ? rawErr : undefined}>
-                                    {shownErr}
-                                    {pi === m.parts.length - 1 && (m.repeat ?? 1) > 1 ? (
-                                      <span
-                                        className="chat-bubble__repeat"
-                                        title={t("chat.repeatedErrors", { count: m.repeat })}
-                                      >
-                                        ×{m.repeat}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                );
-                              }
-                              if (!p.text?.trim()) return null;
-                              // System-injected automation prompt (cron/heartbeat envelope) →
-                              // compact expandable row instead of a giant user bubble (黄墙).
-                              if (m.role === "user" && isInjectedPrompt(m)) {
-                                return <InjectedRow key={k} text={p.text} />;
-                              }
-                              // A sent user message that carries a quote → collapse each leading
-                              // blockquote to one clickable line (jump to the quoted message) and
-                              // render the body normally, instead of a full markdown blockquote.
-                              const qr = m.role === "user" ? parseQuoteFromText(p.text) : null;
-                              if (qr) {
-                                return (
-                                  <Fragment key={k}>
-                                    {keyedChatChildren(m, "quote", qr.quotes).map(({ item: q, key: quoteRenderKey }) => (
-                                      <button
-                                        key={quoteRenderKey}
-                                        type="button"
-                                        className="chat-quote-ref"
-                                        // 悬停展示引用文本核对（R152 全文引用可达 2 万字，显示层限长——
-                                        // 行 300 / tooltip 600，payload 不受影响），再附跳转提示
-                                        title={`${q.length > 600 ? `${q.slice(0, 600)}…` : q}\n\n${t("chat.jumpToQuoted")}`}
-                                        onClick={() => jumpToQuoted(q)}
-                                      >
-                                        <IconQuote className="chat-quote-icon" />
-                                        <span className="chat-quote-ref__text">{q.length > 300 ? `${q.slice(0, 300)}…` : q}</span>
-                                      </button>
-                                    ))}
-                                    {qr.body.trim() ? (
-                                      <ChatMarkdown
-                                        className={`chat-bubble chat-md${messageRenderKey === latestUserMessageKey ? " is-latest-send" : ""}`}
-                                        data-qp={pi}
-                                        text={qr.body}
-                                      />
-                                    ) : null}
-                                  </Fragment>
-                                );
-                              }
-                              // Agent replies may carry OpenClaw `MEDIA:<path/url>` directive
-                              // lines (its way of attaching images); the gateway returns them as
-                              // raw text, so pull them out and render the images ourselves (local
-                              // paths via /__media, URLs directly). See lib/agentMedia.ts.
-                              const media =
-                                m.role === "assistant"
-                                  ? extractAgentMedia(p.text, imageContext)
-                                  : { text: p.text, srcs: [] as string[] };
-                              return (
-                                <Fragment key={k}>
-                                  {media.srcs.length ? (
-                                    <div className="chat-att-row">
-                                      {keyedChatChildren(m, "media", media.srcs).map(({ item: src, key: mediaRenderKey }) => (
-                                        <img
-                                      key={mediaRenderKey}
-                                      className="chat-att-thumb"
-                                      src={src}
-                                      alt=""
-                                      onClick={() => setLightbox({ src, kind: "image" })}
-                                    />
-                                      ))}
-                                    </div>
-                                  ) : null}
-                                  {media.text.trim() ? (
-                                    <ChatMarkdown
-                                      className={`chat-bubble chat-md${messageRenderKey === latestUserMessageKey ? " is-latest-send" : ""}${latestAssistantMessageKeys.has(messageRenderKey) ? " is-latest-reply" : ""}${m.keepLiveLayout ? " is-streamed-reply" : ""}`}
-                                      data-qp={pi} /* R154：右键引用按这条气泡取文 */
-                                      text={media.text}
-                                      htmlArtifactPolicy={m.role === "assistant" ? activeLegacyHtmlPolicy : "source"}
-                                    />
-                                  ) : null}
-                                  {activeBackendDescriptor?.surfaces.agentHarness === true && pi === m.parts.map(part => part.type).lastIndexOf("text")
-                                    ? nativeUiLegacySources(m).map(({ text, sourceEventId }) => <LegacyChatUi key={`legacy:${sourceEventId}`} text={text}
-                                      sourceEventId={sourceEventId} backend={activeBackend} agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible={!immersive} />) : null}
-                                </Fragment>
-                              );
-                              })}
-                              {renderGroupContinuation(m)}
-                              {renderBackgroundTasks(m)}
-                            </div>
-                          ))}
-                          {g === liveTurn?.group && liveBubble && <ChatLiveActivityBubble className="chat-bubble" {...liveBubble} />}
-                        </div>
-                        {g.role !== "toolResult" && (
-                        <div className="chat-group__footer">
-                          {footerTs ? (
-                            <>
-                              <span className="dot">·</span>
-                              <span>{absTime(footerTs)}</span>
-                            </>
-                          ) : null}
-                          <ChatResponseMetadata metadata={metadata} fallbackModel={last.model} />
-                          {!last.pending && last.automation !== "cron" && isErrorTurn(last) && (
-                            <button
-                              type="button"
-                              className="chat-copybtn chat-retrybtn"
-                              title={t("chat.retry")}
-                              disabled={sending}
-                              onClick={() => retryErrorGroup(g)}
-                            >
-                              <IconRetry />
-                            </button>
-                          )}
-                          {(!last.proactiveNoticeId && !last.backgroundReport && footerActivity && !footerActivity.live) && (
-                            <button type="button" className="chat-copybtn" data-chat-footer-icon="" aria-haspopup="dialog"
-                              aria-label={t("turnLab.processOpen")} title={t("turnLab.processOpen")}
-                              onClick={() => footerActivity && openTimelineModal(footerActivity)}>
-                              <IconTrajectory />
-                            </button>
-                          )}
-                          {(hasText || footerMedia.length > 0) && (
-                            <button
-                              type="button"
-                              className="chat-copybtn"
-                              data-chat-footer-icon=""
-                              title={t(footerMedia.length ? "chat.copy" : "chat.copyAsMarkdown")}
-                              onClick={() => copyText(groupCopyText(g), footerMedia)}
-                            >
-                              <IconCopy />
-                            </button>
-                          )}
-                          {(quoteTarget || footerMedia.length > 0) && (
-                            <button type="button" className="chat-copybtn" data-chat-footer-icon=""
-                              aria-label={t("chat.quote")} title={t("chat.quote")} onClick={() => quoteGroup(g, quoteTarget?.[0], quoteTarget?.[1])}>
-                              <IconQuote />
-                            </button>
-                          )}
-                          {(MESSAGE_PINNING_ENABLED || MESSAGE_DELETION_ENABLED) && !last.pending && pinIds.length > 0 && (
-                            <>
-                              {MESSAGE_PINNING_ENABLED && <button
-                                type="button"
-                                className={g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) ? "chat-copybtn is-pinned" : "chat-copybtn"}
-                                title={g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) ? t("chat.unpin") : t("chat.pin")}
-                                onClick={() => pinGroup(g)}
-                              >
-                                <IconPin />
-                              </button>}
-                              {MESSAGE_DELETION_ENABLED && <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} onClick={() => deleteGroup(g)}>
-                                <IconTrash />
-                              </button>}
-                            </>
-                          )}
-                        </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                <ChatThreadView
+                  keyedThreadGroups={keyedThreadGroups} t={t} standaloneActivityFor={standaloneActivityFor}
+                  footerActivityFor={footerActivityFor} openTimelineModal={openTimelineModal} respondPrompt={respondPrompt}
+                  liveTurn={liveTurn} liveBubble={liveBubble} runWait={activeRunInFlight && activeKey ? runWaitBySession[activeKey] : undefined}
+                  agentName={active ? sessionName(active) : undefined} groupRefs={groupRefs} openMenu={openMenu}
+                  searchTargetGroupKey={searchTargetGroupKey} setLightbox={setLightbox} revealAttachmentFile={revealAttachmentFile}
+                  activeBackend={activeBackend} activeKey={activeKey} activeBackendDescriptor={activeBackendDescriptor}
+                  activeLegacyHtmlPolicy={activeLegacyHtmlPolicy} immersive={immersive} latestNativeUiSourceEventId={latestNativeUiSourceEventId}
+                  send={send} sendCanvasWidgetPrompt={sendCanvasWidgetPrompt} canPinActiveCanvas={canPinActiveCanvas}
+                  pinnedSessionBoardWidgets={pinnedSessionBoardWidgets} sessionBoardMutating={sessionBoardMutating} pinCanvasWidget={pinCanvasWidget}
+                  jumpToQuoted={jumpToQuoted} latestUserMessageKey={latestUserMessageKey}
+                  latestAssistantMessageKeys={latestAssistantMessageKeys} imageContext={imageContext}
+                  renderGroupContinuation={renderGroupContinuation} renderBackgroundTasks={renderBackgroundTasks} openTaskDetails={openTaskDetails}
+                  sending={sending} retryErrorGroup={retryErrorGroup} copyText={copyText} quoteGroup={quoteGroup}
+                  pinnedIds={pinnedIds} pinGroup={pinGroup} deleteGroup={deleteGroup}
+                />
                 {activePluginConversation && <McpApprovalTarget conversation={activePluginConversation}
                   agentName={active ? sessionName(active) : undefined}
                   enabled={routerLocation.pathname === "/chat" && !activeGroupId && !immersive && historyVisible
@@ -11399,6 +11747,8 @@ function ChatPageApp() {
         if (source && source.sessionKey === activeKeyRef.current && !activeGroupIdRef.current) copyText(JSON.stringify(source.reference));
       } : undefined}
       onQuote={menu.media.length || groupSnippet(menu.group) ? () => quoteGroup(menu.group, menu.msgIndex, menu.partIndex, menu.attachmentTarget) : undefined}
+      onOpenTaskDetails={menuBackgroundTask && menuBackgroundTask.key === activeKey
+        ? () => openTaskDetails(menuBackgroundTask.taskId) : undefined}
       onPin={menu.group.msgs.some(message => message.actionId) ? () => pinGroup(menu.group) : undefined}
       pinned={menu.group.msgs.some(message => message.actionId && pinnedIds.has(message.actionId))}
       onDelete={menu.group.msgs.some(message => message.actionId) ? () => deleteGroup(menu.group) : undefined}

@@ -2163,6 +2163,16 @@ class ShoggothBackend extends AgentBackend {
     finally { if (this._runtimeProvidersPending?.promise === pending) this._runtimeProvidersPending = null; }
   }
 
+  async _readScopedOAuth(method, params) {
+    try {
+      return await this._call(method, { ...params, includeQuotaScope: true });
+    } catch (error) {
+      // A desktop update can briefly connect to a Service without this optional field.
+      if (error?.code !== "INVALID_PARAMS") throw error;
+      return this._call(method, params);
+    }
+  }
+
   async _readOAuthProviders(quotaOnly) {
     const generation = this._generation;
     const profiles = [...this._profilesByAgent.values()];
@@ -2204,7 +2214,9 @@ class ShoggothBackend extends AgentBackend {
       const accountProfile = accountProfiles.find(profile => profile.providerRef == null);
       const authRead = accountProfile ? ["profile.auth.read", { profileId: accountProfile.id }]
         : group.binding ? ["profile.binding.auth.read", group.binding] : null;
+      const canReadQuota = RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(descriptor.runtime);
       let loggedIn = false;
+      let quotaScope;
       let statusError = descriptor.binaryPath ? null : descriptor.unavailableReason;
       let statusVerification = null;
       let readiness = "unverified";
@@ -2227,8 +2239,9 @@ class ShoggothBackend extends AgentBackend {
         if (canReadAuth && !authRead) statusVerification = "unverified";
         if (canReadAuth && authRead) {
           try {
-            const verified = await this._call(...authRead);
+            const verified = canReadQuota ? await this._readScopedOAuth(...authRead) : await this._call(...authRead);
             loggedIn = verified.status === "authenticated";
+            quotaScope = verified.quotaScope;
             readiness = loggedIn ? "ready" : verified.status === "unauthenticated" ? "auth-required" : "unverified";
             if (verified.status === "unverified") statusVerification = "unverified";
             if (!quotaOnly && switchable && verified.status !== "unauthenticated") {
@@ -2284,7 +2297,8 @@ class ShoggothBackend extends AgentBackend {
         disconnectCommand: !switchable && descriptor.binaryPath && descriptor.logoutArgs.length > 0
           ? runtimeCliCommand(descriptor, descriptor.logoutArgs) : null,
         disconnectable: false,
-        ...(RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(descriptor.runtime) ? { canReadQuota: true } : {}),
+        ...(canReadQuota ? { canReadQuota: true } : {}),
+        ...(loggedIn && quotaScope !== undefined ? { quotaScope } : {}),
         ...(switchable && (descriptor.binaryPath || !enabled)
           ? { connection: { id: descriptor.runtime, enabled } } : {}),
         status: {
@@ -2312,7 +2326,7 @@ class ShoggothBackend extends AgentBackend {
       this._getDisabledBackendIds?.() || [], account.id);
     if (!enabled()) return { status: "unsupported" };
     const generation = this._generation;
-    const quota = await this._call("runtime.account.quota.read", { runtimeAccountId: account.id });
+    const quota = await this._readScopedOAuth("runtime.account.quota.read", { runtimeAccountId: account.id });
     return generation === this._generation && enabled() ? quota : { status: "unavailable" };
   }
 
@@ -3939,6 +3953,40 @@ class ShoggothBackend extends AgentBackend {
       // Local file paths are for the Agent's own context; the UI opens files by URL.
       return { ...result, interaction, files: result.files.map(({ path: _path, ...file }) => file) };
     } catch (error) { throw safeError(error, "BACKGROUND_TASK_UNAVAILABLE"); }
+  }
+
+  async getBackgroundTaskChatPage(sourceKey, taskId, options = {}) {
+    const { historyError, historyPage, historySource } = require("./chat-history-page");
+    const { visibleBackgroundInstruction } = require("../agent-service/background-task-protocol");
+    const resolveTarget = async () => {
+      const source = this._sessionTarget(sourceKey);
+      const { session, brief } = await this._call("background.task.session", { sessionKey: source.sessionKey, taskId });
+      if (!session) return null;
+      if (session.profileId !== source.profile.id) throw safeError(null, "BACKGROUND_TASK_NOT_FOUND");
+      return { profile: source.profile, agentId: source.agentId, sessionKey: session.sessionKey, session, brief };
+    };
+    const target = await resolveTarget();
+    const viewKey = `background-task:${sourceKey}:${taskId}`;
+    if (!target) {
+      if (options.cursor != null) throw historyError();
+      return { payload: historyPage([], false, null, historySource(this.id, viewKey)), observer: null };
+    }
+    const confirmTarget = async () => {
+      const current = await resolveTarget();
+      if (!current || current.sessionKey !== target.sessionKey
+        || current.session.runtimeBindingId !== target.session.runtimeBindingId) throw historyError();
+      return current;
+    };
+    const project = messages => projectNativeHistory(messages, false).map(message => message.role === "user"
+      ? { ...message, content: message.content.map(part => part.type === "text"
+        ? { ...part, text: visibleBackgroundInstruction(part.text) } : part) } : message);
+    const payload = await this._getHistoryPageForTarget(viewKey, options, target, confirmTarget, project);
+    return { payload: { ...payload, brief: target.brief }, observer: { watchSession: async (_key, hooks, watchOptions) => {
+      const current = await confirmTarget();
+      return this._watchSessionTarget(viewKey, current, hooks, {
+        ...watchOptions, resolveTarget: confirmTarget, nativeUiAvailable: false,
+      });
+    } } };
   }
 
   async controlBackgroundTask(sessionKey, taskId, input) {
@@ -7171,8 +7219,8 @@ class ShoggothBackend extends AgentBackend {
     this._clearSessionRuntime(sessionKey);
   }
 
-  async _getHistoryItems(key) {
-    const { profile, sessionKey, session } = this._sessionTarget(key);
+  async _getHistoryItems(key, target = this._sessionTarget(key)) {
+    const { profile, sessionKey, session } = target;
     const desktop = this._codexDesktopEntries.get(sessionKey);
     if (desktop) return this._page("codex.desktop.history", { profileId: profile.id, threadId: desktop.threadId, homeIdentity: desktop.homeIdentity }, "messages", {
       newestFirst: true, maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS,
@@ -7263,10 +7311,14 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async getHistoryPage(key, options = {}) {
+    return this._getHistoryPageForTarget(key, options, this._sessionTarget(key), () => this._sessionTarget(key));
+  }
+
+  async _getHistoryPageForTarget(key, options, target, resolveTarget, project = messages => projectNativeHistory(messages, this._nativeUiAvailable)) {
     const { historyError, historySource, historyPageOptions, encodeHistoryCursor,
       decodeHistoryCursor, historyPage } = require("./chat-history-page");
     const { limit, cursor: wireCursor } = historyPageOptions(options);
-    const { profile, sessionKey, session } = this._sessionTarget(key);
+    const { profile, sessionKey, session } = target;
     const generation = this._generation;
     const desktop = this._codexDesktopEntries.get(sessionKey);
     const sourceId = historySource(this.id, key, profile.id, session.runtimeBindingId,
@@ -7285,8 +7337,8 @@ class ShoggothBackend extends AgentBackend {
           cursor, limit: desktop && (items.length >= limit || bytes >= 128 * 1024) ? 1 : serviceLimit,
         });
         if (generation !== this._generation) throw historyError();
-        const current = this._sessionTarget(key), currentDesktop = this._codexDesktopEntries.get(sessionKey);
-        if (sourceId !== historySource(this.id, key, current.profile.id, current.session.runtimeBindingId,
+        const current = await resolveTarget(), currentDesktop = this._codexDesktopEntries.get(sessionKey);
+        if (generation !== this._generation || sourceId !== historySource(this.id, key, current.profile.id, current.session.runtimeBindingId,
           currentDesktop?.threadId, currentDesktop?.homeIdentity)) throw historyError();
         if (!Array.isArray(result?.messages) || typeof result.hasMore !== "boolean"
           || (!desktop && result.messages.length > serviceLimit)
@@ -7297,7 +7349,7 @@ class ShoggothBackend extends AgentBackend {
         if (bytes > MAX_HISTORY_BYTES || items.length > MAX_HISTORY_ITEMS) throw historyError("CHAT_HISTORY_TOO_LARGE");
         const complete = !items[0]?.fragment || items[0].fragment.index === 0;
         if (!result.hasMore || (complete && (items.length >= limit || bytes >= 128 * 1024))) {
-          return historyPage(projectNativeHistory(reassembleHistory(items), this._nativeUiAvailable), result.hasMore,
+          return historyPage(project(reassembleHistory(items)), result.hasMore,
             result.hasMore ? encodeHistoryCursor(this, cursorScope, { cursor: result.nextCursor }) : null, sourceId);
         }
         if (!result.nextCursor || seen.has(result.nextCursor) || result.nextCursor === cursor) throw historyError("CURSOR_NOT_ADVANCING");
@@ -7881,7 +7933,8 @@ class ShoggothBackend extends AgentBackend {
           continue;
         }
         let target = context.target;
-        try { target = this._sessionTarget(context.key); } catch { /* frozen binding remains valid */ }
+        if (context.resolveTarget) target = await context.resolveTarget();
+        else try { target = this._sessionTarget(context.key); } catch { /* frozen binding remains valid */ }
         this._assertRunBinding(target, result.run);
         context.poll.cancelled = false;
         this._polls.add(context.poll);
@@ -8230,8 +8283,13 @@ class ShoggothBackend extends AgentBackend {
     return record;
   }
 
+  async _readObservedRunHistory(context) {
+    const bound = context.resolveTarget ? await context.resolveTarget() : undefined;
+    return this._getHistoryItems(context.key, bound);
+  }
+
   async _restoreNativeUiHistory(context, state) {
-    const items = await this._getHistoryItems(context.key);
+    const items = await this._readObservedRunHistory(context);
     const messages = reassembleHistory(items.filter(item => item.runId === context.run.id));
     const history = nativeHistoryContent(messages, context.run.id);
     if (!history.hasUi || context.poll.consumerCancelled) return false;
@@ -8244,7 +8302,7 @@ class ShoggothBackend extends AgentBackend {
   _emitNativeContent(context, state, mode, extra = {}) {
     if (!state.nativeContent?.hasUi || typeof context.hooks.nativeContent !== "function") return false;
     this._invokeHook(context.hooks, "nativeContent", mode,
-      projectNativeContent(state.nativeContent, this._nativeUiAvailable), {
+      projectNativeContent(state.nativeContent, context.nativeUiAvailable ?? this._nativeUiAvailable), {
         runId: context.run.id, displayId: `native-run:${context.run.id}`, ...extra,
       });
     return true;
@@ -8302,7 +8360,7 @@ class ShoggothBackend extends AgentBackend {
     if (!failure && !Object.hasOwn(options, "failure")
       && ["failed", "interrupted"].includes(terminal.status) && options.skipHistory !== true) {
       try {
-        const items = await this._getHistoryItems(context.key);
+        const items = await this._readObservedRunHistory(context);
         const messages = reassembleHistory(items.filter(item => item.runId === terminal.id && item.type === "error"));
         failure = messages.find(message => message.role === "system"
           && message.errorCode === displayedRuntimeErrorCode(terminal.errorCode, message.failure))?.failure;
@@ -8324,7 +8382,7 @@ class ShoggothBackend extends AgentBackend {
         : state.historyRequired === true ? "" : state.text;
       if (!text && options.skipHistory !== true) {
         try {
-          const items = await this._getHistoryItems(context.key);
+          const items = await this._readObservedRunHistory(context);
           const messages = reassembleHistory(items.filter((item) => item.runId === terminal.id));
           const assistant = [...messages].reverse().find((message) => message.role === "assistant");
           const historyText = assistant?.content?.filter((part) => part?.type === "text")
@@ -8572,8 +8630,12 @@ class ShoggothBackend extends AgentBackend {
 
   async watchSession(key, hooks = {}, opts = {}) {
     if (opts.signal?.aborted) return;
+    return this._watchSessionTarget(key, this._sessionTarget(key), hooks, opts);
+  }
+
+  async _watchSessionTarget(key, target, hooks, opts) {
+    if (opts.signal?.aborted) return;
     const generation = this._generation;
-    const target = this._sessionTarget(key);
     const active = await this._findActiveRun(target, { refresh: true });
     if (opts.signal?.aborted || generation !== this._generation) return;
     if (!active) {
@@ -8617,6 +8679,8 @@ class ShoggothBackend extends AgentBackend {
         key,
         sessionKey: target.sessionKey,
         target,
+        resolveTarget: opts.resolveTarget,
+        nativeUiAvailable: opts.nativeUiAvailable,
         run: active,
         hooks,
         poll,

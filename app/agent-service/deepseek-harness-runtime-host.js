@@ -7,7 +7,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { quotaSnapshot } = require("../core/oauth-account-quota");
+const { quotaSnapshot, validQuotaScope } = require("../core/oauth-account-quota");
 const { statIfExists } = require("./private-file");
 const { serviceError } = require("./security");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
@@ -382,15 +382,16 @@ class DeepSeekHarnessRuntimeHost {
 
   beginAcquire() { this._assertReady(); }
 
-  async authenticationState() {
+  async authenticationState({ includeQuotaScope = false } = {}) {
     this._assertReady();
     const identity = this._modelCatalogIdentity();
     const now = this.now();
-    if (this.profileState.auth && this.profileState.authExpiresAt > now
+    if (!includeQuotaScope && this.profileState.auth && this.profileState.authExpiresAt > now
       && this.profileState.authIdentity === identity) {
       return this.profileState.auth;
     }
-    const state = await this.process.request("auth/read", {}, { timeoutMs: this.requestTimeoutMs });
+    const state = await this.process.request("auth/read", includeQuotaScope ? { includeQuotaScope } : {},
+      { timeoutMs: this.requestTimeoutMs });
     if (!plain(state) || typeof state.authenticated !== "boolean"
       || typeof state.credentialPresent !== "boolean") {
       throw hostError(
@@ -411,7 +412,8 @@ class DeepSeekHarnessRuntimeHost {
     this.profileState.auth = result;
     this.profileState.authIdentity = this._modelCatalogIdentity();
     this.profileState.authExpiresAt = now + 30_000;
-    return result;
+    return includeQuotaScope && result.authenticated && validQuotaScope(state.quotaScope)
+      ? { ...result, quotaScope: state.quotaScope } : result;
   }
 
   async accountQuotaRead() {
@@ -423,7 +425,7 @@ class DeepSeekHarnessRuntimeHost {
     if (identity !== this._modelCatalogIdentity()) return { status: "unavailable" };
     if (result?.status === "unsupported") return { status: "unsupported" };
     if (result?.status !== "available") return { status: "unavailable" };
-    return quotaSnapshot([], { accountName: result.accountName,
+    return quotaSnapshot([], { accountName: result.accountName, quotaScope: result.quotaScope,
       credits: { kind: "wallets", wallets: result.wallets }, checkedAt: this.now() });
   }
 

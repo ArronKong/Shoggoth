@@ -169,10 +169,14 @@ class McpOAuthClient {
       if (!this._active(session) || result !== "AUTHORIZED" || !session.tokens) throw oauthError();
       const current = this._record(session.id);
       if (current.transport.url !== session.serverUrl) throw oauthError("MCP_OAUTH_CLIENT_CHANGED");
-      // secrets.write is a synchronous encrypted commit in production. Cancellation is checked before and after it.
+      // Activate OAuth only after the encrypted token write and the cancellation check.
       const secretRef = await this.secrets.write(session.id, JSON.parse(JSON.stringify({ oauthClient: { ...session.client, redirectUri: session.redirectUri }, oauthToken: session.tokens, oauthDiscovery: { ...session.discovery, serverUrl: session.serverUrl }, oauthCodeVerifier: null })));
       if (!this._active(session)) { await this.secrets.write(session.id, { oauthToken: null }); throw oauthError("MCP_OAUTH_CANCELLED"); }
-      if (!current.secretRef && typeof this.store.update === "function") this.store.update({id:session.id,patch:{secretRef},expectedRevision:this.store.revision});
+      if (current.auth?.kind === "none") {
+        this.store.update({ id: session.id, patch: { secretRef, auth: { kind: "oauth-dcr" } }, expectedRevision: this.store.revision });
+      } else if (!current.secretRef) {
+        this.store.update?.({ id: session.id, patch: { secretRef }, expectedRevision: this.store.revision });
+      }
       session.status = "authorized"; session.authorizationUrl = null; session.state = null; session.verifier = null; session.tokens = null;
       this._changed(session);
     } catch (error) {

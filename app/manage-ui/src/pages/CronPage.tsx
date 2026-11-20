@@ -864,9 +864,6 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
         model={delivery?.model
           ? `${delivery.provider ? `${delivery.provider}/` : ""}${delivery.model}`
           : deliveryJob?.model || t("cronForm.modelDefault")}
-        bodyLabel={delivery && delivery.outputDisposition !== "silent" && delivery.outputDisposition !== "pending"
-          ? (delivery.fullText ? t("dashboard.fullTextTitle") : delivery.summary ? t("dashboard.summaryTitle") : undefined)
-          : undefined}
         onAskInChat={deliveryJob && deliverySessionKey && deliveryReport
           ? () => askInChat(deliveryJob.backendId, deliverySessionKey, deliveryReport)
           : undefined}
@@ -878,7 +875,6 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
         }}
       >
         {delivery?.error && <ReportNote error>{delivery.error}</ReportNote>}
-        {delivery?.source === "summary" && <ReportNote>{t("cron.deliverySummaryNote")}</ReportNote>}
         {delivery?.outputDisposition === "silent" ? (
           <ReportNote>{t("cron.silentDelivery")}</ReportNote>
         ) : delivery?.outputDisposition === "pending" ? (

@@ -98,7 +98,7 @@ const PACKAGE_REGULAR_FILES = [
 function packageMetadata(overrides = {}) {
   return {
     layoutVersion: 1,
-    version: "0.167.1",
+    version: "0.170.0",
     target: "aarch64-apple-darwin",
     variant: "codex",
     entrypoint: "bin/codex",
@@ -183,7 +183,7 @@ function writeFixtureManifest(root, archivePath, overrides = {}) {
   const platform = {
     arch: "arm64",
     assetName: "codex-package-aarch64-apple-darwin.tar.gz",
-    archiveUrl: "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-package-aarch64-apple-darwin.tar.gz",
+    archiveUrl: "https://github.com/openai/codex/releases/download/rust-v0.170.0/codex-package-aarch64-apple-darwin.tar.gz",
     archiveSha256: sha256(archivePath),
     archiveSize: fs.statSync(archivePath).size,
     archiveEntry: "bin/codex",
@@ -199,7 +199,7 @@ function writeFixtureManifest(root, archivePath, overrides = {}) {
   };
   const manifest = {
     schemaVersion: 1,
-    runtime: { name: "codex", version: "0.167.1" },
+    runtime: { name: "codex", version: "0.170.0" },
     platforms: { "darwin-arm64": platform },
   };
   const fixtureManifestPath = path.join(root, `manifest-${crypto.randomUUID()}.json`);
@@ -326,13 +326,13 @@ async function main() {
     "version",
   ]);
   assert.equal(manifest.runtime.name, "codex");
-  assert.equal(manifest.runtime.version, "0.167.1");
+  assert.equal(manifest.runtime.version, "0.170.0");
   assert.equal(manifest.runtime.tag, `rust-v${manifest.runtime.version}`);
   assert.equal(
     manifest.runtime.releaseUrl,
     `https://github.com/openai/codex/releases/tag/${manifest.runtime.tag}`,
   );
-  assert.equal(manifest.runtime.publishedAt, "2026-11-10T21:32:01Z");
+  assert.equal(manifest.runtime.publishedAt, "2026-11-18T03:40:48Z");
   assert.equal(manifest.runtime.license, "Apache-2.0");
 
   assert.deepEqual(Object.keys(manifest.schema).sort(), ["directory", "includeExperimental", "version"]);
@@ -345,9 +345,9 @@ async function main() {
       arch: "arm64",
       assetName: "codex-package-aarch64-apple-darwin.tar.gz",
       archiveUrl:
-        "https://releases.openai.com/codex/releases/0.167.1/codex-package-aarch64-apple-darwin.tar.gz",
-      archiveSha256: "5bcbc5866cbca19f9299f7884e9b39b9ccb5469969c170b1f2d2cd6fc4b1ee72",
-      archiveSize: 166615534,
+        "https://releases.openai.com/codex/releases/0.170.0/codex-package-aarch64-apple-darwin.tar.gz",
+      archiveSha256: "975524bf13aedd1b122d8d0e00c09ee67091b8f688c0b374943dbb3cf22c7893",
+      archiveSize: 173593904,
       archiveEntry: "bin/codex",
       destination: ".vendor/codex/arm64/package/bin/codex",
       packageDestination: ".vendor/codex/arm64/package",
@@ -362,9 +362,9 @@ async function main() {
       arch: "x64",
       assetName: "codex-package-x86_64-apple-darwin.tar.gz",
       archiveUrl:
-        "https://releases.openai.com/codex/releases/0.167.1/codex-package-x86_64-apple-darwin.tar.gz",
-      archiveSha256: "ade991ce7fef5b4f4af884c154b9455d493cd0caf13789fc3ff9f842897b55d3",
-      archiveSize: 180452942,
+        "https://releases.openai.com/codex/releases/0.170.0/codex-package-x86_64-apple-darwin.tar.gz",
+      archiveSha256: "2e971524460a570b913dbdc9b49e5e9c14556e44e7f62f00b95b4a8f1e2cdf25",
+      archiveSize: 188621592,
       archiveEntry: "bin/codex",
       destination: ".vendor/codex/x64/package/bin/codex",
       packageDestination: ".vendor/codex/x64/package",
@@ -499,7 +499,7 @@ async function main() {
     ]);
     assert.deepEqual(result, {
       platform: "darwin-arm64",
-      version: "0.167.1",
+      version: "0.170.0",
       destination: installedPath,
       hostDestination: installedHostPath,
       packageDestination: path.join(repoRoot, ".vendor", "codex", "arm64", "package"),
@@ -663,7 +663,7 @@ async function main() {
     assert.throws(() => selectPlatforms("linux-x64", "darwin", "arm64"), /unsupported.*linux-x64/i);
 
     for (const url of [
-      "https://releases.openai.com/codex/releases/0.167.1/codex-fixture.tar.gz",
+      "https://releases.openai.com/codex/releases/0.170.0/codex-fixture.tar.gz",
       "https://github.com/openai/codex/releases/download/tag/asset.tar.gz",
       "https://release-assets.githubusercontent.com/github-production-release-asset/file?sp=signed",
       "https://objects.githubusercontent.com/github-production-release-asset/file?sig=signed",
@@ -680,7 +680,7 @@ async function main() {
     }
 
     const curlDownloadUrl =
-      "https://releases.openai.com/codex/releases/0.167.1/codex-fixture.tar.gz";
+      "https://releases.openai.com/codex/releases/0.170.0/codex-fixture.tar.gz";
     const curlCalls = [];
     const curlDestination = path.join(fixtureRoot, "curl-success.tar.gz");
     await downloadArchiveWithCurl(curlDownloadUrl, curlDestination, {

@@ -4,14 +4,14 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const CODEX_VERSION = "0.167.1";
+const CODEX_VERSION = "0.170.0";
 const SCHEMA_BUNDLES = Object.freeze({
   legacy: "json/codex_app_server_protocol.schemas.json",
   v2: "json/codex_app_server_protocol.v2.schemas.json",
 });
 const PINNED_BUNDLE_SHA256 = Object.freeze({
-  [SCHEMA_BUNDLES.legacy]: "021462a9bacd117f4cd40c256a4888619d059cec6a65b795198d521ba660e554",
-  [SCHEMA_BUNDLES.v2]: "f2576ca5d46be4cfb159906264fbc173efcfcc917ea8fdc38323770e7b657b5a",
+  [SCHEMA_BUNDLES.legacy]: "ca6123bc03238217a62a32c745b45e267fdb26825a80ce6849e893fcbe6628b8",
+  [SCHEMA_BUNDLES.v2]: "4ff1f902e0e4a7a6f343128b98cd38706094ca339e66010878584908c058a4a3",
 });
 const OPERATION_DEFINITIONS = Object.freeze({
   initialize: ["InitializeParams", "InitializeResponse"],

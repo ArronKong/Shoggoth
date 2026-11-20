@@ -12,7 +12,7 @@ import { useGlassRenderer } from "./useGlassRenderer";
 import FilterTabs from "../../components/FilterTabs";
 import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../../lib/sessionKind";
 import ChatModelMenu, { type ModelMenuChoice } from "../ChatModelMenu";
-import { IconQuote, MESSAGE_DELETION_ENABLED } from "../ChatMessageActions";
+import { ChatTaskDetailsButton, IconQuote, MESSAGE_DELETION_ENABLED } from "../ChatMessageActions";
 import ChatPermissionMenu from "../ChatPermissionMenu";
 import ChatThinkFastMenu from "../ChatThinkFastMenu";
 import type { ChatPermissionModeOption } from "../../types";
@@ -80,6 +80,7 @@ export interface ImmersiveMessage {
   onCopy?: () => void;
   onQuote?: () => void;
   onOpenActivity?: () => void;
+  onOpenTaskDetails?: () => void;
   onPin?: () => void;
   pinned?: boolean;
   onDelete?: () => void;
@@ -506,7 +507,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     const onOpenActivity = m.footer && m.onCopy && !m.pending && !m.loadingReply ? m.onOpenActivity : undefined;
     const onQuote = !m.pending && !m.loadingReply ? m.onQuote : undefined;
     const onDelete = MESSAGE_DELETION_ENABLED ? m.onDelete : undefined;
-    return m.onCopy || onQuote || m.onPin || onDelete ? (
+    return m.onCopy || onQuote || m.onOpenTaskDetails || m.onPin || onDelete ? (
       <div className={styles.rowActions}>
         {onOpenActivity && (
           <button type="button" className={styles.actBtn} data-chat-footer-icon="" onClick={onOpenActivity}
@@ -514,6 +515,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             <IconTrajectory />
           </button>
         )}
+        {m.onOpenTaskDetails && <ChatTaskDetailsButton className={styles.actBtn} onOpen={m.onOpenTaskDetails} />}
         {m.onCopy && (
           <button type="button" className={styles.actBtn} data-chat-footer-icon="" onClick={m.onCopy} title={t("chat.copy")}>
             <IconMiniCopy />
