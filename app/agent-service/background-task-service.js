@@ -11,8 +11,8 @@ const { serviceError } = require("./security");
 const { transcriptEventId } = require("./transcript-store");
 const { isRuntimeAvailable } = require("../runtime-availability");
 const {
-  BACKGROUND_TASK_RUNTIMES, MAX_BRIEF_BYTES, MAX_MESSAGE_BYTES, TASK_ID_PATTERN, TERMINAL_RUN_STATUSES,
-  WAITING_RUN_STATUSES, backgroundReportEventId, backgroundTaskId, deriveTitle, isBackgroundTaskReportEvent, validText,
+  BACKGROUND_TASK_RUNTIMES, MAX_BRIEF_BYTES, MAX_MESSAGE_BYTES, MAX_TASK_TITLE_BYTES, TASK_ID_PATTERN, TERMINAL_RUN_STATUSES,
+  WAITING_RUN_STATUSES, backgroundReportEventId, backgroundTaskId, backgroundTaskTitleLine, deriveTitle, isBackgroundTaskReportEvent, validText,
   BRIEF_MARKER, FOLLOW_UP_MARKER, STEER_PREFIX, visibleBackgroundInstruction,
 } = require("./background-task-protocol");
 
@@ -23,6 +23,7 @@ const MAX_REPORT_FILES = 20;
 const FILE_PAGE_BYTES = 4096;
 const MAX_DETAIL_MESSAGES = 60;
 const MAX_DETAIL_TEXT_BYTES = 96 * 1024;
+const APP_LIST_TITLE_BUDGET_BYTES = 60 * 1024; // Leave space in the 64 KiB Service response frame.
 const RETRY_MS = 2_000;
 
 const taskError = (code, message = code) => serviceError(code, message);
@@ -255,9 +256,30 @@ class BackgroundTaskService {
   }
 
   list(sessionOrKey) {
-    const session = typeof sessionOrKey === "string" ? this.#uiSession(sessionOrKey) : sessionOrKey;
-    return this.store.list({ profileId: session.profileId, sourceSessionKey: session.sessionKey })
+    const forApp = typeof sessionOrKey === "string";
+    const session = forApp ? this.#uiSession(sessionOrKey) : sessionOrKey;
+    const tasks = this.store.list({ profileId: session.profileId, sourceSessionKey: session.sessionKey })
       .map(record => this.#publicTask(record));
+    if (!forApp) return tasks;
+    let remaining = APP_LIST_TITLE_BUDGET_BYTES - Buffer.byteLength(JSON.stringify(tasks));
+    // Expand recent cards first. Every task still has its stored title if the
+    // first brief is unavailable or its display text would exceed the frame.
+    for (let i = tasks.length - 1; i >= 0 && remaining > 0; i--) {
+      const task = tasks[i];
+      if (!task.title.endsWith("…")) continue;
+      try {
+        const brief = visibleBackgroundInstruction(this.store.readPrompt(task.taskId, 1));
+        if (deriveTitle(brief) !== task.title) continue;
+        const line = this.projectMessage(session, backgroundTaskTitleLine(brief));
+        const { text: title } = truncateUtf8(line, MAX_TASK_TITLE_BYTES);
+        const extraBytes = Buffer.byteLength(JSON.stringify(title)) - Buffer.byteLength(JSON.stringify(task.title));
+        if (extraBytes <= remaining && title.trim()) {
+          task.title = title;
+          remaining -= extraBytes;
+        }
+      } catch { /* Keep the stored title when the original brief cannot be read. */ }
+    }
+    return tasks;
   }
 
   detail(sessionKey, taskId) {

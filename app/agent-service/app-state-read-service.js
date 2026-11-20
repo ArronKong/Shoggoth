@@ -256,9 +256,13 @@ class AppStateReadService {
       summary = { state: "retired", legacyDataPreserved: true, executionEnabled: false, uiTarget: "/connectors" };
     } else if (section === "connectors") {
       const status = this.getConnectorStatus?.() || { state: "unavailable", version: "1.9.2" };
-      // Account discovery is confined to the Run-frozen connector tools. This
-      // global metadata projection cannot enumerate account labels or grants.
+      // This read exposes connector health only. Account labels and grants
+      // remain with their respective connector and permission authority.
       items = [{ state: text(status.state, 64), version: text(status.version, 64) }];
+      if (context.includeNativeRoles && this.getLarkConnector) {
+        const lark = await this.getLarkConnector();
+        if (lark) items.push(lark);
+      }
       summary = { uiTarget: "/connectors", accountDiscovery: "run_scoped_connector_tools" };
     } else if (section === "usage") {
       const value = this.usageStore.summarize("30d");

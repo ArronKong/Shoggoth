@@ -3231,7 +3231,16 @@ test("terminal diagnosis is scoped, redacted and immutable across recovery", asy
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "terminal-diagnosis-")));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache"), trustedRoot: root });
   const transcriptStore = new TranscriptStore({ paths }); transcriptStore.open();
-  const value = await openFixture({ transcriptStore, sessionStatus: "ready", threadId: "thread-failure-detail",
+  let usageAvailable = false;
+  const usageStore = {
+    record() {},
+    list() {
+      if (!usageAvailable) throw codedError("ENOSPC");
+      return [{ model: "reported-after-restart" }];
+    },
+  };
+  const value = await openFixture({ transcriptStore, usageStore, sessionStatus: "ready", threadId: "thread-failure-detail",
+    inboxTransitionFailures: { completed: "PENDING_COMMAND_COMMIT_UNCERTAIN" },
     sessionWorkspace: root, threads: [{ id: "thread-failure-detail", threadSource: null, turns: [] }] });
   try {
     const { ack } = await sendAndDrain(value, { operationId: "failure-detail" });
@@ -3243,7 +3252,7 @@ test("terminal diagnosis is scoped, redacted and immutable across recovery", asy
     value.host.emit({ ...identity, turnId: "another-turn", failure: { message: "foreign reason" } });
     const turn = value.host.threads[0].turns[0]; turn.status = "failed"; turn.errorCode = "ANTIGRAVITY_TURN_FAILED";
     value.host.emit({ ...identity, failure: { message: "Project verification required; fixture-provider-key", httpStatus: 400, upstreamCode: "verification_required" } });
-    await value.coordinator.waitForIdle(running.id);
+    await assert.rejects(value.coordinator.waitForIdle(running.id), { code: "PENDING_COMMAND_COMMIT_UNCERTAIN" });
     const terminal = events.find(event => event.type === "terminal");
     assert.match(terminal.payload.failure.message, /Project verification required/u);
     assert.ok(!JSON.stringify(terminal).includes("fixture-provider-key"));
@@ -3251,10 +3260,21 @@ test("terminal diagnosis is scoped, redacted and immutable across recovery", asy
     const readTerminal = () => transcriptStore.listEvents(PROFILE_ID, value.sessions.session.id).find(event => event.content.transcriptType === "terminal");
     const saved = readTerminal();
     assert.deepEqual(transcriptHistoryItem(saved).payload.message.failure, terminal.payload.failure);
-    await value.coordinator.recover();
-    assert.deepEqual(readTerminal(), saved);
-    assert.equal(value.host.turnStartCalls, 1, "diagnostic recovery never replays the operation");
+    assert.equal(Object.hasOwn(saved.content, "responseMetadata"), false);
+    assert.equal(value.inbox.get("failure-detail").state, "dispatching");
     subscription.unsubscribe();
+    await value.coordinator.close();
+    transcriptStore.close();
+    transcriptStore.open();
+    usageAvailable = true;
+    const restarted = fixture({ transcriptStore, usageStore, dispatcher: value.dispatcher, inbox: value.inbox,
+      sessions: value.sessions, host: value.host });
+    try {
+      await restarted.coordinator.open();
+      assert.equal(value.inbox.get("failure-detail").state, "completed");
+      assert.deepEqual(readTerminal(), saved);
+      assert.equal(value.host.turnStartCalls, 1, "diagnostic recovery never replays the operation");
+    } finally { await restarted.coordinator.close(); }
   } finally { await value.coordinator.close(); transcriptStore.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 

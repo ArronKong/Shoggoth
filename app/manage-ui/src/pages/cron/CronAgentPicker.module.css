@@ -40,8 +40,6 @@
 .trigger:disabled { cursor: default; opacity: .5; }
 .positioner { z-index: 300; }
 .retry { display: block; border: 0; padding: 0; margin-top: 8px; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
-.trigger:focus-visible, .popup button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
-.popup .agent:focus-visible { outline-offset: -2px; }
 
 @media (max-width: 420px) { .popup { padding-inline: 24px; } }
 @media (prefers-reduced-motion: reduce) { .popup { transition: none; } }

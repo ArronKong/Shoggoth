@@ -89,19 +89,13 @@ main.content {
   color: var(--u-hi-ink);
 }
 
-/* —— 搜索框：胶囊 + 金色 focus 圈 —— */
+/* —— 搜索框：胶囊 —— */
 :is(.page, .cron-page) .search {
   border: 1px solid var(--u-hairline);
   border-radius: 999px;
   background: var(--u-card);
   padding: 0.35rem 0.9rem;
 }
-:is(.page, .cron-page) .search:focus {
-  outline: none;
-  border-color: var(--u-gold);
-  box-shadow: 0 0 0 3px rgba(242, 201, 76, 0.25);
-}
-
 /* —— 按钮：整套变体/尺寸/状态已在 styles.css 的「按钮系统」里按设计稿
    （Figma 7108:1106）统一定义，页面作用域不再另立黄胶囊/红描边覆盖，
    否则会以更高特异性压掉全局配方。这里只留裸 `.btn-sm` 的胶囊圆角。 —— */
@@ -921,11 +915,6 @@ header.page-head {
   color: var(--ui-text-1);
 }
 
-.cron-row-actions button:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
-
 .management-page.cron-page .cal {
   min-width: 0;
   max-width: 100%;
@@ -1052,8 +1041,6 @@ header.page-head {
 }
 
 .management-page.models-page .model-card:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
   box-shadow: var(--ui-shadow-card);
 }
 
@@ -1287,15 +1274,8 @@ header.page-head {
   box-shadow: none;
 }
 
-:is(.management-page.skills-page .skill-card, .management-catalog-card):is(:hover, :has(> :is(.skill-card-open, .management-catalog-open):focus-visible)) {
+:is(.management-page.skills-page .skill-card, .management-catalog-card):is(:hover, :has(> .skill-card-open:focus-visible, > .management-catalog-open:focus-visible)) {
   background-color: color-mix(in srgb, var(--ui-surface-1), light-dark(black, white) 5%);
-}
-
-@media (forced-colors: active) {
-  :is(.management-page.skills-page .skill-card-open, .management-catalog-card > .management-catalog-open):focus-visible {
-    outline: 2px solid Highlight;
-    outline-offset: -4px;
-  }
 }
 
 .management-page.skills-page .skill-card:active {
@@ -1357,8 +1337,7 @@ header.page-head {
   color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
 }
 
-/* 管理页 Switch 的开态覆盖 marker 外的旧品牌金。走 --ui-switch-on（R319 起=纯黑，
-   见设计稿 7112:1840），与焦点环不是一回事，别合并回 --ui-focus。 */
+/* 管理页 Switch 开态使用设计稿 7112:1840 的纯黑。 */
 .management-page [role="switch"][data-checked]:not([data-disabled]) {
   background: var(--ui-switch-on);
 }
@@ -1366,22 +1345,6 @@ header.page-head {
 .management-page [role="switch"][data-disabled] {
   background: var(--ui-surface-2);
   opacity: 1;
-}
-
-/* 通配焦点环只做「自己没定义焦点态」的兜底：表单控件按设计稿（7112:1834）只把
-   描边换成纯黑、不加环，必须排除掉——它们的 `.field-input:focus-visible` 与本条
-   特异性打平 (0,2,0)，而本文件后加载会靠源序赢，不排除就会把环加回去。
-   下拉用 [role="combobox"] 命中，因为 base-ui 的触发器类名是 CSS Module 哈希。 */
-.management-page :focus-visible:not(:is(.field-input, .field-textarea, [role="combobox"])) {
-  outline: none;
-  box-shadow:
-    0 0 0 2px var(--ui-surface-1),
-    0 0 0 4px var(--ui-focus);
-}
-
-.management-page.tasks-page .kb-pill:focus-within {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
 }
 
 @media (max-width: 960px) {
@@ -1597,8 +1560,7 @@ header.page-head {
   cursor: not-allowed;
 }
 
-/* 按下态（aria-pressed / .is-on）= 黑胶囊，与 tabs 的选中语言一致；
-   蓝色只留给焦点环（规范 §7）。 */
+/* 按下态（aria-pressed / .is-on）使用与 tabs 一致的黑胶囊。 */
 .management-page .ui-cbtn[aria-pressed="true"],
 .management-page .ui-cbtn.is-on {
   border-color: transparent;
@@ -1685,13 +1647,6 @@ header.page-head {
   color: var(--ui-error);
 }
 
-.management-page .ui-cbtn:focus-visible {
-  outline: none;
-  box-shadow:
-    0 0 0 2px var(--ui-surface-1),
-    0 0 0 4px var(--ui-focus);
-}
-
 /* 轻量开关：32px 胶囊，选中＝黑底（不是蓝，规范 §7）。用于第二层的视图开关，
    与 48px 主行控件拉开层级；工作板视图行与 Hermes 看板筛选行共用。 */
 .management-page .ui-toggle {
@@ -1739,13 +1694,6 @@ header.page-head {
 .management-page .ui-toggle:disabled {
   color: color-mix(in srgb, var(--ui-text-1) 40%, var(--ui-surface-1));
   cursor: not-allowed;
-}
-
-.management-page .ui-toggle:focus-visible {
-  outline: none;
-  box-shadow:
-    0 0 0 2px var(--ui-surface-1),
-    0 0 0 4px var(--ui-focus);
 }
 
 /* 区块标题（规范 §6 的 18/24·500）：靠留白与字号分层，不再用 hairline 下划线。 */

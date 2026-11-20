@@ -46,8 +46,9 @@ async function startPreview(port) {
   const parent = await f.send(source.sessionKey, "preview-op-1", "后台帮我比较 A、B、C 三款产品的定价，整理成表格，做好发这里。");
   const pricing = (await tool(f, parent, "background_task_start", {
     brief: "比较产品 A、B、C 的定价\n整理成 CSV 表格，指出最便宜的方案。" })).task;
+  const researchTitle = "调研三家竞品最近一季度的发布节奏，按公司与时间整理主要功能、价格和适用范围，核对每次更新对应的官方公告和产品文档。区分已经上线的功能、灰度测试和后续计划，并在对比表中为每条结论附上直达链接和可核对的发布日期。";
   const research = (await tool(f, parent, "background_task_start", {
-    brief: "调研三家竞品最近一季度的发布节奏\n每家列出主要发布和日期。" })).task;
+    brief: `${researchTitle}\n每家列出主要发布和日期。` })).task;
   const pricingRun = await childRun(f, pricing.taskId);
   await childRun(f, research.taskId);
   await f.complete(parent, "好的，我已经交给后台去比较定价，另一项竞品调研也在后台进行。你可以先问别的。");
@@ -90,7 +91,7 @@ async function startPreview(port) {
   const completeResearch = () => f.complete(researchRun,
     "三家竞品上季度各有两次主要发布：A 在 7 月和 9 月，B 在 8 月和 9 月，C 在 7 月和 8 月。");
   const url = `${staticServer.url}/#/chat`;
-  return { url, base: staticServer.url, fixture: f, tasks: { pricing: pricing.taskId, research: research.taskId }, completeResearch,
+  return { url, base: staticServer.url, fixture: f, tasks: { pricing: pricing.taskId, research: research.taskId }, researchTitle, completeResearch,
     sessionKey: `agent:${f.profile.agentId}:${source.sessionKey}`, close: async () => {
     await staticServer.close(); await proxy.close(); await backend.stop();
     for (const socket of wss.clients) socket.terminate();

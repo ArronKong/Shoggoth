@@ -10,6 +10,7 @@ const REPORT_EVENT_PATTERN = /^background-report-[a-f0-9]{64}$/u;
 const MAX_BRIEF_BYTES = 16 * 1024;
 const MAX_MESSAGE_BYTES = 16 * 1024;
 const MAX_TITLE_CHARS = 80;
+const MAX_TASK_TITLE_BYTES = 512;
 const MAX_GENERATIONS = 16;
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "canceled", "interrupted", "skipped"]);
 const WAITING_RUN_STATUSES = new Set(["waiting_approval", "waiting_input"]);
@@ -87,16 +88,20 @@ function validText(value, maxBytes) {
     && value.trim().length > 0 && utf8Bytes(value) <= maxBytes;
 }
 
-function deriveTitle(brief) {
+function backgroundTaskTitleLine(brief) {
   const line = brief.split(/\r?\n/u).map(item => item.trim()).find(Boolean) || "";
-  const chars = [...line.replace(/\s+/gu, " ")];
+  return line.replace(/\s+/gu, " ");
+}
+
+function deriveTitle(brief) {
+  const chars = [...backgroundTaskTitleLine(brief)];
   return chars.length > MAX_TITLE_CHARS ? `${chars.slice(0, MAX_TITLE_CHARS - 1).join("")}…` : chars.join("");
 }
 
 module.exports = {
-  BACKGROUND_TASK_RUNTIMES, MAX_BRIEF_BYTES, MAX_GENERATIONS, MAX_MESSAGE_BYTES, MAX_TITLE_CHARS,
+  BACKGROUND_TASK_RUNTIMES, MAX_BRIEF_BYTES, MAX_GENERATIONS, MAX_MESSAGE_BYTES, MAX_TITLE_CHARS, MAX_TASK_TITLE_BYTES,
   PUBLIC_MESSAGES, REPORT_STATES, TASK_ID_PATTERN, TASK_STATUSES, TERMINAL_RUN_STATUSES, WAITING_RUN_STATUSES,
   BRIEF_MARKER, FOLLOW_UP_MARKER, STEER_PREFIX, visibleBackgroundInstruction,
-  backgroundReportEventId, backgroundTaskId, backgroundTaskOperations, deriveTitle, isBackgroundTaskOperation,
+  backgroundReportEventId, backgroundTaskId, backgroundTaskOperations, backgroundTaskTitleLine, deriveTitle, isBackgroundTaskOperation,
   isBackgroundTaskReportEvent, validText,
 };

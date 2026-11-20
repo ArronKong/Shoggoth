@@ -59,6 +59,12 @@
 :global(body[data-immersive]) .overlay { z-index: 1100; }
 :global(body[data-immersive]) .panel { z-index: 1101; }
 
+/* Place the nested backdrop above the parent dialog and below its own panel. */
+.overlay.nested { z-index: 102; }
+.panel.nested { z-index: 103; }
+:global(body[data-immersive]) .overlay.nested { z-index: 1102; }
+:global(body[data-immersive]) .panel.nested { z-index: 1103; }
+
 .panel[data-ending-style] {
   transition-duration: var(--ui-motion-modal-exit);
   pointer-events: none;
@@ -106,14 +112,10 @@
   padding: 0;
   flex-shrink: 0;
 }
-.panel .close:hover:not(:disabled) {
+.panel .close:is(:hover, :focus-visible):not(:disabled) {
   color: var(--ui-text-1);
   background: var(--ui-surface-2);
   border-color: transparent;
-}
-.panel .close:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
 }
 /* 内容区顶到标题底 32（设计稿标题 32..60、内容区从 92 起），底到页脚也是 32。 */
 .body {

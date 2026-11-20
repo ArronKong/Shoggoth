@@ -171,7 +171,6 @@
 .management-page.settings-page .settings-advanced-summary .settings-sech { font-size: 12px; }
 .management-page.settings-page .settings-advanced-summary > svg { color: var(--ui-text-2); }
 .management-page.settings-page .settings-advanced[open] > summary > svg { transform: rotate(180deg); }
-.management-page.settings-page .settings-advanced-summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; border-radius: 8px; }
 .management-page.settings-page .settings-advanced-summary:hover .settings-h { color: var(--ui-text-2); }
 
 .management-page.settings-page .settings-themes input:focus-visible {

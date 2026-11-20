@@ -31,8 +31,7 @@
   --ui-text-3: light-dark(#7d8796, #a1a1aa);
   --ui-hairline: light-dark(rgba(20, 24, 31, 0.08), rgba(228, 230, 235, 0.1));
   --ui-control-border: light-dark(rgba(20, 24, 31, 0.12), rgba(228, 230, 235, 0.16));
-  /* 焦点环：使用跨明暗主题均有足够对比度的语义蓝，统一由这一个 token 控制。
-     Switch 选中态是另一种语义，单独走 --ui-switch-on，不跟随焦点色。 */
+  /* Accent for links and explicit action or status highlights. */
   --ui-focus: light-dark(#2563eb, #60a5fa);
   /* 开关开态：设计稿 7112:1840 是**纯黑**（暗色对称取白，配深色滑块）。R318 曾按
      旧规范把它当「语义蓝」，7112:1813 到手后确认设计里没有蓝。 */
@@ -83,6 +82,11 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* Suppress the browser's keyboard outline and let controls style focus locally. */
+:where(:focus-visible) {
+  outline: none;
 }
 
 body {
@@ -225,15 +229,12 @@ body {
     transform 120ms ease;
 }
 /* 选中项不吃 hover 底色——它身下已经是黄球，再垫一层灰会把黄球盖掉 */
-.nav-link:hover:not(.active) {
+.nav-link:is(:hover, :focus-visible):not(.active) {
   background: var(--nav-hover);
   color: light-dark(#111111, #d4d4d8);
 }
 .nav-link.active {
   color: #000000;
-}
-.nav-link:focus-visible {
-  box-shadow: 0 0 0 2px light-dark(#ffffff, #1f1f23), 0 0 0 4px light-dark(#111111, #d4d4d8);
 }
 .nav-link:active {
   transform: scale(0.96);
@@ -740,12 +741,8 @@ button:disabled {
   border-radius: 999px;
   cursor: pointer;
 }
-.cal-day:hover {
+.cal-day:is(:hover, :focus-visible) {
   background: light-dark(rgba(20, 24, 31, 0.07), rgba(228, 230, 235, 0.1));
-}
-.cal-day:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 .cal-today .cal-day {
   background: var(--accent);
@@ -779,12 +776,8 @@ button:disabled {
   cursor: pointer;
   color: light-dark(#1c2532, #e7e9ee);
 }
-.cal-chip:hover {
+.cal-chip:is(:hover, :focus-visible) {
   filter: brightness(0.94);
-}
-.cal-chip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 .cal-chip-name {
   overflow: hidden;
@@ -821,10 +814,6 @@ button:disabled {
 .cal-more:hover {
   background: light-dark(rgba(20, 24, 31, 0.06), rgba(228, 230, 235, 0.09));
   color: light-dark(#1c2532, #e7e9ee);
-}
-.cal-more:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 /* cron time grid (week / day views) — hour axis + time-positioned event cards */
@@ -1311,10 +1300,6 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 6px;
   min-width: 14rem;
-}
-.search:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 .cli-grid {
   display: grid;
@@ -1804,10 +1789,6 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 6px;
 }
-.chat-input textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
 .chat-input button {
   align-self: flex-end;
 }
@@ -2285,14 +2266,10 @@ button:disabled {
   resize: vertical;
   min-height: 5rem;
 }
-/* 聚焦态（设计稿 7112:1834）：**只把描边换成纯黑**，不加外环、不加粗。
-   单行与多行同口径——R316 当时给 textarea 留的半透明蓝外环到此取消。 */
 .field-input:focus-visible,
 .field-textarea:focus-visible,
 [data-modal-variant="connector"] :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
-  outline: none;
-  border-color: light-dark(#000000, #ffffff);
-  box-shadow: none;
+  background-color: var(--ui-surface-2);
 }
 .field-input:disabled,
 .field-textarea:disabled {
@@ -2364,10 +2341,6 @@ button:disabled {
 .cron-form-custom-trigger {
   background: #000;
   color: #fff;
-}
-.cron-form-schedule-types button:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
 }
 .cron-form-modal .foot-left { display: flex; align-items: center; }
 @media (max-width: 600px) {
@@ -2535,9 +2508,6 @@ button:disabled {
 }
 .switch input:checked + .switch-track .switch-thumb {
   transform: translateX(16px);
-}
-.switch input:focus-visible + .switch-track {
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
 }
 .switch-label {
   font-size: 0.85rem;

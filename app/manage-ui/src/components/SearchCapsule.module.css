@@ -40,8 +40,7 @@
 }
 
 .box:focus-within {
-  border-color: var(--ui-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus) 18%, transparent);
+  background-color: var(--ui-surface-2);
 }
 
 .input {

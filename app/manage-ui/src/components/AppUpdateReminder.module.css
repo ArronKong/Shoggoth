@@ -33,11 +33,6 @@
 
 .button:active:not([aria-disabled="true"]) { transform: scale(0.97); }
 
-.button:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
-
 .ring {
   position: absolute;
   inset: -1px;

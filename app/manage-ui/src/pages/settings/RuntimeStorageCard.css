@@ -20,7 +20,6 @@
 .management-page.settings-page .runtime-account-facts dd { margin: 4px 0 0; font-size: 12px; }
 .management-page.settings-page .runtime-updated { margin: 0 4px; font-size: 11px; color: var(--settings-muted-surface-1); }
 .management-page.settings-page .runtime-accounts-empty { padding: 0 24px 20px; }
-.management-page.settings-page .runtime-account-row > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -4px; border-radius: 12px; }
 @media (max-width: 600px) {
   .management-page.settings-page .runtime-shared { display: none; }
   .management-page.settings-page .runtime-account-row > summary { padding-inline: 16px; gap: 8px; }

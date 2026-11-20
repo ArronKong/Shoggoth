@@ -65,6 +65,10 @@ const server = createServer(async (request, response) => {
     if (action === "retry") fixture.controls.fail.delete(key);
     if (action === "service-ready") serviceReady = true;
     if (action === "append") fixture.append(key);
+    if (action === "navigation-threshold") {
+      fixture.histories.set(fixture.cases[0].key, transcript("navshort", 12));
+      fixture.histories.set(fixture.cases[1].key, transcript("navready", 14));
+    }
     if (action === "slow") fixture.controls.delay = 160;
     if (action === "fast") fixture.controls.delay = 20;
     if (action === "hold-native-history" && !releaseNativeHistory) {
@@ -217,7 +221,8 @@ try{await w.loadURL(${JSON.stringify(url)});const cold=await w.webContents.execu
 const fresh=await w.webContents.executeJavaScript("window.runNewSessionHistoryFixture()");
 const result=await w.webContents.executeJavaScript("window.runHistoryFixture()");
 if(${!!output})fs.writeFileSync(${JSON.stringify(output ? path.join(output, "history-final.png") : "")},(await w.webContents.capturePage()).toPNG());
-console.log(JSON.stringify({cold,fresh,...result}));ok=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(ok?0:1);}});`);
+const navigation=await w.webContents.executeJavaScript("window.runMessageNavigationFixture()");
+console.log(JSON.stringify({cold,fresh,...result,navigation}));ok=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(ok?0:1);}});`);
     const child = spawn(path.join(root, "node_modules/.bin/electron"), [path.join(temp, "electron.cjs")],
       { env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" }, stdio: ["ignore", "pipe", "pipe"] });
     const timer = setTimeout(() => child.kill(), 120000);

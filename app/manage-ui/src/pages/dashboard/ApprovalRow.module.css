@@ -33,7 +33,6 @@
 }
 .root[data-tone=attention] .header::after { opacity: 0; }
 @keyframes running-sheen { to { transform: translateX(100%); } }
-.header:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .avatar {
   position: relative; display: grid; place-items: center; flex: 0 0 16px; width: 16px; height: 16px;
   overflow: hidden; border-radius: 50%; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); font-size: 10px;
@@ -86,11 +85,9 @@
   min-height: 32px; padding: 6px 8px; border: 1px solid var(--ui-text-1); border-radius: 16px;
   background: transparent; color: var(--ui-text-1); font: inherit; line-height: 18px;
 }
-.expansion :global(.chat-prompt__btn):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -3px; }
 .expansion :global(.chat-prompt__status) { color: var(--ui-text-2); }
 .utilities { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-height: 32px; margin: 8px 0 0 auto; }
 .utilities button { padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--ui-text-2); font: inherit; cursor: pointer; }
-.utilities button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
 .expansion :global(.chat-prompt__input) { min-width: 0; color: #fff; border-color: #ffffff88; }
 .expansion :global(.chat-prompt__input)::placeholder { color: #ffffffbb; }
 .expansion :global(.chat-prompt__option) { padding: 10px; }

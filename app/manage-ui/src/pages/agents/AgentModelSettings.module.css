@@ -105,9 +105,7 @@
 
 .mainRow [role="combobox"]:focus-visible,
 .overviewDefaults [role="combobox"]:focus-visible {
-  outline: none;
-  border-color: var(--ui-text-1);
-  box-shadow: none;
+  background-color: var(--ui-surface-2);
 }
 
 .mainRow .mainSelection > :global(.ui-cbtn) {

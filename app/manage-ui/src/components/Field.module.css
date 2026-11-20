@@ -56,10 +56,8 @@
     color-mix(in srgb, var(--ui-text-1) 30%, var(--ui-surface-2))
   );
 }
-.switchRoot[data-focused] {
-  /* 表面色边框与外侧焦点环共同构成清晰的双层焦点反馈。 */
-  border-color: var(--ui-surface-1);
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+.switchRoot:focus-visible .switchThumb {
+  background: light-dark(var(--ui-primary), #606064);
 }
 .switchLabel {
   font-size: 0.85rem;
@@ -100,12 +98,11 @@
     box-shadow var(--ui-motion-state) ease,
     color var(--ui-motion-state) ease;
 }
-/* 与输入框同口径：聚焦/展开只把描边换成纯黑，不加外环。 */
-.trigger:focus-visible,
+.trigger:focus-visible {
+  background-color: var(--ui-surface-2);
+}
 .trigger[data-popup-open] {
-  outline: none;
   border-color: light-dark(#000000, #ffffff);
-  box-shadow: none;
 }
 .trigger[data-disabled] {
   background: var(--ui-surface-2);

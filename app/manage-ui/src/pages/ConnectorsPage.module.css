@@ -5,9 +5,6 @@
   box-sizing: border-box; border: 1px solid var(--ui-hairline); border-radius: 9px;
   background: var(--ui-surface-1); color: var(--ui-text-1); padding: 10px 12px; font: inherit; font-size: 13px; min-width: 0;
 }
-.page input:focus-visible, .page select:focus-visible, .detail :is(button,input,select,textarea,a,summary):focus-visible {
-  outline: 2px solid var(--ui-focus); outline-offset: 3px;
-}
 :is(.page, .detail) button:where(:not(:global(.btn-primary), :global(.btn-secondary), :global(.btn-dark), :global(.btn-subtle), :global(.btn-danger))) { font: inherit; }
 .section { margin: 26px 0 30px; }
 .sectionHeading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
@@ -33,7 +30,6 @@
 .installedOpen { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 100%; padding: 8px 4px;
   border: 0; border-radius: 10px; background: transparent; color: var(--ui-text-1); text-align: center; cursor: pointer; }
 .installedOpen:hover { opacity: .75; }
-.installedOpen:focus-visible, .serviceAdd:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 .installedOpen > :first-child { width: 48px; height: 48px; flex: none; }
 :is(.installedOpen, .serviceOpen, .dialogIdentity) > [data-mcp-icon] > img {
   inset: 0;
@@ -161,12 +157,10 @@
   cursor: pointer;
 }
 .requestDismiss:hover { background: color-mix(in srgb, currentColor 5%, transparent); }
-.requestDismiss:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
 .requestConnection .requestError { grid-column: 2 / -1; margin: 0; }
 .requestSetup { position: relative; }
 .requestOpen { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; padding: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
 .requestOpen:hover:not(:disabled) { background: color-mix(in srgb, var(--ui-text-1) 4%, transparent); }
-.requestOpen:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
 .requestOpen:disabled { cursor: default; }
 .requestSetup .requestActions > button, .requestService > button { position: relative; z-index: 2; }
 .requestSetup :is(h3, p), .requestService > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -281,7 +275,6 @@
 .flowFooter > p { flex: 1; min-width: 140px; margin: 0; font-size: 11px; line-height: 1.6; color: var(--ui-text-2); }
 .flowFooterActions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; max-width: 100%; margin-left: auto; }
 .flowFooterActions .actions { margin: 0; gap: 8px; }
-.flowFooter button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 @media (max-width: 480px) {
   .connectionPanel { padding: 16px; }
   .flowFooterActions .actions { flex-wrap: wrap; }

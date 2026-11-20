@@ -32,7 +32,6 @@
 
 .chat-pill--select:hover { background-color: var(--bg-hover, var(--ui-surface-2)); }
 .chat-pill--select:disabled { cursor: not-allowed; opacity: 0.55; }
-.chat-pill--select:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .chat-pill--select.chat-pill--icon-label {
   position: relative;
   min-width: 72px;
@@ -133,13 +132,6 @@
   color: light-dark(#757575, #a1a1aa);
   opacity: 1;
 }
-.chat-composer-menu-surface .model-menu__search:focus {
-  outline: none;
-  box-shadow: none;
-  border-color: var(--model-menu-ink);
-  background: transparent;
-}
-
 .model-menu--catalog .model-menu__tabs {
   --ft-color: var(--model-menu-text);
   --ft-font-size: 13px;
@@ -231,10 +223,6 @@
 :is(.model-menu--catalog, .chat-mention-menu) .model-menu__item.is-active:hover:not(:disabled) {
   background: var(--model-menu-ink);
   color: var(--model-menu-selected-text);
-}
-:is(.model-menu--catalog, .chat-mention-menu) .model-menu__item:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: -2px;
 }
 .model-menu--catalog .model-menu__item:disabled { opacity: 0.5; cursor: not-allowed; }
 :is(.model-menu--catalog, .chat-mention-menu) .model-menu__name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

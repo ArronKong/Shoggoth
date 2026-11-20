@@ -342,3 +342,16 @@ state.runHistoryFixture = async () => {
   select(native.key); await wait(() => count(native.id) === 50, "final initial window");
   return { passed: true, results, archive: [50, 100, 123], immersive: [50, 100, 150, 182], historyBoundary: true, lateSwitch: true };
 };
+state.runMessageNavigationFixture = async () => {
+  const [shortSession, readySession] = cases;
+  const navigator = () => document.querySelector("[data-chat-message-navigator]");
+  await control(shortSession.key, "navigation-threshold");
+  select(shortSession.key);
+  await wait(() => count("navshort") === 12 && thread().dataset.historyLoaded === "true", "six user messages and six replies");
+  check(!navigator(), "six user messages must hide message navigation");
+
+  select(readySession.key);
+  await wait(() => count("navready") === 14 && thread().dataset.historyLoaded === "true", "seven user messages and seven replies");
+  check(navigator()?.querySelectorAll("[data-chat-nav-mark]").length === 7, "seven user messages must show seven marks");
+  return { hiddenAt: 6, visibleAt: 7 };
+};

@@ -671,30 +671,6 @@
   color: var(--ui-warning);
 }
 
-.management-page.settings-page :is(
-    .page-head-actions > button,
-    .settings-actions > button,
-    .remotes > button,
-    .creds-actions > button
-  ):focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
-}
-
-/* 深色焦点环：亮色里 2px surface-1 内圈演的是「白缝」，深色 surface-1 比选中
-   rail 项(#2c2c33)/remote-row(surface-2) 的底更暗，内圈成了一道暗色勒痕。
-   深色改用带 offset 的 outline，缝隙透真实底色，四种底一次修对；亮色配方不动。 */
-:root[data-theme="dark"] .management-page.settings-page :is(
-    .page-head-actions > button,
-    .settings-actions > button,
-    .remotes > button,
-    .creds-actions > button
-  ):focus-visible {
-  box-shadow: none;
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
-
 /* ============================================================
    适配：≤960 偏好卡叠为单列；≤900 状态卡单列；≤720 表单/动作单列。
    ============================================================ */

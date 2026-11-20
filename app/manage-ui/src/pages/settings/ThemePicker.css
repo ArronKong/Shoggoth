@@ -50,7 +50,6 @@
 .settings-theme-check { visibility: hidden; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%; color: var(--ui-surface-1); background: var(--ui-text-1); font-size: 12px; }
 .settings-theme-option input:checked ~ .settings-theme-preview { border-color: var(--ui-text-1); box-shadow: 0 0 0 1px var(--ui-text-1); }
 .settings-theme-option input:checked ~ .settings-theme-label .settings-theme-check { visibility: visible; }
-.settings-theme-option input:focus-visible ~ .settings-theme-preview { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
 .settings-theme-option:hover input:not(:disabled) ~ .settings-theme-preview { border-color: var(--ui-text-1); }
 .settings-themes:disabled .settings-theme-option { opacity: .5; cursor: not-allowed; }
 

@@ -545,7 +545,7 @@
 .management-page.usage-page .usage-table tbody tr.usage-row-click {
   cursor: pointer;
 }
-.management-page.usage-page .usage-table tbody tr.usage-row-click:hover td {
+.management-page.usage-page .usage-table tbody tr.usage-row-click:is(:hover, :has(.usage-session-open:focus-visible)) td {
   background: color-mix(in srgb, var(--ui-text-1) 4%, transparent);
 }
 .management-page.usage-page .usage-session-open {
@@ -560,10 +560,6 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
-}
-.management-page.usage-page .usage-session-open:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
 }
 /* 主文案=语义标题（截断省略）；次行=原始 key 尾段（等宽小字，排查用） */
 .usage-page .usage-session-title {

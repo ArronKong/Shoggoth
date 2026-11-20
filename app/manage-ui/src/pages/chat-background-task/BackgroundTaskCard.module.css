@@ -24,7 +24,6 @@
 }
 
 .card:hover { filter: brightness(0.985); }
-.card:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .card[data-tone="active"] { --task-accent: light-dark(#000000, #f4f4f5); }
 .card[data-tone="attention"] {
   --task-accent: light-dark(#b45309, #f2a66b);
@@ -66,5 +65,12 @@
 .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .label { text-align: end; }
 .label, .report { color: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.64)); }
-.title { font-size: 14px; line-height: 20px; }
+.title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 20px;
+}
 .report { font-size: 11px; line-height: 14px; }

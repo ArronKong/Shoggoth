@@ -81,7 +81,7 @@ async function verifyTaskChat(preview) {
 
 async function run() {
   const preview = await startPreview(0);
-  const { base, sessionKey, tasks } = preview;
+  const { base, sessionKey, tasks, researchTitle, fixture } = preview;
   const q = (params) => new URLSearchParams(params).toString();
   try {
     const list = await json(base, "GET", `/__api/background-tasks?${q({ sessionKey })}`);
@@ -91,6 +91,9 @@ async function run() {
     assert.equal(byId.get(tasks.pricing).status, "completed");
     assert.equal(byId.get(tasks.pricing).report, "delivered");
     assert.equal(byId.get(tasks.research).status, "running");
+    const storedTitle = fixture.service.backgroundTaskStore.get(tasks.research).title;
+    assert(storedTitle.endsWith("…"), "the persisted short title still has its original limit");
+    assert.equal(byId.get(tasks.research).title, researchTitle, "the App card wraps the original first line");
     console.log("PASS background-tasks list shows the finished and the running task");
 
     const detail = await json(base, "GET", `/__api/background-tasks/detail?${q({ sessionKey, taskId: tasks.pricing })}`);
@@ -113,7 +116,6 @@ async function run() {
     assert.equal(replay.status, 200, "a repeated click is the same operation");
     console.log("PASS background-tasks control steers the running task");
 
-    const fixture = preview.fixture;
     const { runId } = fixture.service.backgroundTaskStore.get(tasks.research).generations.at(-1);
     const run = fixture.service.workRunCoordinator.getRun(runId);
     const host = fixture.transport.hosts.get("codex");

@@ -101,12 +101,6 @@
   background: color-mix(in srgb, var(--ui-error) 10%, transparent);
   color: var(--ui-error);
 }
-.deleteButton:focus-visible,
-.searchBtn:focus-visible,
-.chip:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
 
 /* ---- 卡头右侧的「新增模型」入口 ---- */
 .headActions {

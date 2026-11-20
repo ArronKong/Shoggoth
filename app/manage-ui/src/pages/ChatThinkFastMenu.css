@@ -1,7 +1,6 @@
 .chat-think-fast-menu { position: relative; display: inline-flex; min-width: 0; }
 .chat-pill--think-fast { display: inline-flex; align-items: center; gap: 6px; border: 0; cursor: pointer; white-space: nowrap; }
 .chat-pill--think-fast:disabled { cursor: default; opacity: 0.45; }
-.chat-pill--think-fast:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 
 /* Figma 308:15287 / 309:16239 — exact Dev Mode values */
 .think-fast-menu {
@@ -90,10 +89,6 @@
 .think-fast-menu__fast-btn:hover { opacity: .75; }
 .think-fast-menu__fast-btn.is-on { opacity: 1; }
 .think-fast-menu__fast-btn:disabled { cursor: default; opacity: 0.45; }
-.think-fast-menu__fast-btn:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
 
 .think-fast-menu__effort { display: flex; flex-direction: column; }
 
@@ -112,11 +107,6 @@
 }
 /* A generous hit area without changing the compact popup's geometry. */
 .think-fast-menu__slider::before { content: ''; position: absolute; inset: -10px -12px; }
-.think-fast-menu__slider:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 4px;
-  border-radius: 8px;
-}
 .think-fast-menu__track {
   position: absolute;
   left: 0; right: 0;

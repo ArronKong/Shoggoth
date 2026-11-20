@@ -28,7 +28,6 @@
 }
 .ejectButton:hover:not(:disabled) { background: transparent; }
 .ejectButton:active:not(:disabled)::after { transform: translateY(.5px) scale(.97); box-shadow: 1px 1px 2px #ffffffb3, inset 0 1px 2px #68655c55; }
-.ejectButton:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 5px; }
 .ejectButton:disabled { cursor: wait; opacity: .6; }
 .cardPort { position: absolute; top: calc(var(--machine-height) * 101 / 228); right: -80px; width: 80px; height: 56px; overflow: hidden; pointer-events: none; }
 /* Slide in screen coordinates; the card itself stays rotated toward the slot.

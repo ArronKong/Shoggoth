@@ -91,7 +91,6 @@
 }
 .displayFrame:hover:not(:disabled) { background: linear-gradient(180deg, #a3a199 0, #d5d3ca 44%, #f2f1ec 78%, #fcfcf9 100%); }
 .displayFrame:disabled { cursor: wait; opacity: 1; }
-.displayFrame:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 5px; }
 .display {
   position: relative;
   display: flex;

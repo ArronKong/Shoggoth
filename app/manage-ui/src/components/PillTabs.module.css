@@ -102,7 +102,7 @@
    color 必须在这里重申：styles.css 有全局 button:hover:not(:disabled)
    把字色翻成 accent 蓝，特异性 (0,2,1) 压过裸 .tab——hover 态不显式
    声明 color 就会漏蓝（R206 追修）。 */
-.tab:hover:not(.tabOn) {
+.tab:is(:hover, :focus-visible):not(.tabOn) {
   background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
   color: light-dark(#000000, #ffffff);
 }
@@ -117,11 +117,6 @@
   transition:
     background-color var(--ui-motion-state) ease,
     color 120ms ease 40ms;
-}
-
-.tab:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-focus);
 }
 
 /* Figma 251:1385: 32px targets + 8px inset, including the container border. */

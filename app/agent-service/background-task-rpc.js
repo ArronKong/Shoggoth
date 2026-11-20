@@ -4,7 +4,7 @@
 // UI acts only on the conversation the user has open; ownership is checked
 // again by BackgroundTaskService against the stored source conversation.
 const { serviceError } = require("./security");
-const { MAX_GENERATIONS, MAX_MESSAGE_BYTES, TASK_ID_PATTERN, validText } = require("./background-task-protocol");
+const { MAX_GENERATIONS, MAX_MESSAGE_BYTES, MAX_TASK_TITLE_BYTES, TASK_ID_PATTERN, validText } = require("./background-task-protocol");
 
 const BACKGROUND_TASK_SERVICE_METHODS = new Set([
   "background.task.list", "background.task.get", "background.task.session", "background.task.send", "background.task.cancel", "background.task.respond",
@@ -56,7 +56,7 @@ const text = (value, max) => typeof value === "string" && value.isWellFormed() &
 
 function validTask(value) {
   const { TASK_STATUSES, REPORT_STATES } = require("./background-task-protocol");
-  return exact(value, TASK_FIELDS) && TASK_ID_PATTERN.test(value.taskId) && text(value.title, 512)
+  return exact(value, TASK_FIELDS) && TASK_ID_PATTERN.test(value.taskId) && text(value.title, MAX_TASK_TITLE_BYTES)
     && TASK_STATUSES.includes(value.status) && OPAQUE.test(value.runtime) && Number.isSafeInteger(value.generation)
     && value.generation >= 1 && OPAQUE.test(value.sourceRunId) && REPORT_STATES.includes(value.report)
     && (value.errorCode === null || OPAQUE.test(value.errorCode)) && time(value.createdAt) && time(value.updatedAt)

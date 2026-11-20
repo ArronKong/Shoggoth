@@ -114,11 +114,6 @@
   stroke-width: 1.7;
 }
 
-.liquidButton:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 3px;
-}
-
 .satelliteButton {
   transition: opacity 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -206,14 +201,9 @@
   cursor: pointer;
 }
 
-.switchButton:hover:not(:disabled) {
+.switchButton:is(:hover, :focus-visible):not(:disabled) {
   color: var(--ui-text-2);
   background: color-mix(in srgb, var(--ui-text-1) 16%, var(--ui-surface-2));
-}
-
-.switchButton:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 3px;
 }
 
 .switchLiquid {
@@ -281,11 +271,6 @@
 .pressButton:hover:not(:disabled) {
   border-color: transparent;
   color: var(--ui-surface-1);
-}
-
-.pressButton:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 3px;
 }
 
 .pressButtonActive {

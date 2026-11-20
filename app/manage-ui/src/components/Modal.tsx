@@ -22,6 +22,7 @@ export default function Modal({
   // 设计稿 7108:896「内容大弹窗」是 800 宽；已显式传宽的调用方保持自己的取值。
   width = 800,
   dismissible = true,
+  nestedBackdrop,
   className,
   variant,
   actions,
@@ -41,6 +42,7 @@ export default function Modal({
   width?: number;
   // 提交中的表单用它锁住 Escape / 遮罩 / 关闭键，避免半途关窗。
   dismissible?: boolean;
+  nestedBackdrop?: boolean;
   className?: string;
   // report = 运行结果弹窗（设计稿 246:1193）：渐变底、24px 标题、右上角图标按钮。
   variant?: "connector" | "report" | "activity";
@@ -98,11 +100,14 @@ export default function Modal({
       onOpenChangeComplete={handleOpenChangeComplete}
     >
       <Dialog.Portal>
-        <Dialog.Backdrop className={styles.overlay} />
+        <Dialog.Backdrop
+          {...(nestedBackdrop ? { forceRender: true } : {})}
+          className={nestedBackdrop ? `${styles.overlay} ${styles.nested}` : styles.overlay}
+        />
         <Dialog.Popup
           {...closingInteractionProps}
           {...(initialFocus === undefined ? {} : { initialFocus })}
-          className={[styles.panel, variant && styles[variant], className].filter(Boolean).join(' ')}
+          className={[styles.panel, variant && styles[variant], nestedBackdrop && styles.nested, className].filter(Boolean).join(' ')}
           data-modal-variant={variant}
           data-tone={visibleContent.tone}
           style={{ width }}

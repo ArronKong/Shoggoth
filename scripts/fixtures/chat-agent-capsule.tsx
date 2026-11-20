@@ -109,6 +109,7 @@ window.fetch = async (input, init) => {
         + (state.unsafeSoul ? "\n\n<script>window.fixtureUnsafe = true;</script>" : "") : "", missing: agent.id === beta.id } };
     } else payload = { agent: { ...agent, files: [{ name: "SOUL.md" }] } };
   }
+  if (url.pathname === "/__api/cron/models") payload = { models: [] };
   if (url.pathname === "/__api/cron/jobs") {
     if (state.failCron) return new Response(JSON.stringify({ error: "Cron fixture unavailable" }), { status: 503 });
     const jobs = [
@@ -382,14 +383,13 @@ state.runCapsuleMotionFixture = async (reduced = false) => {
   const avatar = header().querySelector<HTMLButtonElement>(".chat-header__avatar-trigger")!;
   avatar.focus();
   await new Promise(resolve => setTimeout(resolve, 160));
-  const avatarCss = { backgroundColor: getComputedStyle(avatar).backgroundColor, outlineColor: getComputedStyle(avatar).outlineColor };
+  const { backgroundColor: avatarFill, outlineStyle: avatarOutline } = getComputedStyle(avatar);
   tools()[0].focus();
   await new Promise(resolve => setTimeout(resolve, 160));
   const toolCss = getComputedStyle(tools()[0]);
-  check(avatarCss.backgroundColor === toolCss.backgroundColor && avatarCss.outlineColor === toolCss.outlineColor,
-    `left and right controls share neutral keyboard feedback: ${JSON.stringify({ avatar: avatarCss,
-      tool: { backgroundColor: toolCss.backgroundColor, outlineColor: toolCss.outlineColor },
-      focusVisible: tools()[0].matches(":focus-visible") })}`);
+  check(avatarOutline === "none" && toolCss.outlineStyle === "none",
+    "left and right controls omit keyboard focus outlines");
+  check(avatarFill === toolCss.backgroundColor, "left and right controls share the same keyboard focus fill");
   check(writes.length === 0, "motion review cannot execute Agent work");
   return { passed: true, reduced, viewport: [innerWidth, innerHeight], collapsed, expanded,
     checks: "fixed control and identity geometry on every frame, open/close intermediate frames, reversal, neutral focus" };
