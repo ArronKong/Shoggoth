@@ -8,6 +8,9 @@ const { setTimeout: delay } = require("node:timers/promises");
 const { ensureAgentWorkspace } = require("../../app/agent-service/chat-workspace");
 const { readBoundedFile } = require("../../app/agent-service/agent-file-store");
 const { isBackgroundTaskReportEvent, TERMINAL_RUN_STATUSES } = require("../../app/agent-service/background-task-protocol");
+const { CHAT_PERMISSION_MODES, adapterPermissionMode } = require("../../app/agent-service/runtime-permission-modes");
+
+const MAX_APPROVALS = 12;
 
 // The default answer is an exact fixture handshake. An operator may additionally
 // authorize publication of the verified disposable result.txt on its own card.
@@ -33,15 +36,17 @@ module.exports = async function check({ service, backend, paths, source, runtime
     const deadline = Date.now() + 180_000;
     do {
       signal.throwIfAborted();
-      const result = get();
+      const result = await get();
       if (result) return result;
       await delay(300, null, { signal });
     } while (Date.now() < deadline);
     throw new Error(`Timed out during ${stage}${describe ? ". " + describe() : ""}`);
   }
-  function checkedRun(run) {
+  // Only the worker's approvals are answered (on its task card); the
+  // foreground conversation must not stop for one.
+  function checkedRun(run, approvable = false) {
     const current = coordinator.getRun(run.id);
-    if (current?.status === "waiting_approval") throw new Error("Run requires interactive permission approval");
+    if (current?.status === "waiting_approval" && !approvable) throw new Error("Run requires interactive permission approval");
     if (TERMINAL_RUN_STATUSES.has(current?.status) && current.status !== "completed") {
       throw new Error(current.errorCode || current.status);
     }
@@ -82,11 +87,29 @@ module.exports = async function check({ service, backend, paths, source, runtime
   assert.equal(record.sourceRunId, parent.id);
   assert.equal(child.profileId, source.id);
   assert.equal(child.runtimeBindingId, target.id);
-  assert.equal(child.permissionMode, mode);
+  // Grok Auto would block unattended actions, so its tasks ask instead.
+  assert.equal(child.permissionMode, runtime === "grok-build" && adapterPermissionMode(runtime, mode) === "auto"
+    ? CHAT_PERMISSION_MODES.ask : mode);
   assert.notEqual(child.sessionKey, session.sessionKey);
   assert.ok(!child.workspace.startsWith(session.workspace + path.sep) && child.workspace !== session.workspace);
   if (!textOnly) fs.writeFileSync(path.join(child.workspace, "seed.txt"), secret + "\n", { flag: "wx", mode: 0o600 });
   const detail = () => tasks.detail(session.sessionKey, record.id);
+  const control = input => backend.controlBackgroundTask(gatewaySessionKey, record.id, { operationId: crypto.randomUUID(), ...input });
+  // Answers a permission request the way the user would in the task modal:
+  // once, from the card, recording what was allowed.
+  const approvals = [];
+  async function approveOnCard() {
+    const request = (await backend.getBackgroundTask(gatewaySessionKey, record.id)).interaction?.payload;
+    if (!request || !["runtime_approval", "mcp_permission"].includes(request.kind)
+      || approvals.some(item => item.requestId === request.requestId)) return null;
+    const entry = { requestId: request.requestId, kind: request.kind, message: String(request.message).slice(0, 300) };
+    if (!request.approvalChoices.includes("once")) throw new Error(`Approval card offers no allow choice. ${entry.message}`);
+    approvals.push(entry);
+    if (approvals.length > MAX_APPROVALS) throw new Error(`More than ${MAX_APPROVALS} approvals. ${approvals.map(item => item.message).join(" | ")}`);
+    log("approval", entry);
+    await control({ action: "approval", requestId: request.requestId, choice: "once" });
+    return null;
+  }
   const describeWorker = () => {
     const { task, queueReason, interaction, messages } = detail();
     const reply = messages.filter(message => message.role === "assistant").at(-1)?.text || "";
@@ -96,7 +119,7 @@ module.exports = async function check({ service, backend, paths, source, runtime
   const checkpoint = stage => until(stage, () => {
     const { task, interaction } = detail();
     if (TERMINAL_RUN_STATUSES.has(task.status)) throw new Error(`Worker ended before the handshake. ${describeWorker()}`);
-    if (task.status === "waiting_approval") throw new Error("Worker requires interactive permission approval");
+    if (task.status === "waiting_approval") return approveOnCard();
     if (task.status === "waiting_input" && interaction) return interaction;
   }, describeWorker);
   const sourceRun = await completed("foreground-receipt", parent);
@@ -120,7 +143,6 @@ module.exports = async function check({ service, backend, paths, source, runtime
   assert.equal(fields[0].type, "text");
   assert.equal(fields[0].secret, false);
   assert.ok([fields[0].label, fields[0].description, card.payload.message].includes(expectedQuestion), "Unexpected fixture question");
-  const control = input => backend.controlBackgroundTask(gatewaySessionKey, record.id, { operationId: crypto.randomUUID(), ...input });
   let answer = "READY";
   if (confirmResultFile) {
     assert.equal(card.payload.message, publishQuestion);
@@ -147,7 +169,8 @@ module.exports = async function check({ service, backend, paths, source, runtime
     log("supplement-steered");
   }
   const report = await until(textOnly ? "text-report" : "file-report", () => {
-    const current = checkedRun(workerRun);
+    const current = checkedRun(workerRun, true);
+    if (current.status === "waiting_approval") return approveOnCard();
     if (current.status === "waiting_input" && current.waitingRequestId !== requestId) {
       const request = detail().interaction?.payload;
       const question = String(request?.questions?.[0]?.question || request?.message || "Open the task card");
@@ -181,5 +204,6 @@ module.exports = async function check({ service, backend, paths, source, runtime
   await until("stop", () => detail().task.status === "canceled");
   await tasks.deliver(record.id);
   assert.equal(reports().length, 1, "Stopping the second generation produced no report");
-  log("passed", { distinctSessions: true, permissionMode: mode, artifactRead: !textOnly, reportCount: 1, stopped: true });
+  log("passed", { distinctSessions: true, permissionMode: mode, childPermissionMode: child.permissionMode,
+    approvals: approvals.length, artifactRead: !textOnly, reportCount: 1, stopped: true });
 };

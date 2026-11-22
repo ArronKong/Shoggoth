@@ -155,3 +155,86 @@ test("persistent pipe frames survive fragmentation and reject invalid sizes with
   assert.equal(failures, 1); assert.equal(reader.bytes.length, 0);
   reader.push(encoded); assert.equal(seen.length, 1);
 });
+
+test("send-path spans survive tool loops and fold into one compact row per send", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "latency-turns-"));
+  const runtimeDir = path.join(root, "run");
+  const read = name => JSON.parse(fs.readFileSync(path.join(runtimeDir, name), "utf8"));
+  const log = new SendLatencyDiagnostics({ paths: { runtimeDir, trustedRoot: root } });
+  const T = Date.now() - 60_000; // Absolute times inside the 14-day window.
+  try {
+    log.record({ stage: "controller", outcome: "success", durationMs: 0, startedAt: T + 1000, finishedAt: T + 1000, operationId: "op-1", sessionKey: "s" });
+    for (let i = 0; i < 3; i++) log.record({ stage: "admission_context", outcome: "success", durationMs: 1500,
+      startedAt: T + 1100 + i * 2600, finishedAt: T + 2600 + i * 2600, operationId: "op-1", runId: "run-1" });
+    log.record({ stage: "admission_queued", outcome: "success", durationMs: 0, startedAt: T + 2600, finishedAt: T + 2600, runId: "run-1", code: "WORKSPACE_WRITE_BUSY" });
+    log.record({ stage: "admission_queued", outcome: "success", durationMs: 0, startedAt: T + 2700, finishedAt: T + 2700, runId: "run-1", code: "PRIVATE_FREE_FORM" });
+    log.record({ stage: "memory_recall_cache", outcome: "success", durationMs: 0, startedAt: T + 2800, finishedAt: T + 2800, runId: "run-1", code: "HIT" });
+    log.record({ stage: "runtime_host", outcome: "success", durationMs: 0, startedAt: T + 9000, finishedAt: T + 9000, runId: "run-1",
+      operationId: "op-1", source: "codex", hostState: "created" });
+    for (let i = 0; i < 3000; i++) log.record({ stage: "tool_execution", outcome: "success", durationMs: 1, runId: "run-1", operationId: "op-1" });
+    log.record({ stage: "crypto_encrypt", outcome: "success", durationMs: 2 });
+    await log.close();
+    const records = read("send-latency.json").records;
+    assert.ok(records.every(row => !/^(?:tool_execution|crypto_)/u.test(row.stage)));
+    assert.equal(records.filter(row => row.stage === "admission_context").length, 3);
+    assert.deepEqual(records.filter(row => row.stage === "admission_queued").map(row => row.code), ["WORKSPACE_WRITE_BUSY", "OTHER"]);
+    const activity = read("send-latency-activity.json").records;
+    assert.ok(activity.length > 0 && activity.length <= 1024);
+    assert.ok(activity.every(row => /^(?:tool_execution|crypto_)/u.test(row.stage)));
+    let turns = read("send-latency-turns.json").turns;
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].startedAt, T + 1000); assert.equal(turns[0].hostState, "created"); assert.equal(turns[0].source, "codex");
+    assert.match(turns[0].operationIdHash, /^[a-f0-9]{64}$/u); assert.match(turns[0].runIdHash, /^[a-f0-9]{64}$/u);
+    assert.deepEqual(turns[0].stages.admission_context, [100, 4500, 3, 6800]);
+    assert.deepEqual(turns[0].stages.admission_queued, [1600, 0, 2, 1700, null, ["WORKSPACE_WRITE_BUSY", "OTHER"]]);
+    assert.deepEqual(turns[0].stages.memory_recall_cache, [1800, 0, 1, 1800, null, ["HIT"]]);
+    assert.equal(turns[0].stages.tool_execution, undefined);
+    const body = ["send-latency.json", "send-latency-turns.json", "send-latency-activity.json"]
+      .map(name => fs.readFileSync(path.join(runtimeDir, name), "utf8")).join("\n");
+    assert.doesNotMatch(body, /op-1|run-1|PRIVATE_FREE_FORM/u);
+    // A restarted writer resumes the same row; an earlier span re-bases offsets.
+    log.open();
+    log.record({ stage: "first_text", outcome: "success", durationMs: 4000, startedAt: T + 900, finishedAt: T + 13_000, operationId: "op-1" });
+    await log.close();
+    turns = read("send-latency-turns.json").turns;
+    assert.equal(turns.length, 1); assert.equal(turns[0].startedAt, T + 900);
+    assert.deepEqual(turns[0].stages.admission_context, [200, 4500, 3, 6900]);
+    assert.deepEqual(turns[0].stages.first_text, [0, 4000, 1, 12_100]);
+  } finally { await log.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("turn summaries keep 14 days and a bounded count, and reloads accept only the closed shape", () => {
+  const { foldTurns, sanitizeTurn, TURN_MAX, TURN_MAX_AGE_MS } = require("../app/agent-service/send-latency-diagnostics");
+  const crypto = require("node:crypto");
+  const generation = crypto.randomUUID(), now = 100 * 86_400_000;
+  const stale = { operationIdHash: "a".repeat(64), startedAt: 1, updatedAt: now - TURN_MAX_AGE_MS - 1, generation, version: "v", stages: {} };
+  const rows = Array.from({ length: TURN_MAX + 5 }, (_, index) => ({ stage: "controller", outcome: "success", durationMs: 0,
+    startedAt: now - 1000, generation, version: "v", operationIdHash: crypto.createHash("sha256").update(String(index)).digest("hex") }));
+  const turns = foldTurns([stale], rows, now);
+  assert.equal(turns.length, TURN_MAX);
+  assert.ok(!turns.includes(stale));
+  assert.equal(sanitizeTurn({ ...stale, operationIdHash: "raw-operation-id" }), null);
+  assert.deepEqual(sanitizeTurn({ ...stale, stages: { admission_queued: [1, 2, 3, 4, "error", ["WORKSPACE_WRITE_BUSY", "PRIVATE"]],
+    "bad stage": [1, 2, 3, 4], negative: [-1, 2, 3, 4] } }).stages, { admission_queued: [1, 2, 3, 4, "error", ["WORKSPACE_WRITE_BUSY"]] });
+});
+
+test("chat prewarm derives the same Codex host options as turn execution", () => {
+  const { codexHostAcquireOptions, routeModelProvider } = require("../app/agent-service/codex-session-provider");
+  const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
+  const providers = { "provider-chatgpt": { id: "provider-chatgpt", kind: "chatgpt" } };
+  const productStore = { getModelProvider: id => providers[id] || null, getAgentProfile: () => ({ providerRef: null }) };
+  const bundled = { runtime: "codex", runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, profileId: "p",
+    provider: { providerRef: "provider-chatgpt" } };
+  // The prewarm contract only carries the frozen route, Binding and Profile;
+  // the turn contract has many more fields but the same route.
+  const turnContract = { ...bundled, permissionPolicy: { sandbox: "workspace-write", approvalPolicy: "on-request" }, workspace: "/w" };
+  const secrets = {};
+  assert.deepEqual(codexHostAcquireOptions({ productStore, temporarySecrets: secrets, contract: bundled }), { modelSecretProviderKind: "chatgpt" });
+  assert.deepEqual(codexHostAcquireOptions({ productStore, temporarySecrets: secrets, contract: bundled }),
+    codexHostAcquireOptions({ productStore, temporarySecrets: secrets, contract: turnContract }));
+  assert.deepEqual(codexHostAcquireOptions({ productStore, temporarySecrets: null, contract: bundled }), {});
+  assert.deepEqual(codexHostAcquireOptions({ productStore, temporarySecrets: secrets,
+    contract: { ...bundled, runtimeAccountId: "native-codex-default-v1" } }), {});
+  assert.equal(routeModelProvider(productStore, { ...bundled, provider: undefined }).kind, "chatgpt");
+  assert.equal(routeModelProvider(productStore, { ...bundled, runtime: "pi" }), undefined);
+});

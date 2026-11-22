@@ -30,11 +30,11 @@ const groupFile=(id:string,backendId:string,name:string,time=now)=>({attachment:
   groupId:'writing-group',groupName:'写作与产品交付讨论组',messageSeq:5,backendId,agentId:'writer',agentName:'写作助手',createdAt:time});
 const native=groupFile('e7b8a622-8376-470c-bfc5-3c113ed3ef61','shoggoth','产品分析报告.txt');
 const external=groupFile('e7b8a622-8376-470c-bfc5-3c113ed3ef62','hermes','文献检索与参考材料.txt',now-1000);
-let unavailable=false, nativeUnavailable=false, rejectMedia=false;
+let unavailable=false, nativeUnavailable=false, otherPartial=false, rejectMedia=false;
 const posts:any[]=[], reveals:string[]=[];
 const summary=()=>({generatedAt:Date.now(),sinceMs:new Date().setHours(0,0,0,0),
   status:FALLBACK_BACKEND_DESCRIPTORS.map(d=>({id:d.id,name:d.name,connected:true,info:{}})),runs:[],running:[],approvals:[],usage:[],
-  artifacts:[{backend:'openclaw',supported:true,items:[{path:'/tmp/local-report.md',name:'本地目录报告.md',area:'workspace',mtimeMs:now-2000,size:20,kind:'doc'},
+  artifacts:[{backend:'openclaw',supported:true,partial:otherPartial,items:[{path:'/tmp/local-report.md',name:'本地目录报告.md',area:'workspace',mtimeMs:now-2000,size:20,kind:'doc'},
     {path:'/tmp/local-report.md',name:'本地目录报告.md',area:'agents/main',mtimeMs:now-2000,size:20,kind:'doc'}]},
     {backend:'shoggoth',supported:true,partial:nativeUnavailable,items:[{path:'/tmp/native-report.md',name:'原生助理报告.md',area:'session-reference',agentId:'native-writer',agentName:'原生写作助手',mtimeMs:now-500,size:30,kind:'doc'}]}],
   groupArtifacts:unavailable?{supported:false,reason:'unavailable',items:[]}:{supported:true,partial:false,truncated:false,items:[native,external,native]},
@@ -83,10 +83,11 @@ state.runFixture=async()=>{
   unavailable=true;await runPageRefresh('/dashboard');await wait(()=>rows().length===2,'group outage lost native/local rows');
   if(!document.body.innerText.includes(i18n.t('dashboard.artifactsGroupUnavailable')))throw Error('outage explanation missing');
   unavailable=false;await runPageRefresh('/dashboard');await wait(()=>rows().length===4,'groups did not recover');
-  nativeUnavailable=true;await runPageRefresh('/dashboard');
-  await wait(()=>document.body.innerText.includes(i18n.t('dashboard.artifactsUnavailable',{backend:'Shoggoth'})),'native partial explanation missing');
+  nativeUnavailable=true;otherPartial=true;await runPageRefresh('/dashboard');
+  await wait(()=>document.body.innerText.includes(i18n.t('dashboard.artifactsUnavailable',{backend:'OpenClaw'})),'other backend partial explanation missing');
+  if(document.body.innerText.includes(i18n.t('dashboard.artifactsUnavailable',{backend:'Shoggoth'})))throw Error('native partial explanation still visible');
   if(rows().length!==4)throw Error('native partial lost valid rows');
-  nativeUnavailable=false;await runPageRefresh('/dashboard');
+  nativeUnavailable=false;otherPartial=false;await runPageRefresh('/dashboard');
   const large=summary();large.groupArtifacts={supported:true,items:Array.from({length:30},(_,i)=>groupFile('id-'+i,'shoggoth','file-'+i+'.txt',now+i))} as any;
   const selected=recentDashboardArtifacts(large as any);
   if(selected.length!==20||selected[0].name!=='file-29.txt'||selected[19].name!=='file-10.txt')throw Error('shared limit/order mismatch');

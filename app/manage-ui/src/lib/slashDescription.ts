@@ -1,5 +1,13 @@
 import type { TFunction } from "i18next";
-import { normalizeSlashDescription, slashDescriptionKeys, slashDescriptionPrefixes } from "../i18n/slashDescriptions";
+import i18n from "../i18n/index";
+import {
+  normalizeSlashDescription, slashDescriptionKeys, slashDescriptionPrefixes, slashDescriptionResources,
+} from "../i18n/slashDescriptions";
+
+// Register the bundled descriptions when the chat route loads.
+for (const [language, descriptions] of Object.entries(slashDescriptionResources)) {
+  i18n.addResourceBundle(language, "slashCommands", descriptions);
+}
 
 /** Display-only localization. The catalog, command syntax and dispatch stay raw. */
 export function translateSlashDescription(raw: string, t: TFunction): string {

@@ -145,10 +145,30 @@ function routeRequiresOpenaiAuth(productStore, contract) {
   try { return providerRequiresOpenaiAuth(productStore, providerRef); } catch { return true; }
 }
 
+// The model provider a bundled-account Codex turn routes to: the frozen
+// contract's provider, else the Profile default (absent when unresolvable).
+function routeModelProvider(productStore, contract) {
+  if (!supportsSessionProviders(contract)) return undefined;
+  if (contract.provider) return codexModelProvider(productStore, contract.provider.providerRef);
+  try {
+    return codexModelProvider(productStore, productStore.getAgentProfile?.(contract.profileId)?.providerRef ?? null);
+  } catch { return undefined; }
+}
+
+// The Codex pool keys hosts by [profile, account, providerRef, model-secret
+// provider kind]. Chat prewarm and turn execution must derive the same options,
+// otherwise prewarm keeps a host that the next turn cannot use.
+function codexHostAcquireOptions({ productStore, temporarySecrets, contract }) {
+  if (!temporarySecrets || !supportsSessionProviders(contract)) return {};
+  return { modelSecretProviderKind: routeModelProvider(productStore, contract)?.kind };
+}
+
 module.exports = {
+  routeModelProvider,
   CHATGPT_SELECTION,
   PRESET_KINDS,
   applyProviderRef,
+  codexHostAcquireOptions,
   codexModelProvider,
   isEndpointProvider,
   isSourceProvider,

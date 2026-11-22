@@ -637,6 +637,7 @@
 @media (max-width: 640px) {
   .chat-header { margin-top: 20px; }
   .chat-header[data-agent-panel] { margin-bottom: 20px; }
+  .chat-status-notices { top: 20px; }
 }
 .chat-header[data-panel-motion="instant"] { transition: none; }
 @media (prefers-reduced-motion: reduce) {

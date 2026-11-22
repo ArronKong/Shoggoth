@@ -23,7 +23,7 @@ const STEER_PREFIX = "Additional instruction from the user for this background t
 // Runtimes whose separate session, permissions, approval/stop, terminal state
 // and public final answer were verified for background work. Others are
 // rejected before acceptance.
-const BACKGROUND_TASK_RUNTIMES = Object.freeze(new Set(["codex", "pi", "opencode", "deepseek-harness", "antigravity"]));
+const BACKGROUND_TASK_RUNTIMES = Object.freeze(new Set(["codex", "pi", "opencode", "deepseek-harness", "antigravity", "grok-build"]));
 
 const PUBLIC_MESSAGES = Object.freeze({
   BACKGROUND_TASK_SOURCE_REQUIRED: "Background tasks can be started and managed only from the user's direct chat with this native Agent, in the conversation that started them. Background sessions cannot start further background tasks.",

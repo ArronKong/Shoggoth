@@ -840,6 +840,7 @@ function fixture(options = {}) {
     ...(options.productMcpApprovalPolicy
       ? { productMcpApprovalPolicy: options.productMcpApprovalPolicy } : {}),
     ...(options.contextCompiler ? { contextCompiler: options.contextCompiler } : {}),
+    ...(options.hookWorkspaceWriters ? { hookWorkspaceWriters: options.hookWorkspaceWriters } : {}),
     ...(options.conversationCheckpointStore ? { conversationCheckpointStore: options.conversationCheckpointStore } : {}),
     ...(options.onRunInteraction ? { onRunInteraction: options.onRunInteraction } : {}),
   });
@@ -4822,6 +4823,97 @@ test("busy 保持 queued/pending 且不触碰 Runtime", async () => {
   assert.equal(value.inbox.get("busy-operation").state, "pending");
   assert.equal(value.log.includes("runtimePool.get"), false);
   await value.coordinator.close();
+});
+
+// Real admission retry ticks (about 1 s each). capacityChanged() is an explicit
+// capacity signal and unparks, so it cannot stand in for a tick.
+async function admissionRetryTicks(value, count) {
+  const listRuns = value.dispatcher.listRuns.bind(value.dispatcher);
+  let drains = 0;
+  value.dispatcher.listRuns = (query = {}) => { if (!query.source && !query.sourceId) drains += 1; return listRuns(query); };
+  try {
+    const deadline = Date.now() + count * 3_000;
+    while (drains < count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(drains >= count, `expected ${count} retry ticks, saw ${drains}`);
+  } finally { value.dispatcher.listRuns = listRuns; }
+}
+
+test("容量排队的输入在重试时不重复召回，容量变化或 30 秒后才重新准备", async () => {
+  let prepared = 0, clock = 1_000;
+  const value = await openFixture({ busy: true, now: () => clock, contextCompiler: {
+    semanticSearch: {},
+    async prepareRelated() { prepared += 1; },
+    compile() { return { id: `ctx-${"c".repeat(64)}`, developerInstructions: "safe", dynamicContext: "safe" }; },
+  } });
+  // Another Agent's active Run owns the capacity this input waits for.
+  value.dispatcher.runs.set("capacity-holder", { id: "capacity-holder", source: "cron", sourceId: "other-job",
+    profileId: "other-profile", status: "running", workspace: null });
+  try {
+    const ack = await value.coordinator.send({ operationId: "parked-input", sessionKey: SESSION_KEY, prompt: "wait for capacity" });
+    assert.equal(ack.disposition, "queued");
+    assert.equal(ack.reason, "PROFILE_ACTIVE_LIMIT");
+    assert.equal(prepared, 1);
+    await admissionRetryTicks(value, 2);
+    assert.equal(prepared, 1);
+    assert.equal(value.dispatcher.getRun(ack.run.id).status, "queued");
+    assert.equal(value.log.includes("runtimePool.get"), false);
+    // A missed wake-up is bounded: the parked input is fully re-prepared.
+    clock += 30_000;
+    await admissionRetryTicks(value, 1);
+    assert.equal(prepared, 2);
+    await admissionRetryTicks(value, 1);
+    assert.equal(prepared, 2);
+    // The holder ends: the next drain prepares completely and admits.
+    value.dispatcher.busy = false;
+    value.dispatcher.runs.get("capacity-holder").status = "completed";
+    await admissionRetryTicks(value, 1);
+    assert.equal(prepared, 3);
+    await value.coordinator.waitForIdle(ack.run.id);
+    assert.notEqual(value.dispatcher.getRun(ack.run.id).status, "queued");
+    assert.equal(value.host.turnStartCalls, 1);
+  } finally { await value.coordinator.close(); }
+});
+
+test("工作区写锁释放而运行状态未变时，停放的输入在下一次重试即准入", async () => {
+  let prepared = 0;
+  // A writer outlives its Run until hook workers exit; only its revision moves.
+  const writers = { revision: 0, held: true, busy() { return this.held; }, acquire() { return false; }, release() {} };
+  const value = await openFixture({ hookWorkspaceWriters: writers, contextCompiler: {
+    semanticSearch: {},
+    async prepareRelated() { prepared += 1; },
+    compile() { return { id: `ctx-${"d".repeat(64)}`, developerInstructions: "safe", dynamicContext: "safe" }; },
+  } });
+  try {
+    const ack = await value.coordinator.send({ operationId: "writer-wait", sessionKey: SESSION_KEY, prompt: "after the writer" });
+    assert.equal(ack.disposition, "queued");
+    assert.equal(ack.reason, "WORKSPACE_WRITE_BUSY");
+    await admissionRetryTicks(value, 1);
+    assert.equal(prepared, 1);
+    writers.held = false; writers.revision += 1;
+    await admissionRetryTicks(value, 1);
+    assert.equal(prepared, 2);
+    await value.coordinator.waitForIdle(ack.run.id);
+    assert.notEqual(value.dispatcher.getRun(ack.run.id).status, "queued");
+    assert.equal(value.host.turnStartCalls, 1);
+  } finally { await value.coordinator.close(); }
+});
+
+test("显式容量变化解除停放并立即重新准备", async () => {
+  let prepared = 0;
+  const value = await openFixture({ busy: true, contextCompiler: {
+    semanticSearch: {},
+    async prepareRelated() { prepared += 1; },
+    compile() { return { id: `ctx-${"e".repeat(64)}`, developerInstructions: "safe", dynamicContext: "safe" }; },
+  } });
+  try {
+    const ack = await value.coordinator.send({ operationId: "explicit-capacity", sessionKey: SESSION_KEY, prompt: "after config" });
+    assert.equal(ack.reason, "PROFILE_ACTIVE_LIMIT");
+    value.dispatcher.busy = false;
+    await value.coordinator.capacityChanged();
+    assert.equal(prepared, 2);
+    await value.coordinator.waitForIdle(ack.run.id);
+    assert.equal(value.host.turnStartCalls, 1);
+  } finally { await value.coordinator.close(); }
 });
 
 test("read-only/maxActive>1 语义下同一 ChatSession 第二条 operation 仍保持 queued", async () => {

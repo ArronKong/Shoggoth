@@ -9,6 +9,7 @@ import { createChatReadStateFixture } from "./chat-read-state";
 import { readChatUnread } from "../../app/manage-ui/src/lib/chatUnread";
 import { runPageRefresh } from "../../app/manage-ui/src/lib/page-refresh";
 import i18n from "../../app/manage-ui/src/i18n";
+import { makeDetail } from "./background-task-gallery/scenes";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
@@ -25,7 +26,8 @@ const queued = scenario.startsWith("queued-");
 const steering = scenario.startsWith("steering-");
 const nativeMain = scenario.startsWith("sending-shoggoth-main");
 const sending = scenario.startsWith("sending-") || steering;
-const betaBackend = steering || queued ? "shoggoth" : sending ? scenario.split("-")[1] : "hermes";
+const backgroundApprovalFixture = scenario === "background-approval";
+const betaBackend = steering || queued || backgroundApprovalFixture ? "shoggoth" : sending ? scenario.split("-")[1] : "hermes";
 const immersive = scenario.endsWith("-immersive");
 const now = Date.now();
 const minute = 60_000;
@@ -33,8 +35,11 @@ const alpha = cronResults ? alphaBackend + "-order-alpha" : "order-alpha", beta 
 const mainKey = "agent:" + alpha + ":main";
 const oldKey = "agent:" + alpha + ":old";
 const cronKey = "agent:" + alpha + ":cron:fixture:run:1";
-const betaKey = "agent:" + beta + ":" + (nativeMain ? "11111111-1111-4111-8111-111111111111" : "main");
+const betaKey = "agent:" + beta + ":" + (nativeMain || backgroundApprovalFixture ? "11111111-1111-4111-8111-111111111111" : "main");
 const betaAppKey = "agent:" + beta + ":22222222-2222-4222-8222-222222222222";
+const approvalTaskId = `bgt-${"1".repeat(48)}`;
+const approvalTask = { sessionKey: betaKey, taskId: approvalTaskId };
+let approvals = backgroundApprovalFixture ? [approvalTask] : [];
 const internalKey = "agent:order-internal:main";
 const session = (key: string, agentId: string, name: string, age: number, kind = "main") =>
   ({ key, agentId, agentName: name, backendId: agentId === beta ? betaBackend : alphaBackend,
@@ -47,7 +52,7 @@ const sessions = [
   session(internalKey, "order-internal", "Internal member", 0),
 ];
 if (queued) sessions.push(session(betaKey + "-other", beta, "Beta", 25));
-if (nativeMain) sessions.push(session(betaAppKey, beta, "Beta", 10));
+if (nativeMain || backgroundApprovalFixture) sessions.push(session(betaAppKey, beta, "Beta", 10));
 const agents = [alpha, beta, "order-internal"].map(id => ({
   id, name: id === alpha ? "Alpha" : id === beta ? "Beta" : "Internal member",
   backendId: id === beta ? betaBackend : alphaBackend,
@@ -152,9 +157,19 @@ state.fetch = async (input: unknown, init: RequestInit = {}) => {
   })) };
   else if (url.pathname === "/__api/backends") payload = { backends: FALLBACK_BACKEND_DESCRIPTORS };
   else if (url.pathname === "/__api/agents") payload = { agents };
+  else if (/^\/__api\/agents\/[^/]+\/models$/u.test(url.pathname)) payload = { models: [], defaultModel: null };
   else if (url.pathname === "/__api/chat/capabilities") payload = {
     attachments: { image: false, pdf: false, file: false }, slash: false, steer: steering,
+    backgroundTasks: backgroundApprovalFixture && url.searchParams.get("agentId") === beta,
   };
+  else if (url.pathname === "/__api/background-tasks/approvals") payload = { approvals };
+  else if (url.pathname === "/__api/background-tasks") payload = { supported: true, tasks: [] };
+  else if (url.pathname === "/__api/background-tasks/detail" && backgroundApprovalFixture) {
+    check(url.searchParams.get("sessionKey") === betaKey && url.searchParams.get("taskId") === approvalTaskId,
+      "row click must open the matching task in its actual source session");
+    const detail = makeDetail(approvals.length ? "waiting_approval" : "running");
+    payload = { ...detail, task: { ...detail.task, taskId: approvalTaskId } };
+  }
   else if (url.pathname === "/__api/chat/cache-scope") payload = {
     backendId: url.searchParams.get("backend"), cacheScope: "sidebar-order-fixture",
   };
@@ -238,6 +253,37 @@ createRoot(document.getElementById("root")!).render(
   <HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>,
 );
 state.runSidebarOrderFixture = async () => {
+  if (backgroundApprovalFixture) {
+    const row = (agent: string) => rows().find(button => button.title === agent);
+    const attention = () => row(beta)?.querySelector<HTMLElement>(".chat-agent__subtext.is-attention");
+    const dialog = () => document.querySelector('[role="dialog"]');
+    const showing = (key: string) => document.querySelector(".chat-thread")?.textContent?.includes("History for " + key);
+    await wait(() => showing(mainKey) && attention(), "existing approval missing from the inactive Agent's row");
+    const sidebarSocket: FixtureSocket = state.socket;
+    const publish = (pending: boolean) => {
+      approvals = pending ? [approvalTask] : [];
+      sidebarSocket.emit({ type: "event", event: "background.tasks.approvals.changed", payload: { backendId: "shoggoth" } });
+    };
+    check(attention()?.textContent === i18n.t("backgroundTask.sidebarApproval"), "localized background approval text");
+    check(attention()!.scrollWidth <= attention()!.clientWidth, "approval text is clipped");
+    check(row(beta)?.querySelector(".chat-agent__attention-dot"), "approval dot missing");
+    expectOrder(directOrder, "approval preserves ordering");
+    row(beta)!.click();
+    await wait(() => showing(betaKey) && dialog()?.textContent?.includes(makeDetail("waiting_approval").task.title),
+      "row must open the source chat and pending task dialog");
+    (dialog()!.querySelector(`button[aria-label="${i18n.t("common.close")}"]`) as HTMLButtonElement).click();
+    await wait(() => !dialog(), "task dialog did not close");
+    row(alpha)!.click();
+    const otherAgentSelected = () => row(alpha)?.classList.contains("is-active");
+    await wait(otherAgentSelected, "could not switch to the other Agent");
+    check(attention(), "switching away must keep the pending approval visible");
+    publish(false);
+    await wait(() => !attention(), "resolved approval did not clear while viewing the other Agent");
+    publish(true);
+    await wait(() => attention(), "new approval did not appear while viewing the other Agent");
+    check(otherAgentSelected() && !dialog() && writes === 0, "the indicator must not switch chats or write by itself");
+    return { scenario, language, order: names() };
+  }
   if (queued) return runQueuedFixture();
   if (sending) return runSendingFixture();
   if (scenario.startsWith("events-")) return runActivityEventFixture();
@@ -394,7 +440,7 @@ async function runSendingFixture() {
   }
   if (!immersive) {
     rows().find(row => row.title === alpha)!.click();
-    await wait(() => document.querySelector(".chat-thread")?.textContent?.includes("History for " + (steering ? mainKey : cronKey)), "other Agent did not open");
+    await wait(() => document.querySelector(".chat-thread")?.textContent?.includes("History for " + cronKey), "other Agent's latest session did not open");
     expectOrder(["Beta", "Alpha"], "leaving the running Agent must retain its new position");
     await select(oldKey);
     expectOrder(["Beta", "Alpha"], "selecting an old session must not change the new activity order");

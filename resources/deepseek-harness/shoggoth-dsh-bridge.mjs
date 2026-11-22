@@ -25,6 +25,8 @@ const PROTOCOL = "shoggoth-dsh-runtime";
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 8 * 1024 * 1024;
+const DEEPSEEK_API_ORIGIN = "https://api.deepseek.com";
+const MAX_BALANCE_BYTES = 64 * 1024;
 // Private bridge-to-Host field only. The Host redacts before any publication.
 function protocolFailure(error) {
   return typeof error?.message === "string" && Buffer.byteLength(error.message) <= 64 * 1024
@@ -50,6 +52,21 @@ function plain(value) {
 function safeString(value, maxBytes = 1024, empty = false) {
   return typeof value === "string" && (empty || value.length > 0) && value.isWellFormed()
     && !value.includes("\0") && Buffer.byteLength(value, "utf8") <= maxBytes;
+}
+
+function quotaWallets(sources) {
+  const wallets = [];
+  for (const [source, kind, field] of sources) {
+    if (!Array.isArray(source)) continue;
+    for (const unit of ["USD", "CNY"]) {
+      const amountText = source.find(wallet => wallet?.currency === unit)?.[field];
+      if (!safeString(amountText, 128) || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/u.test(amountText)) continue;
+      const amount = Number(amountText);
+      if (Number.isFinite(amount) && amount >= 0 && amount <= Number.MAX_SAFE_INTEGER) wallets.push({ kind, amount, unit });
+    }
+  }
+  const positive = wallets.filter(wallet => wallet.amount > 0);
+  return positive.length ? positive : wallets.filter((wallet, index) => wallets.findIndex(item => item.unit === wallet.unit) === index);
 }
 
 function bridgeError(code, message) {
@@ -172,6 +189,7 @@ export function installWorkspaceExecutionGuard(ctx) {
 export class BridgeRuntime {
   constructor(ctx, options = {}) {
     this.ctx = ctx;
+    this.fetchBalance = options.fetch ?? globalThis.fetch;
     this.workspaceExecution = options.workspaceExecution
       ?? (process.env.SHOGGOTH_DSH_WORKSPACE_EXECUTION_VERSION === "1");
     this.sessions = new Map();
@@ -465,6 +483,67 @@ export class BridgeRuntime {
     return undefined;
   }
 
+  async platformQuotaAccount() {
+    const account = this.ctx.get("deepseekAccount");
+    return typeof account?.getBalance === "function" && (await account.getState?.())?.status === "credential-stored"
+      ? account : null;
+  }
+
+  async officialQuotaCredential() {
+    if (this.ctx.agentDefaultModel?.currentSelection()?.provider !== "deepseek-official") return null;
+    const config = this.ctx.get("settings")?.get?.("llm-deepseek");
+    if (!plain(config) || config.apiKey != null) return null;
+    const env = this.ctx.get("launchEnvironment");
+    const baseURL = config.baseURL
+      ?? (env ? env.get("DEEPSEEK_BASE_URL")?.value : process.env.DEEPSEEK_BASE_URL)
+      ?? DEEPSEEK_API_ORIGIN;
+    // This key belongs to the Harness's active official route. Never send a
+    // credential configured for a custom endpoint to the balance API.
+    if (typeof baseURL !== "string" || ![DEEPSEEK_API_ORIGIN, DEEPSEEK_API_ORIGIN + "/",
+      DEEPSEEK_API_ORIGIN + "/v1", DEEPSEEK_API_ORIGIN + "/v1/"].includes(baseURL)) return null;
+    const ref = config.apiKeyEnv ?? "DEEPSEEK_API_KEY";
+    if (!safeString(ref, 256)) return null;
+    const credential = await this.ctx.credentials.resolve?.(ref);
+    const key = credential?.value;
+    if (!safeString(key, 4096) || /[^\x21-\x7e]/u.test(key)) return null;
+    const quotaScope = crypto.createHash("sha256").update(JSON.stringify([
+      "shoggoth-oauth-quota", "deepseek-harness-api-key", DEEPSEEK_API_ORIGIN, key,
+    ])).digest("hex");
+    return { key, quotaScope };
+  }
+
+  async apiKeyQuotaRead() {
+    const credential = await this.officialQuotaCredential();
+    if (!credential) return { status: "unsupported" };
+    try {
+      const response = await this.fetchBalance(DEEPSEEK_API_ORIGIN + "/user/balance", {
+        method: "GET", redirect: "error", signal: AbortSignal.timeout(12_000),
+        headers: { Authorization: `Bearer ${credential.key}`, Accept: "application/json" },
+      });
+      if (!response.ok || !response.body) {
+        await response.body?.cancel();
+        return { status: "unavailable" };
+      }
+      let size = 0;
+      const chunks = [];
+      for await (const chunk of response.body) {
+        size += chunk.byteLength;
+        if (size > MAX_BALANCE_BYTES) return { status: "unavailable" };
+        chunks.push(chunk);
+      }
+      const result = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (credential.quotaScope !== (await this.officialQuotaCredential())?.quotaScope
+        || await this.platformQuotaAccount()) return { status: "unavailable" };
+      const wallets = quotaWallets([
+        [result?.balance_infos, "recharge", "topped_up_balance"],
+        [result?.balance_infos, "bonus", "granted_balance"],
+      ]);
+      return wallets.length ? { status: "available", wallets, quotaScope: credential.quotaScope } : { status: "unavailable" };
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+
   async authRead({ includeQuotaScope = false } = {}) {
     const descriptions = await Promise.all(
       AUTH_ENV_KEYS.map((key) => this.ctx.credentials.describe(key)),
@@ -475,19 +554,17 @@ export class BridgeRuntime {
     let quotaScope;
     if (includeQuotaScope && credentialPresent) {
       try {
-        const account = this.ctx.get("deepseekAccount");
-        if ((await account?.getState?.())?.status === "credential-stored") quotaScope = await this.accountQuotaScope(account);
+        const account = await this.platformQuotaAccount();
+        quotaScope = account ? await this.accountQuotaScope(account) : (await this.officialQuotaCredential())?.quotaScope;
       } catch { /* The account SDK is optional for other credential sources. */ }
     }
     return { authenticated: credentialPresent, credentialPresent, ...(quotaScope ? { quotaScope } : {}) };
   }
 
   async quotaRead({ version }) {
-    const account = this.ctx.get("deepseekAccount");
-    if (typeof account?.getBalance !== "function" || typeof account.getState !== "function"
-      || !safeString(version, 128)) return { status: "unsupported" };
-    const state = await account.getState();
-    if (state?.status !== "credential-stored") return { status: "unsupported" };
+    const account = await this.platformQuotaAccount();
+    if (!account) return this.apiKeyQuotaRead();
+    if (!safeString(version, 128)) return { status: "unavailable" };
     const quotaScope = await this.accountQuotaScope(account);
     const client = {
       version, locale: "en", timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
@@ -498,16 +575,7 @@ export class BridgeRuntime {
     ]);
     if (balance?.status !== "ready" || quotaScope !== await this.accountQuotaScope(account)) return { status: "unavailable" };
 
-    const wallets = [];
-    for (const [source, kind] of [[balance.value, "recharge"], [balance.bonusWallets, "bonus"]]) {
-      if (!Array.isArray(source)) continue;
-      for (const unit of ["USD", "CNY"]) {
-        const amountText = source.find(wallet => wallet?.currency === unit)?.balance;
-        if (!safeString(amountText, 128) || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/u.test(amountText)) continue;
-        const amount = Number(amountText);
-        if (Number.isFinite(amount) && amount > 0 && amount <= Number.MAX_SAFE_INTEGER) wallets.push({ kind, amount, unit });
-      }
-    }
+    const wallets = quotaWallets([[balance.value, "recharge", "balance"], [balance.bonusWallets, "bonus", "balance"]]);
     const identity = profile?.status === "ready" ? profile.value : null;
     const accountName = [identity?.name, identity?.contact].find(value => safeString(value, 254) && value.trim());
     return wallets.length ? { status: "available", wallets, ...(accountName ? { accountName } : {}),

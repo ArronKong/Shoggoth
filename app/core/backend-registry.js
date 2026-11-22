@@ -643,6 +643,13 @@ class BackendRegistry extends EventEmitter {
     return this.#backgroundTaskOwner(sessionKey).listBackgroundTasks(sessionKey);
   }
 
+  async listBackgroundTaskApprovals() {
+    const results = await Promise.all(this._activeBackends().map(async (backend) => {
+      try { return await backend.listBackgroundTaskApprovals(); } catch { return []; }
+    }));
+    return results.flat();
+  }
+
   async getBackgroundTask(sessionKey, taskId) {
     return this.#backgroundTaskOwner(sessionKey).getBackgroundTask(sessionKey, taskId);
   }

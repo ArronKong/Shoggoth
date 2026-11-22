@@ -307,6 +307,7 @@ test("诊断写入失败不掩盖恢复门禁，恢复写入后只保存安全�
     assert.equal(getterCalls, 0);
     const record = JSON.parse(fs.readFileSync(diagnosticPath, "utf8"));
     assert.equal(record.causeCode, null);
+    assert.equal(record.poisonCode, null);
     assert.equal(record.errorCode, "TRANSCRIPT_COMMIT_UNCERTAIN");
     assert.ok(!JSON.stringify(record).includes("private-canary"));
   } finally {
@@ -314,6 +315,29 @@ test("诊断写入失败不掩盖恢复门禁，恢复写入后只保存安全�
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const [code, poisonCode] of [["PRODUCT_COMPACTION_FAILED", "PRODUCT_COMPACTION_FAILED"], ["private-canary /tmp", null]]) {
+  test(`Coordinator 失效诊断记录自身代码 ${poisonCode}，不归为存储故障`, async () => {
+    const { root, paths } = fixturePaths();
+    const service = serviceFor(paths);
+    try {
+      await service.start();
+      service.workRunCoordinator.poisonError = Object.assign(new Error("private-canary"), { code });
+      await assert.rejects(call(paths, "service.status"), error => error.code === "SERVICE_RECOVERY_REQUIRED"
+        && error.systemIssue === undefined);
+      const record = JSON.parse(fs.readFileSync(path.join(paths.runtimeDir, "service-recovery.json"), "utf8"));
+      assert.equal(record.component, "work-run-coordinator");
+      assert.equal(record.errorCode, "WORK_RUN_COORDINATOR_UNAVAILABLE");
+      assert.equal(record.causeCode, null);
+      assert.equal(record.poisonCode, poisonCode);
+      assert.ok(!JSON.stringify(record).includes("private-canary"));
+      service.workRunCoordinator.poisonError = null;
+    } finally {
+      await service.stop({ notify: false });
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 function launchFixture() {
   const { root } = fixturePaths();

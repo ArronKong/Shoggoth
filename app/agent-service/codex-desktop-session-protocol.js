@@ -12,7 +12,7 @@ const MESSAGES = Object.freeze({
   CODEX_DESKTOP_FORMAT_UNSUPPORTED: "当前 Codex Desktop 会话格式尚不受支持",
   CODEX_DESKTOP_NOT_FOUND: "Codex Desktop 原会话已归档、删除或不属于当前来源",
   CODEX_DESKTOP_BUSY: "原对话正在 Codex 客户端运行，请等当前回合结束后再发送",
-  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用原生 Codex CLI",
+  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用本机 Codex",
   CODEX_DESKTOP_PARAMS_INVALID: "Codex Desktop 会话请求无效",
   CODEX_DESKTOP_RESPONSE_INVALID: "Codex Desktop 会话响应无效",
   CODEX_DESKTOP_UNAVAILABLE: "Codex Desktop 原会话暂不可用",

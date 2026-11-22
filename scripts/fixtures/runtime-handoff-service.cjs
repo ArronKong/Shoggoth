@@ -14,7 +14,7 @@ const { CodexRuntimeAdapter } = require("../../app/agent-service/codex-runtime-a
 const { FakeHost } = require("../shoggoth-work-run-coordinator-unit.cjs");
 
 async function openHandoffFixture({ root: existingRoot, transport: existingTransport, catalogs, builtinCliProfiles = false,
-  validateHandles = false, retryWriterIdentity = false, serviceOptions = {} } = {}) {
+  validateHandles = false, retryWriterIdentity = false, serviceOptions = {}, prepareManager } = {}) {
   const root = fs.realpathSync(existingRoot || fs.mkdtempSync("/tmp/sghandoff-"));
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
@@ -91,6 +91,8 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
     async stopAll() { await Promise.all([...transport.handles.values()].map(handle => handle.host.stop())); },
     isRetiredSessionId: (runtime, sessionId) => transport.retired?.(runtime, sessionId) === true,
   };
+  // Startup recovery may resume queued inputs before a test can stub the manager.
+  prepareManager?.(manager);
   const facts = { read: async () => ({ installed: true, releaseEnabled: true, authenticated: true,
     models: ["fixture-model"], attachmentKinds: [], permissionEnforcementProven: true }) };
   // A fixture's Codex Desktop inventory must never discover the real user's threads.

@@ -25,6 +25,16 @@
   overflow-y: hidden;
 }
 
+.scrollable:is([data-scrolled], [data-more]) {
+  --fade-left: 0px;
+  --fade-right: 0px;
+  mask-image: linear-gradient(to right, transparent, #000 var(--fade-left),
+    #000 calc(100% - var(--fade-right)), transparent);
+}
+
+.scrollable[data-scrolled] { --fade-left: 20px; }
+.scrollable[data-more] { --fade-right: 20px; }
+
 /* 选中态的底交给 LiquidPill 在项之间滑过去（R237/R238 同一套运动语言） */
 .pill {
   background: var(--ui-text-1);
@@ -50,6 +60,12 @@
   transition:
     background var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1),
     color 130ms ease 100ms;
+}
+
+.labelWithIcon {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* 选中项不吃 hover 底色——它身下已经是胶囊，再垫一层会把胶囊盖掉。

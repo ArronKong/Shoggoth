@@ -3820,8 +3820,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
     }
     if (segs[0] === "background-tasks" && segs.length <= 2) {
-      // Background tasks of the chat the user has open. The backend re-checks
-      // that every task belongs to this source session.
+      // Details and controls are scoped to the chat that dispatched the task.
       const sendTaskError = error => {
         const code = typeof error?.code === "string" ? error.code : "BACKGROUND_TASK_UNAVAILABLE";
         const status = code === "BACKGROUND_TASK_NOT_FOUND" ? 404
@@ -3840,6 +3839,13 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
             return sendJson(res, 400, { error: "invalid sessionKey", code: "INVALID_PARAMS" });
           }
           return sendJson(res, 200, await registry.listBackgroundTasks(sessionKey));
+        }
+        if (segs[1] === "approvals") {
+          if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+          if (!hasExactSearchParams(url.searchParams, [])) {
+            return sendJson(res, 400, { error: "invalid background task approvals query", code: "INVALID_PARAMS" });
+          }
+          return sendJson(res, 200, { approvals: await registry.listBackgroundTaskApprovals() });
         }
         if (segs[1] === "detail") {
           if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });

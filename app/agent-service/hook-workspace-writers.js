@@ -21,7 +21,9 @@ function workspaceIdentity(workspace) {
 // All writable native Runs participate, including Runs with no action Hook.
 // A writer stays occupied until its exact Run terminates and workers exit.
 class HookWorkspaceWriters {
-  constructor() { this.owners = new Map(); this.runs = new Map(); }
+  // revision changes on every acquire/release, so a queued Run can tell that a
+  // writer it waited for has gone even when no Run status changed.
+  constructor() { this.owners = new Map(); this.runs = new Map(); this.revision = 0; }
   conflict(runId, key) {
     for (const [workspace, owner] of this.owners) {
       if (owner !== runId && (contains(workspace, key) || contains(key, workspace))) return true;
@@ -40,6 +42,7 @@ class HookWorkspaceWriters {
     if (roots.some(key => this.conflict(runId, key))) fail("HOOK_WORKSPACE_BUSY");
     for (const key of roots) this.owners.set(key, runId);
     this.runs.set(runId, roots);
+    this.revision += 1;
     return true;
   }
   assert(runId, workspace) {
@@ -48,8 +51,8 @@ class HookWorkspaceWriters {
   }
   release(runId) {
     for (const root of this.runs.get(runId) || []) if (this.owners.get(root) === runId) this.owners.delete(root);
-    this.runs.delete(runId);
+    if (this.runs.delete(runId)) this.revision += 1;
   }
-  close() { this.owners.clear(); this.runs.clear(); }
+  close() { this.owners.clear(); this.runs.clear(); this.revision += 1; }
 }
 module.exports = { HookWorkspaceWriters };

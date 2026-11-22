@@ -9,6 +9,32 @@ const { effortId } = require("./model-reasoning-catalog");
 const AGENT = "shoggoth-model-only";
 const PERMISSION = Object.freeze([{ permission: "*", pattern: "*", action: "deny" }]);
 const fail = code => serviceError(code, "OpenCode 无工具模型任务未能完成");
+const RETRY_POLL_MS = 1_000;
+
+// The message request returns only when OpenCode finishes. A provider limit
+// leaves it retrying without a reply (up to its retry-after), so stop on the
+// same quota or far-away retry rule as a chat turn instead of waiting it out.
+function watchProviderRetry(worker, sessionId, signal, deadline) {
+  const { openCodeRetryLimit } = require("./opencode-runtime-host");
+  let timer = null, stopped = false;
+  const limited = new Promise((_, reject) => {
+    const poll = async () => {
+      if (stopped || signal.aborted) return;
+      try {
+        const statuses = (await worker.client.request("GET", "/session/status", undefined, { signal, timeoutMs: 5_000 })).data;
+        const status = statuses?.[sessionId];
+        if (status?.type === "retry") {
+          const limit = openCodeRetryLimit(status, Date.now(), deadline);
+          if (limit.giveUp) { reject(fail(limit.code || "RUNTIME_UPSTREAM_UNAVAILABLE")); return; }
+        }
+      } catch { /* The message request reports a stopped or lost server. */ }
+      if (!stopped) { timer = setTimeout(poll, RETRY_POLL_MS); timer.unref?.(); }
+    };
+    timer = setTimeout(poll, RETRY_POLL_MS); timer.unref?.();
+  });
+  limited.catch(() => {});
+  return { limited, stop() { stopped = true; clearTimeout(timer); } };
+}
 
 function isolateOpenCodeModelEnvironment(env, privateConfig) {
   env.HOME = path.join(privateConfig, "home");
@@ -128,7 +154,9 @@ async function generateOpenCodeModelOnly(host, input) {
       }
       fence();
       const messageId = `msg_${crypto.randomBytes(16).toString("hex")}`;
-      const response = (await worker.client.request("POST", `${route}/message`, {
+      const timeoutMs = input.timeoutMs ?? 600_000;
+      const retry = watchProviderRetry(worker, sessionId, signal, Date.now() + timeoutMs);
+      const posting = worker.client.request("POST", `${route}/message`, {
         messageID: messageId, agent: AGENT, tools: { "*": false },
         // Keep the run's trusted host protocol above the supplied recall brief
         // and evidence. A dedicated worker must not drop these instructions.
@@ -136,7 +164,10 @@ async function generateOpenCodeModelOnly(host, input) {
         ...(requested ? { model: { providerID: requested.providerID, modelID: requested.id } } : {}),
         ...settings,
         parts: [{ type: "text", text: input.prompt }],
-      }, { signal, timeoutMs: input.timeoutMs ?? 600_000 })).data;
+      }, { signal, timeoutMs });
+      posting.catch(() => {});
+      let response;
+      try { response = (await Promise.race([posting, retry.limited])).data; } finally { retry.stop(); }
       fence();
       // Inspect the complete temporary conversation, not just the last answer:
       // an intermediate tool call must never be hidden by a later text result.

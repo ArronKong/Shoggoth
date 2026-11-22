@@ -86,6 +86,14 @@ const { validateRuntimeContextUsage, runtimeContextCapabilities, nativeCompactio
   unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const ACTIVE_RUN_STATES = new Set(["starting", "running", "waiting_approval", "waiting_input"]);
 const TERMINAL_RUN_STATES = new Set(["completed", "failed", "canceled", "interrupted", "skipped"]);
+// Queue reasons that only other Runs, their workspace writers or configured
+// limits can clear (all in the capacity fingerprint). While they are unchanged,
+// a retry tick need not repeat recall and context compile. Account limits are
+// excluded: non-Run leases also hold them.
+const PARKABLE_QUEUE_REASONS = new Set(["CHAT_SESSION_BUSY", "WORKSPACE_WRITE_BUSY", "GLOBAL_CAPACITY",
+  "PROFILE_ACTIVE_LIMIT", "PROFILE_WORKSPACE_WRITE_LIMIT", "BACKEND_ACTIVE_LIMIT", "BACKEND_BACKGROUND_ACTIVE_LIMIT"]);
+// Bound on a missed wake-up: a parked Run is fully re-prepared at least this often.
+const PARKED_ADMISSION_RECHECK_MS = 30_000;
 const MAX_THREAD_LIST_PAGES = 1_000;
 const DEFAULT_MAX_RESULT_SUMMARY_BYTES = 4 * 1024;
 const MAX_RESULT_SUMMARY_BYTES = 16 * 1024;
@@ -374,6 +382,14 @@ const CHAT_PREPARATION_REJECTIONS = new Set([
   "MEMORY_FLUSH_RECOVERY_REQUIRED", "MEMORY_FLUSH_TOO_LARGE", "MEMORY_SECRET_REJECTED",
   "MEMORY_TRANSACTION_UNSETTLED", "MEMORY_WRITE_UNCERTAIN", "MEMORY_REVISION_CONFLICT", "RECALL_POLICY_UNAVAILABLE",
 ]);
+// A next-turn handoff rethrows its summary Run's terminal code. That Run has a
+// deterministic id, so a restart finds the same failure: it must reject only
+// the waiting input, never poison the Service. The source session is unchanged.
+const HANDOFF_SUMMARY_FAILURES = new Set([
+  "PRODUCT_COMPACTION_FAILED", "PRODUCT_COMPACTION_AUTH_REQUIRED", "PRODUCT_COMPACTION_MODEL_UNAVAILABLE",
+  "PRODUCT_COMPACTION_OUTPUT_INVALID", "PRODUCT_COMPACTION_OUTCOME_UNKNOWN", "COMPACTION_RECOVERY_UNAVAILABLE",
+  "CHECKPOINT_STALE", "CHECKPOINT_INVALID", "CHECKPOINT_SUMMARY_TOO_LARGE", "MODEL_ONLY_CANCELED",
+]);
 
 function chatPreparationRejection(error, preflight) {
   const code = ownDataErrorCode(error);
@@ -385,7 +401,15 @@ function chatPreparationRejection(error, preflight) {
   if (CHAT_PREPARATION_REJECTIONS.has(code)) return code;
   if (START_OPERATIONAL_ERROR_CODES.has(code)) return publicStartErrorCode(error);
   if (preflight && (code === "POLICY_REJECTED" || code === "CHAT_SESSION_REVISION_CONFLICT"
-    || code === "RUNTIME_SELECTION_UNAVAILABLE" || code === "RUNTIME_SELECTION_POLICY_STALE")) return code;
+    || code === "RUNTIME_SELECTION_UNAVAILABLE" || code === "RUNTIME_SELECTION_POLICY_STALE"
+    || code === "CONTEXT_INPUT_TOO_LARGE" || code === "CONTEXT_HANDOFF_INTERRUPTED")) return code;
+  if (preflight && HANDOFF_SUMMARY_FAILURES.has(code)) {
+    return require("./product-context-protocol").compactionErrorCode({ code });
+  }
+  // The next-turn pick's runtime check. A cold start may not know the picked
+  // Runtime's facts or catalog yet; the controller keeps such transient picks.
+  if (preflight && (code === "PROFILE_MODEL_CATALOG_UNAVAILABLE"
+    || require("./runtime-support").RUNTIME_SUPPORT_CODES.includes(code))) return code;
   return null;
 }
 
@@ -1219,6 +1243,7 @@ class WorkRunCoordinator {
     this.lastErrors = new Map();
     this.runStreams = new Map();
     this.runQueueStates = new Map();
+    this.parkedAdmissions = new Map();
     this.nativeCompactionAuthRecoveries = new Set();
     this.runAdmissionTasks = new Map();
     this.admissionRetryTimer = null;
@@ -1312,6 +1337,7 @@ class WorkRunCoordinator {
         for (const stream of this.runStreams.values()) stream.close();
         this.runStreams.clear();
         this.runQueueStates.clear();
+        this.parkedAdmissions.clear();
         clearTimeout(this.admissionRetryTimer);
         this.admissionRetryTimer = null;
         this.terminalStreams.clear();
@@ -1385,6 +1411,7 @@ class WorkRunCoordinator {
       for (const stream of this.runStreams.values()) stream.close();
       this.runStreams.clear();
       this.runQueueStates.clear();
+      this.parkedAdmissions.clear();
       clearTimeout(this.admissionRetryTimer);
       this.admissionRetryTimer = null;
       this.terminalStreams.clear();
@@ -1523,6 +1550,8 @@ class WorkRunCoordinator {
 
   capacityChanged() {
     this.startupGate?.drain();
+    // An explicit capacity change can free what the fingerprint cannot see.
+    this.parkedAdmissions.clear();
     if (!["opening", "open"].includes(this.state)) return;
     return this.#drainQueuedRuns(this.lifecycleGeneration);
   }
@@ -5657,6 +5686,7 @@ class WorkRunCoordinator {
     }
     this.recoveringRuns.delete(runId);
     this.runQueueStates.delete(runId);
+    this.parkedAdmissions.delete(runId);
     this.preflightedChatRuns.delete(runId);
     this.startupControllers.get(runId)?.abort();
     this.startupGate?.release(runId);
@@ -7428,7 +7458,9 @@ class WorkRunCoordinator {
     this.#streamFor(run.id).append("status", payload);
   }
 
-  #queuedAdmission(run, reason, retryAt = null) {
+  // park marks a decision point where only other Runs, their writers or the
+  // configured limits blocked admission; every other queue event unparks.
+  #queuedAdmission(run, reason, retryAt = null, park = false) {
     const previous = this.runQueueStates.get(run.id);
     const stage = this.#compactionPreparationStage(run, reason);
     const queuedAt = previous?.queuedAt ?? this.queueArrivalTimes.get(run.id) ?? this.#commandForRun(run)?.command?.createdAt ?? this.now();
@@ -7436,7 +7468,16 @@ class WorkRunCoordinator {
     if (previous?.reason !== reason) {
       this.telemetry.record("runtime.admission.queued", { runId: run.id, source: run.source, reason });
       if (reason === "STARTUP_BACKPRESSURE") this.telemetry.record("runtime.startup.waiting", { runId: run.id });
+      const at = this.now();
+      this.#recordLatencyMilestone(run.id, "admission_queued", at, "success", { code: reason }, at);
     }
+    if (park && run.source === "chat" && PARKABLE_QUEUE_REASONS.has(reason) && retryAt === null) {
+      const fingerprint = this.#admissionCapacityFingerprint(run);
+      const parked = this.parkedAdmissions.get(run.id);
+      if (parked?.reason !== reason || parked.fingerprint !== fingerprint) {
+        this.parkedAdmissions.set(run.id, { reason, fingerprint, at: this.now() });
+      }
+    } else this.parkedAdmissions.delete(run.id);
     const payload = { status: "queued", reason, queuedAt, ...(stage ? { stage } : {}) };
     this.runQueueStates.set(run.id, payload);
     if (previous?.reason !== reason || previous?.stage !== stage) this.#streamFor(run.id).append("status", payload);
@@ -7599,6 +7640,12 @@ class WorkRunCoordinator {
       if (!existing && this.#chatCancellationPending(run)) return { disposition: "queued", reason: "CHAT_SESSION_BUSY", run };
       return existing || this.dispatcher.admit(runId, { writable: false });
     }
+    // A Run queued behind other Runs re-enters here on every retry tick. While
+    // none of them or the limits changed, recall and context compile would
+    // only be discarded again (the compiled recall is consumed once), so it
+    // stays queued. Admission itself still runs a complete recall first.
+    const parked = this.#parkedAdmission(run);
+    if (parked) return this.#queuedAdmission(run, parked.reason, null, true);
     // Process preparation overlaps complete recall, without owning a Run,
     // native session, account admission or workspace writer.
     if (run?.source === "chat" && !this.admissionsQuiesced && this.prepareChatRuntime) {
@@ -7632,6 +7679,8 @@ class WorkRunCoordinator {
         await this.#timedPerformanceStage(runId, "admission_context", () => this.contextCompiler.prepareRelated({
           profile, run, signal, query: this.#commandForRun(run)?.command?.prompt || run.sourceId,
           assertCurrent: () => { signal?.throwIfAborted(); this.#fenceLifecycle(lifecycle); },
+          recordStage: (stage, startedAt, finishedAt, outcome, code) => this.#recordLatencyMilestone(runId, stage,
+            startedAt, outcome, code ? { code } : {}, finishedAt),
         }));
       } catch { signal?.throwIfAborted(); }
     }
@@ -7642,6 +7691,28 @@ class WorkRunCoordinator {
     const existing = this.#existingAdmission(runId);
     if (!existing && this.#chatCancellationPending(run)) return { disposition: "queued", reason: "CHAT_SESSION_BUSY", run };
     return existing || this.#admit(runId, profileId, lifecycle, signal);
+  }
+
+  #admissionCapacityFingerprint(run) {
+    const others = this.dispatcher.listRuns()
+      .filter(candidate => candidate.id !== run.id && (candidate.status === "queued" || ACTIVE_RUN_STATES.has(candidate.status)))
+      .map(candidate => `${candidate.id}:${candidate.status}`).sort();
+    const profile = this.productStore.getAgentProfile(run.profileId);
+    return JSON.stringify([others, profile?.enabled ?? null, profile?.concurrency ?? null,
+      profile?.permissionPolicy ?? null, this.getNativeRuntimeConfig() ?? null, this.hookWorkspaceWriters?.revision ?? null]);
+  }
+
+  #parkedAdmission(run) {
+    const parked = run && this.parkedAdmissions.get(run.id);
+    if (!parked) return null;
+    // Confirmed quota exhaustion fails a queued input at once, so it is
+    // checked here as #admit would, before anything else is skipped.
+    const sessionKey = this.getRunSessionKey(run);
+    if (run.status === "queued" && !this.admissionsQuiesced && this.now() - parked.at < PARKED_ADMISSION_RECHECK_MS
+      && parked.fingerprint === this.#admissionCapacityFingerprint(run)
+      && !(sessionKey && this.#chatQuotaRejection(run, this.chatSessionStore.getSession(sessionKey)))) return parked;
+    this.parkedAdmissions.delete(run.id);
+    return null;
   }
 
   #chatQuotaRejection(run, session) {
@@ -7905,7 +7976,7 @@ class WorkRunCoordinator {
     if (sessionRuns.some(candidate => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
       return this.#queuedAdmission(run, sessionRuns.some(candidate => candidate.id !== run.id
         && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction")
-        ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
+        ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING", null, true);
     }
     const cronModel = run.source === "cron" ? this.domainCommands.get(run.id)?.modelSelection : undefined;
     if (cronModel !== undefined) {
@@ -7989,10 +8060,10 @@ class WorkRunCoordinator {
     if (sessionRuns.some(candidate => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
       return this.#queuedAdmission(run, sessionRuns.some(candidate => candidate.id !== run.id
         && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction")
-        ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
+        ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING", null, true);
     }
     if (this.hookWorkspaceWriters?.busy(runId, run.workspace, executionContract.permissionPolicy.sandbox, executionContract.agentWorkspace)) {
-      return this.#queuedAdmission(run, "WORKSPACE_WRITE_BUSY");
+      return this.#queuedAdmission(run, "WORKSPACE_WRITE_BUSY", null, true);
     }
     const requestPlan = executionContract.contextRequest;
     const command = this.#commandForRun(run)?.command;
@@ -8068,7 +8139,7 @@ class WorkRunCoordinator {
           sessionRuns = this.listSessionRuns(sessionKey);
           if (sessionRuns.some(candidate => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
             return this.#queuedAdmission(run, sessionRuns.some(candidate => candidate.id !== run.id
-              && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction") ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
+              && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction") ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING", null, true);
           }
         } catch (error) {
           if (/^(CONTEXT_|HOOK_)/u.test(error?.code || "")) return { disposition: "rejected", reason: error.code, run };
@@ -8244,7 +8315,7 @@ class WorkRunCoordinator {
       if (accountAdmission?.disposition === "started") {
         this.runtimeAccountAdmission.release({ runtimeAccountId: executionContract.runtimeAccountId, runId });
       }
-      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY", null, true);
     }
     const nativePolicy = require("./execution-policy").resolveAdmissionPolicy(this.getNativeRuntimeConfig());
     const globalFull = nativePolicy.enabled && this.dispatcher.listRuns()
@@ -8255,7 +8326,7 @@ class WorkRunCoordinator {
     }
     if (globalFull || (this.startupGate && !this.startupGate.acquire(runId))) {
       if (accountAdmission) this.runtimeAccountAdmission.release({ runtimeAccountId: executionContract.runtimeAccountId, runId });
-      return this.#queuedAdmission(run, globalFull ? "GLOBAL_CAPACITY" : "STARTUP_BACKPRESSURE");
+      return this.#queuedAdmission(run, globalFull ? "GLOBAL_CAPACITY" : "STARTUP_BACKPRESSURE", null, globalFull);
     }
     let admission;
     try {
@@ -8289,6 +8360,7 @@ class WorkRunCoordinator {
         .filter(candidate => candidate.status === "queued").map(candidate => candidate.source));
       this.queueArrivalTimes.delete(runId);
       this.runQueueStates.delete(runId);
+      this.parkedAdmissions.delete(runId);
       const admittedContract = Object.freeze({
         ...executionContract,
         runtimeAccountGeneration: accountAdmission?.generation ?? null,
@@ -8316,7 +8388,7 @@ class WorkRunCoordinator {
       this.mcpConnectorController?.releaseRun(runId);
       this.startupGate?.release(runId);
     }
-    return admission.disposition === "queued" ? this.#queuedAdmission(run, admission.reason) : admission;
+    return admission.disposition === "queued" ? this.#queuedAdmission(run, admission.reason, null, true) : admission;
   }
 
   #recoverFailedNativeCheckpoint(run, profile, session) {
@@ -9433,8 +9505,8 @@ class WorkRunCoordinator {
                 ? executionContract.permissionPolicy : executionContract.runtimeHostPermissionPolicy,
               workspace: executionContract.workspace,
               executionContract,
-              ...(this.temporarySecrets && codexSessionProvider.supportsSessionProviders(executionContract)
-                ? { modelSecretProviderKind: this.#routeModelProvider(executionContract)?.kind } : {}),
+              ...codexSessionProvider.codexHostAcquireOptions({ productStore: this.productStore,
+                temporarySecrets: this.temporarySecrets, contract: executionContract }),
               ...(this.hookService ? { nativeHookScope: this.hookService.nativeRunScope?.(runId) ?? null } : {}),
             };
             const observed = this.runtimeManager.acquireObserved
@@ -11229,12 +11301,7 @@ class WorkRunCoordinator {
   // names the Profile default source; if even that cannot be resolved the
   // source stays unnamed and the adapter refuses the model work.
   #routeModelProvider(contract) {
-    if (!codexSessionProvider.supportsSessionProviders(contract)) return undefined;
-    if (contract.provider) return codexSessionProvider.codexModelProvider(this.productStore, contract.provider.providerRef);
-    try {
-      return codexSessionProvider.codexModelProvider(this.productStore,
-        this.productStore.getAgentProfile?.(contract.profileId)?.providerRef ?? null);
-    } catch { return undefined; }
+    return codexSessionProvider.routeModelProvider(this.productStore, contract);
   }
 
   #sessionStartParams(threadSource, profile, session) {

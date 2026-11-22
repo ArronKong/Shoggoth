@@ -1295,6 +1295,49 @@ test("rename/archive/delete 先持久化本地意图，按 Profile runtime 调 H
   chatSessionStore.close();
 });
 
+test("启动重放中被 Runtime 拒绝的会话操作保持 pending，不阻断 Controller open，下次 open 完成", async () => {
+  // 2026-11-21: a delete rejected by Codex ("already has an active writer")
+  // stayed pending, and open() replayed it without a guard, so the next
+  // Service start would fail before its socket was published.
+  const value = boundControllerFixture();
+  const { controller, chatSessionStore, bound, host, calls } = value;
+  await controller.open();
+  let rejecting = true;
+  host.threadDelete = async (params) => {
+    calls.remote.push(["delete", structuredClone(params)]);
+    if (rejecting) throw Object.assign(new Error("thread already has an active writer"), { code: "RPC_REMOTE_ERROR" });
+    return {};
+  };
+  await assert.rejects(controller.handle("chat.session.delete", {
+    operationId: "delete-writer-busy", sessionKey: bound.sessionKey, createdAt: 904,
+  }, "delete-busy"), (error) => error.code === "RPC_REMOTE_ERROR");
+  assert.equal(chatSessionStore.getSession(bound.sessionKey).status, "delete_pending");
+
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => { logged.push(args.join(" ")); };
+  try {
+    await controller.close();
+    await controller.open();
+  } finally { console.error = originalError; }
+  assert.deepEqual(chatSessionStore.listPendingRemoteOperations().map((item) => item.operationId),
+    ["delete-writer-busy"], "the rejected replay stays pending");
+  assert.ok(logged.some(line => line.includes("RPC_REMOTE_ERROR") && !line.includes("active writer")),
+    "only the error code is logged");
+  const listed = await controller.handle("chat.session.list", {
+    profileId: PROFILE_ID, cursor: null, limit: 10, includeArchived: false,
+  }, "list-after-deferred-replay");
+  assert.ok(Array.isArray(listed.sessions), "the chat plane is open");
+
+  rejecting = false;
+  await controller.close();
+  await controller.open();
+  assert.deepEqual(chatSessionStore.listPendingRemoteOperations(), []);
+  assert.equal(chatSessionStore.getSession(bound.sessionKey), null);
+  assert.equal(calls.remote.filter(([kind]) => kind === "delete").length, 3);
+  chatSessionStore.close();
+});
+
 test("远端会话管理先校验 RuntimeAccount 归属，并在归档或删除后持久化状态", async () => {
   const ownershipCalls = { assert: [], mark: [] };
   const runtimeSessionOwnershipStore = {
@@ -1401,9 +1444,12 @@ test("非 Codex Profile 的会话管理只走通用 RuntimeHandle，不依赖 Co
     runtimeProfileId: "shoggoth-grok",
     runtimeAccountId: "native-grok-build-default-v1",
   })));
+  // Session maintenance names its native thread so the Runtime can route it to
+  // the host that owns that thread's writer (Codex rejects any other host).
   assert.deepEqual(value.calls.runtimeOptions, Array.from({ length: 3 }, () => ({
     permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" },
     workspace: "/tmp/shoggoth-bound",
+    sessionAffinity: "thread-bound",
   })));
   value.chatSessionStore.close();
 });

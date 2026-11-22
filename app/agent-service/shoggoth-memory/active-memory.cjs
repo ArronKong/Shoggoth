@@ -122,13 +122,21 @@ class ActiveMemory {
     const config = core.normalizeActiveMemoryConfig(entry.config, cfg, ["memory_search", "memory_get"]);
     return config;
   }
+  // Optional timing side channel from the caller: names and timestamps only.
+  recordStage(input, stage, startedAt, outcome, code) {
+    try { input.recordStage?.(stage, startedAt, this.service.now(), outcome, code); } catch { /* Diagnostics only. */ }
+  }
   prepare(input) {
     const key = this.key(input);
     if (this.pending.has(key)) return this.pending.get(key);
     if (this.prepared.has(key)) {
-      if (this.valid(input, this.prepared.get(key))) return Promise.resolve();
+      if (this.valid(input, this.prepared.get(key))) {
+        this.recordStage(input, "memory_recall_cache", this.service.now(), "success", "HIT");
+        return Promise.resolve();
+      }
       this.prepared.delete(key);
     }
+    this.recordStage(input, "memory_recall_cache", this.service.now(), "success", "MISS");
     const work = this.run(input).then(result => {
       if (result) this.prepared.set(key, result);
       while (this.prepared.size > 32) this.prepared.delete(this.prepared.keys().next().value);
@@ -281,6 +289,8 @@ class ActiveMemory {
       // The deadline bounds acquisition and does not invalidate the proof
       // after the run has already left preflight.
       const beforeScan = this.authority(profileId, null);
+      let timedAt = service.now();
+      const timed = (name, outcome = "success") => { this.recordStage(input, name, timedAt, outcome); timedAt = service.now(); };
       for (let attempt = 0; ; attempt++) {
         try { await captureAuthority({ initial: true }); break; }
         catch (error) {
@@ -288,9 +298,10 @@ class ActiveMemory {
           // the first worker reads metadata. No recall has been prepared yet.
           signal.throwIfAborted(); preflightDeadline.throwIfAborted();
           if (attempt !== 0 || stamp !== undefined || error.code !== "MEMORY_REVISION_CONFLICT"
-            || beforeScan !== this.authority(profileId, null)) throw error;
+            || beforeScan !== this.authority(profileId, null)) { timed("memory_authority", "error"); throw error; }
         }
       }
+      timed("memory_authority");
       if (beforeScan !== this.authority(profileId, null)) return null;
       check();
       const { session, messages, recentTurns, queryProvenance } = fileProof.read(view => {
@@ -298,6 +309,7 @@ class ActiveMemory {
         view.assertFilesCurrent();
         return { ...context, queryProvenance: this.queryProvenance(input, context.session) };
       });
+      timed("memory_conversation");
       searchInput.sessionId = session.id;
       borrowedMemoryDerived = queryProvenance.derived; borrowedMemoryRefs = queryProvenance.refs; check();
       if (borrowedMemoryRefs.length) service.sharing.registerDependencies(searchInput, borrowedMemoryRefs);
@@ -309,10 +321,12 @@ class ActiveMemory {
       const prepareLenders = config.enabled && config.agents.includes(profileId)
         && config.toolsAllow.includes("memory_search") && config.toolsAllow.includes("memory_get")
         && !config.allowedChatIds.length;
+      timed("memory_session_policy");
       await Promise.all([
         host.searchIndex.sync({ signal: indexSignal }),
         prepareLenders ? service.sharing?.prepareTriggerOwners({ ...searchInput, signal: indexSignal, assertCurrent: check }) : null,
       ]);
+      timed("memory_index_sync");
       check();
       modelContext = service.resolveModelContext?.({ profileId, ...(session ? { sessionKey: session.sessionKey } : {}) }); check();
       const query = core.buildActiveMemoryQuery({ latestUserMessage: effectiveInput.query, recentTurns, config });
@@ -483,6 +497,7 @@ class ActiveMemory {
         this.runtimes.add(runtime); void runtime.settled.then(() => this.runtimes.delete(runtime));
         return runtime.beforePromptBuild(hookInput);
       };
+      timed("memory_recall_setup");
       let runtime = createRuntime(config, service.config(profileId));
       let result = await runPass(runtime);
       if (this.wantsLocalizedRecall(config, result, effectiveInput.query)) {
@@ -500,6 +515,7 @@ class ActiveMemory {
       // Failed and timed-out recalls return normally rather than throwing.
       const nativeStatus = runtime.nativeResult?.status;
       if (["failed", "timeout", "unavailable"].includes(nativeStatus)) diagnose({ stage: "recall-result", outcome: nativeStatus });
+      timed("memory_recall");
       stage = "evidence";
       if (!fileProof?.current()) await captureAuthority();
       check();
@@ -536,6 +552,7 @@ class ActiveMemory {
             .filter(candidate => summary.includes(candidate.history.excerpt) && context.includes(candidate.history.excerpt)));
         } catch { /* Keep the authorized recall even if counting is unavailable. */ }
       }
+      timed("memory_evidence");
       return { ...receipt(this.borrowedContext(result?.prependContext || "", borrowedMemoryRefs)), fastRecalls };
     } catch (error) {
       const discarded = reason => { diagnose({ stage, outcome: "discarded", code: reason }); return null; };

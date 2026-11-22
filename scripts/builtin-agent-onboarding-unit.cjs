@@ -114,6 +114,11 @@ test("fresh install greets the default Agent and creates CLI Agents on first con
     const connected = await f.ensure(ALL_CLI_ACCOUNTS, "en");
     assert.deepEqual(connected.createdProfileIds, [spec("pi").id]);
     assert.match(f.greeting(spec("pi").id).content.text, /^Hi, I'm Pi, powered by Pi on this Mac\./u);
+
+    f.installed.push(account("codex"));
+    const codex = spec("codex");
+    assert.deepEqual((await f.ensure()).createdProfileIds, [codex.id]);
+    assert.match(f.greeting(codex.id).content.text, /^你好，我是 Codex，由你本机的 Codex 驱动。/u);
   } finally {
     await closeFixture(f);
   }
@@ -191,7 +196,7 @@ test("a new Agent gets a default conversation on its chosen runtime and a first 
     const result = await f.ensure();
     assert.deepEqual(result.greetedProfileIds.toSorted(), [onCli.id, onHarness.id].toSorted());
     assert.equal(f.sessions(onCli.id)[0].runtimeBindingId, bindingId, "it runs on the runtime chosen when creating it");
-    assert.match(f.greeting(onCli.id).content.text, /^你好，我是 CodeX，由你本机的 Codex CLI 驱动。/u);
+    assert.match(f.greeting(onCli.id).content.text, /^你好，我是 CodeX，由你本机的 Codex 驱动。/u);
     assert.match(f.greeting(onHarness.id).content.text, /^你好，我是 Helper，你的 AI 助理。/u);
     assert.deepEqual(await f.ensure(), { createdProfileIds: [], greetedProfileIds: [] }, "greeted only once");
     assert.equal(f.sessions(onCli.id).length, 1);

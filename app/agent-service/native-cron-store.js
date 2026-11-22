@@ -16,6 +16,7 @@ const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 const { CronAuthorizationStore } = require("./cron-authorization-store");
 const { validCronModelSelection, sameCronModel } = require("./native-cron-model");
+const { NativeCronRecoveryStore } = require("./native-cron-recovery-store");
 
 const NATIVE_CRON_STORE_VERSION = 3;
 const MAX_NATIVE_CRON_STORE_BYTES = 64 * 1024 * 1024;
@@ -462,6 +463,7 @@ class NativeCronStore {
     this.atomicWrite = options.atomicWrite || atomicWritePrivateFile;
     this.authorizations = new CronAuthorizationStore({ paths: this.paths, fs: this.fs,
       atomicWrite: options.authorizationAtomicWrite || atomicWritePrivateFile });
+    this.recovery = new NativeCronRecoveryStore(this.paths);
     this.acquireWriterLease = options.acquireWriterLease || acquirePrivateWriterLease;
     this.profileExists = options.profileExists;
     this.isSensitiveValue = options.isSensitiveValue || null;
@@ -510,12 +512,14 @@ class NativeCronStore {
       this.#assertExternalReferences(this.container);
       this.commitUncertain = false;
       this.#refreshWindow(openTime, Boolean(stat));
+      this.recovery.open(Object.values(this.container.jobs));
       this.writerLease = lease;
       this.cleanupPending = false;
       this.opened = true;
       return this;
     } catch (openError) {
       this.authorizations.close();
+      this.recovery.close();
       try {
         lease.release();
       } catch (releaseError) {
@@ -532,6 +536,7 @@ class NativeCronStore {
   }
 
   close() {
+    this.recovery.close();
     const lease = this.writerLease;
     if (lease) {
       try { lease.release(); } catch (error) {

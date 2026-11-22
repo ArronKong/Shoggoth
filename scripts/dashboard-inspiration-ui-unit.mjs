@@ -50,6 +50,8 @@ const inspiration = { id: 'inspiration:run', backendId: 'native', kind: 'inspira
   occurredAt: 200, title: '灵感动态', severity: 'info', inspiration: { ideaId: 'idea', runId: 'run', status: 'running' } };
 const cron = { id: 'cron:run', backendId: 'native', kind: 'cron', occurredAt: 100,
   title: '定时动态', severity: 'success', run: {} };
+const kanban = { id: 'kanban:card', backendId: 'native', kind: 'kanban', occurredAt: 300,
+  title: '看板任务', severity: 'success', kanban: { taskId: 'card', action: 'completed' } };
 const heartbeat = ['heartbeat wake requested', 'heartbeat completed', 'heartbeat task completed',
   'heartbeat failed: agent-runner-failure', 'heartbeat skipped: active-hours'].map((message, i) => ({
   ...cron, id: `heartbeat:${i}`, backendId: 'openclaw', title: 'heartbeat-vincent', summary: message,
@@ -57,11 +59,10 @@ const heartbeat = ['heartbeat wake requested', 'heartbeat completed', 'heartbeat
 }));
 const dreaming = { ...cron, id: 'system:dreaming', backendId: 'openclaw', title: 'Memory Dreaming Promotion',
   run: { backendId: 'openclaw', jobId: 'openclaw:dreaming', systemManaged: true, summary: 'NO_REPLY' } };
-const firstPage = { ...empty, items: [inspiration, cron, dreaming, ...heartbeat] };
+const firstPage = { ...empty, items: [kanban, inspiration, cron, dreaming, ...heartbeat] };
 const props = { status: [{ id: 'native', connected: true }, { id: 'other', connected: true }, { id: 'openclaw', connected: true }], firstPage,
   sinceMs: 0, running: [], getAgentDisplayName: id => id,
-  onOpenRun: row => opened.push(row.kind), onOpenTask: row => opened.push(row.kind),
-  onOpenInspiration: row => opened.push(row.inspiration.ideaId), onOpenHealth: () => opened.push('health') };
+  onOpenRun: row => opened.push(row.kind), onOpenInspiration: row => opened.push(row.inspiration.ideaId) };
 const textOf = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(textOf).join('') : textOf(node?.children || []);
 const rows = renderer => renderer.root.findAll(node => node.type === 'button' && node.props.className === 'dash-run');
 const tabs = renderer => renderer.root.findAllByType('filters').find(node => node.props.className === 'dash-kind-tabs');
@@ -85,14 +86,14 @@ await settle(() => tabs(renderer).props.onChange('cron'));
 assert.equal(rows(renderer).length, 1, 'Task-filter responses from older servers also hide skipped and silent runs');
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
 await settle(() => renderer.unmount());
-fetchPage = async () => ({ ...empty, items: [silentCron, skippedCron, monitorReport] });
+fetchPage = async () => ({ ...empty, items: [kanban, silentCron, skippedCron, monitorReport] });
 await settle(() => { renderer = create(React.createElement(Feed, { ...props,
-  firstPage: { ...empty, items: [silentCron, skippedCron], hasMore: true, nextCursor: 'after-hidden' },
+  firstPage: { ...empty, items: [kanban], hasMore: true, nextCursor: 'after-hidden' },
 })); });
-assert.equal(rows(renderer).length, 1, 'An all-hidden page still loads the next page and reaches real output');
+assert.equal(rows(renderer).length, 1, 'A Kanban-only first page still loads the next page and shows only visible results');
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
 await settle(() => renderer.update(React.createElement(Feed, { ...props,
-  firstPage: { ...empty, items: [silentCron, skippedCron] },
+  firstPage: { ...empty, items: [kanban, silentCron, skippedCron] },
 })));
 assert.equal(rows(renderer).length, 0);
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '0');
@@ -131,10 +132,11 @@ fetchPage = async () => empty;
 
 await settle(() => { renderer = create(React.createElement(Feed, props)); });
 assert.ok(tabs(renderer).props.items.some(item => item.value === 'inspiration' && item.label === 'dashboard.filterInspiration'));
+assert.doesNotMatch(textOf(renderer.toJSON()), /看板任务/, 'Cached Kanban tasks must be hidden on the first render');
 assert.equal(rows(renderer).length, 2);
 assert.doesNotMatch(textOf(renderer.toJSON()), /heartbeat-vincent/, 'Cached heartbeat rows must be hidden on the first render');
 assert.doesNotMatch(textOf(renderer.toJSON()), /Memory Dreaming Promotion/, 'System memory maintenance must be hidden');
-assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '2', 'Feed count excludes heartbeat rows');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '2', 'Feed count excludes hidden activities');
 const approvals = [{ id: 'pending', backendId: 'native', runId: 'run', requestId: 'request', agentId: 'agent' }];
 const onApprovalResponded = async () => {};
 await settle(() => renderer.update(React.createElement(Feed, { ...props, approvals, onApprovalResponded,
@@ -159,7 +161,8 @@ assert.equal(renderer.root.findByType('approval-row'), approvalRow, 'A second ap
 await settle(() => renderer.update(React.createElement(Feed, { ...props, running: [] })));
 assert.equal(renderer.root.findAllByType('approval-row').length, 0, 'Finished tasks leave the live status list');
 await settle(() => rows(renderer)[0].props.onClick());
-assert.deepEqual(opened, ['idea'], 'Inspiration rows open their detail instead of System settings');
+await settle(() => rows(renderer)[1].props.onClick());
+assert.deepEqual(opened, ['idea', 'cron'], 'Inspiration and Cron retain their detail actions');
 
 fetchPage = async () => ({ ...empty, items: [inspiration] });
 await settle(() => tabs(renderer).props.onChange('inspiration'));

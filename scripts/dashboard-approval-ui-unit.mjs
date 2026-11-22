@@ -270,14 +270,16 @@ await settle(() => renderer.unmount());
 
 const runs = ['cron', 'kanban', 'inspiration', 'chat'].map((kind, i) => ({ id: `task-${i}`, backendId: 'a', runId: `run-${i}`, kind, status: 'running' }));
 const initialRows = activityStatusRows(runs, []);
-assert.equal(initialRows.length, 3, 'Chat is never rendered as a black task bar');
+assert.deepEqual(Array.from(initialRows, row => row.running.kind), ['cron', 'inspiration'], 'Kanban and Chat have no live task row');
 const mixed = activityStatusRows([...runs].reverse(), [
   { ...item, backendId: 'a', runId: 'run-0' },
   { ...item, backendId: 'b', runId: 'run-0' },
+  { ...item, backendId: 'a', runId: 'run-1' },
+  { ...item, backendId: 'a', runId: 'kanban-waiting', source: 'kanban' },
   { ...item, backendId: 'a', runId: undefined, id: 'legacy' },
 ], initialRows.map(row => row.key));
-assert.deepEqual(Array.from(mixed.slice(0, 3), row => row.key), Array.from(initialRows, row => row.key), 'Refresh and attention do not reorder existing task rows');
-assert.equal(mixed.length, 5, 'Different backends and unbound legacy approvals cannot be merged accidentally');
+assert.deepEqual(Array.from(mixed.slice(0, initialRows.length), row => row.key), Array.from(initialRows, row => row.key), 'Refresh and attention do not reorder existing task rows');
+assert.deepEqual(Array.from(mixed, row => row.approval?.runId), ['run-0', undefined, 'run-0', undefined], 'Kanban approvals are hidden and other approvals keep their scope');
 assert.equal(mixed[0].approval.runId, 'run-0');
 assert.equal(activityStatusRows(runs.map(run => ({ ...run, status: 'completed' })), []).length, 0);
 console.log('PASS Dashboard task lifecycle, stable row identity/order, Chat dismissal, hover/keyboard/touch, ownership/scopes, retry, stale/new requests, expiry and input');

@@ -3,12 +3,11 @@ import type { OAuthAccountQuota, OAuthProvider } from "../types";
 import { readEnabledOAuthQuotaBackends } from "./backends";
 import { readPageCacheRevision, subscribePageCacheRevision } from "./usePageCache";
 
-type AvailableQuota = Extract<OAuthAccountQuota, { status: "available" }>;
 type Entry = {
   backend: string;
   id: string;
   scope: string;
-  quota?: AvailableQuota;
+  quota?: OAuthAccountQuota;
   requested?: boolean;
   request?: { controller: AbortController; promise: Promise<boolean> };
 };
@@ -18,11 +17,15 @@ const listeners = new Set<() => void>();
 const accountKey = (backend: string, id: string) => JSON.stringify([backend, id]);
 const accountScope = ({ status, quotaScope }: OAuthProvider) => quotaScope ?? JSON.stringify([status.source, status.tokenPreview]);
 
-export function canReadOAuthAccountQuota(provider: OAuthProvider): boolean {
+export function canShowOAuthAccountQuota(provider: OAuthProvider): boolean {
   const { status } = provider;
-  return provider.canReadQuota === true && provider.quotaScope !== null && provider.connection?.enabled !== false
+  return provider.connection?.enabled !== false
     && status.loggedIn && !status.error && !status.verification
     && (!status.expiresAt || Date.parse(status.expiresAt) > Date.now());
+}
+
+export function canReadOAuthAccountQuota(provider: OAuthProvider): boolean {
+  return provider.canReadQuota === true && provider.quotaScope !== null && canShowOAuthAccountQuota(provider);
 }
 
 export function subscribeOAuthQuota(listener: () => void): () => void {
@@ -52,7 +55,7 @@ export function forgetOAuthQuota(backend: string, id: string): void {
   publish();
 }
 
-export function readCachedOAuthQuota(backend: string, provider: OAuthProvider): AvailableQuota | undefined {
+export function readCachedOAuthQuota(backend: string, provider: OAuthProvider): OAuthAccountQuota | undefined {
   const entry = entries.get(accountKey(backend, provider.id));
   return entry?.scope === accountScope(provider) ? entry.quota : undefined;
 }
@@ -65,25 +68,24 @@ export function refreshOAuthQuota(backend: string, provider: OAuthProvider): Pro
   if (before?.scope === scope && before.request) return before.request.promise;
   if (before && before.scope !== scope) removeEntry(key, before);
   const entry: Entry = before?.scope === scope ? before : { backend, id, scope };
+  const retrying = entry.quota && entry.quota.status !== "available";
+  if (retrying) delete entry.quota;
   entry.requested = true;
   entries.set(key, entry);
-  if (before?.quota && entry !== before) publish();
+  if (retrying || (before?.quota && entry !== before)) publish();
 
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]);
-  const promise = getOAuthProviderQuota(backend, id, signal).then(result => {
+  const promise = getOAuthProviderQuota(backend, id, signal).catch(() => ({ status: "unavailable" } as const)).then(result => {
     if (entries.get(key) !== entry) return false;
-    if (result.status !== "available") return result.status === "unsupported" && Boolean(entry.quota);
-    if (provider.quotaScope && result.quotaScope !== provider.quotaScope) {
+    if (result.status !== "available" && entry.quota?.status === "available") return result.status === "unsupported";
+    if (result.status === "available" && provider.quotaScope && result.quotaScope !== provider.quotaScope) {
       delete entry.quota;
       publish();
       return true;
     }
     entry.quota = result;
     publish();
-    return false;
-  }).catch(() => {
-    // Keep the last successful read when the provider cannot be reached.
     return false;
   }).finally(() => { delete entry.request; });
   entry.request = { controller, promise };
@@ -110,6 +112,9 @@ export async function prefetchMissingOAuthQuotas(backend: string, providers: OAu
     const entry = entries.get(key);
     if (!entry) {
       entries.set(key, { backend, id, scope: quotaScope, quota: cachedQuota });
+      changed = true;
+    } else if (entry.quota?.status !== "available") {
+      entry.quota = cachedQuota;
       changed = true;
     }
   }

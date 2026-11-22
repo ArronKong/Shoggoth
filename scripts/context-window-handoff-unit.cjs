@@ -26,8 +26,7 @@ function appendHistory(f, session, count = 44) {
   for (let n = 0; n < count; n++) f.service.transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
     id: `large-${n}`, kind: n % 2 ? "assistant" : "user", content: { text: `SOURCE_${n} ${"ordinary words ".repeat(3400)}` } });
 }
-function modelOnly(f, fail = false) {
-  const coordinator = f.service.workRunCoordinator, manager = coordinator.runtimeManager;
+function modelOnly(f, fail = false, manager = f.service.workRunCoordinator.runtimeManager) {
   manager.canGenerateModelOnly = () => true;
   const acquire = manager.acquire.bind(manager);
   let calls = 0;
@@ -952,6 +951,106 @@ for (const behavior of ["disabled", "unavailable", "failed"]) test(`${behavior} 
     assert.equal(state.state, "failed");
     assert.equal(f.transport.hosts.get("pi")?.turnStartCalls ?? 0, 0);
     assert.equal(f.service.transcriptStore.listEvents(session.profileId, session.id).filter(e => e.id.startsWith("large-")).length, 6);
+  } finally { await f.close(); }
+});
+
+test("a queued input whose next-turn model needs a failed summary fails alone, also after restart", async () => {
+  // Neither model reports a window, so both Service generations plan with the
+  // same unknown-window budget, which the appended history exceeds.
+  const facts = async () => ({ installed: true, releaseEnabled: true, authenticated: true,
+    models: ["fixture-model", "small-model"], attachmentKinds: [], permissionEnforcementProven: true });
+  let summaries;
+  const options = { catalogs: { codex: ["fixture-model"], pi: ["fixture-model", "small-model"] },
+    serviceOptions: { durableChatAcceptance: true, runtimeSupportDiscover: facts },
+    prepareManager: manager => { summaries = modelOnly(null, true, manager); } };
+  let f = await openHandoffFixture(options);
+  try {
+    enable(f);
+    f.facts.read = facts;
+    let coordinator = f.service.workRunCoordinator;
+    const settled = (id, label) => waitUntil(() => coordinator.poisonError
+      || ["running", "failed"].includes(coordinator.getRun(id)?.status), 10000, label);
+    const session = f.createSession();
+    await f.controller.handle("chat.session.runtime.model.set", { profileId: session.profileId, sessionKey: session.sessionKey,
+      bindingId: f.binding("pi").id, revision: session.revision, model: "fixture-model", acceptAdjustments: true });
+    const first = await coordinator.send({ sessionKey: session.sessionKey, operationId: "pick-before", prompt: "start" });
+    await settled(first.run.id, "first admission");
+    await f.complete(coordinator.getRun(first.run.id));
+    appendHistory(f, session);
+    const before = f.service.chatSessionStore.getSession(session.sessionKey);
+    await f.controller.handle("chat.session.runtime.model.set", { profileId: before.profileId, sessionKey: before.sessionKey,
+      bindingId: f.binding("pi").id, revision: before.revision, model: "small-model", acceptAdjustments: true });
+    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).nextRuntimeSelection?.model, "small-model");
+    const turns = () => f.transport.hosts.get("pi").turnStartCalls;
+    const startedTurns = turns();
+
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "pick-needs-summary", prompt: "continue" });
+    await settled(ack.run.id, "summary rejection");
+    assert.equal(coordinator.poisonError ?? null, null, "a failed handoff summary rejects one input, not the Service");
+    assert.equal(coordinator.getRun(ack.run.id).status, "failed");
+    assert.equal(coordinator.getRun(ack.run.id).errorCode, "PRODUCT_COMPACTION_OUTPUT_INVALID");
+    assert.ok(summaries() > 0);
+    assert.equal(turns(), startedTurns);
+    const kept = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(kept.modelOverride, "fixture-model");
+    assert.equal(kept.nextRuntimeSelection?.model, "small-model", "a possibly transient failure keeps the pick");
+
+    // An earlier Service stopped before it recorded the rejection: the input
+    // stays queued and its failed summary Run is found again after restart.
+    const prepare = coordinator.beforeSessionSend;
+    let held = null;
+    coordinator.beforeSessionSend = async input => {
+      try { return await prepare(input); } catch (error) {
+        held = error;
+        await new Promise((_, reject) => input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true }));
+      }
+    };
+    const waiting = await coordinator.send({ sessionKey: session.sessionKey, operationId: "pick-across-restart", prompt: "again" });
+    await waitUntil(() => held, 10000, "second summary failure");
+    assert.match(held.code, /^PRODUCT_COMPACTION_/u);
+    assert.equal(coordinator.getRun(waiting.run.id).status, "queued");
+    const { root, transport } = f;
+    await f.close({ remove: false });
+    f = await openHandoffFixture({ ...options, root, transport });
+    coordinator = f.service.workRunCoordinator;
+    await settled(waiting.run.id, "restored rejection");
+    assert.equal(coordinator.poisonError ?? null, null, "restart does not lock the Service again");
+    assert.match(coordinator.getRun(waiting.run.id).errorCode, /^PRODUCT_COMPACTION_/u);
+    assert.equal(summaries(), 0, "the restored input reuses its failed summary Run");
+    assert.equal(transport.hosts.get("pi").turnStartCalls, startedTurns);
+  } finally { await f.close(); }
+});
+
+for (const cause of ["RUNTIME_FACTS_UNKNOWN", "PROFILE_MODEL_CATALOG_UNAVAILABLE"]) test(`a queued input whose next-turn pick fails runtime preflight with ${cause} fails alone`, async () => {
+  const known = { installed: true, releaseEnabled: true, authenticated: true, models: ["fixture-model"],
+    attachmentKinds: [], permissionEnforcementProven: true };
+  // A cold Service start can time out reading the picked Runtime's facts or catalog.
+  const discover = async binding => cause === "RUNTIME_FACTS_UNKNOWN" && binding.runtime === "pi"
+    ? { installed: "unknown", releaseEnabled: true, authenticated: "unknown", models: [], attachmentKinds: [],
+      permissionEnforcementProven: false } : known;
+  const f = await openHandoffFixture({ ...(cause === "RUNTIME_FACTS_UNKNOWN" ? { catalogs: { codex: ["fixture-model"], pi: ["fixture-model"] } } : {}),
+    serviceOptions: { durableChatAcceptance: true, runtimeSupportDiscover: discover } });
+  try {
+    const coordinator = f.service.workRunCoordinator;
+    const settled = (id, label) => waitUntil(() => coordinator.poisonError
+      || ["running", "failed"].includes(coordinator.getRun(id)?.status), 10000, label);
+    const session = f.createSession();
+    const first = await coordinator.send({ sessionKey: session.sessionKey, operationId: `${cause}-before`, prompt: "start" });
+    await settled(first.run.id, "first admission");
+    await f.complete(coordinator.getRun(first.run.id));
+    const before = f.service.chatSessionStore.getSession(session.sessionKey);
+    await f.controller.handle("chat.session.runtime.model.set", { profileId: before.profileId, sessionKey: before.sessionKey,
+      bindingId: f.binding("pi").id, revision: before.revision, model: "fixture-model", acceptAdjustments: true });
+    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).nextRuntimeSelection?.bindingId, f.binding("pi").id);
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: `${cause}-queued`, prompt: "continue" });
+    await settled(ack.run.id, "preflight rejection");
+    assert.equal(coordinator.poisonError ?? null, null, "a runtime availability failure rejects one input, not the Service");
+    assert.equal(coordinator.getRun(ack.run.id).status, "failed");
+    assert.equal(coordinator.getRun(ack.run.id).errorCode, cause);
+    const kept = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(kept.runtimeBindingId, before.runtimeBindingId);
+    assert.equal(kept.nextRuntimeSelection?.bindingId, f.binding("pi").id, "a transient failure keeps the pick");
+    assert.equal(f.transport.hosts.get("pi")?.turnStartCalls ?? 0, 0);
   } finally { await f.close(); }
 });
 

@@ -158,6 +158,10 @@ function runtimeFixture(behavior = {}) {
       success(child, message, { authenticated: true, credentialPresent: true });
       return;
     }
+    if (message.command === "quota/read") {
+      success(child, message, { status: "available", wallets: [{ kind: "recharge", amount: 0, unit: "CNY" }] });
+      return;
+    }
     if (message.command === "model/generate") {
       success(child, message, { text: "fixture summary", usage: null, provider: "deepseek-official", model: MODEL });
       return;
@@ -417,6 +421,10 @@ async function verifyControlDiscoveryWithoutMcp() {
     assert.equal(control.controlInstance, true);
     assert.deepEqual((await control.modelsList()).data.map(model => model.model), [MODEL]);
     assert.equal((await control.authenticationState()).authenticated, true);
+    const quota = await control.accountQuotaRead();
+    assert.equal(value.bridgeMessages.find(message => message.command === "quota/read").params.version, "0.1.1-rc.2");
+    assert.equal(quota.status, "available", "a reported zero balance still belongs to the account");
+    assert.deepEqual(quota.credits, { kind: "wallets", wallets: [{ kind: "recharge", amount: 0, unit: "CNY" }] });
     assert.ok((await control.commandsList({})).commands.some(command => command.name === "goal"));
     assert.deepEqual(value.gateCalls, [], "read-only discovery never reserves execution MCP authority");
     assert.equal(value.bridgeEnvironments[0].SHOGGOTH_DSH_CONTROL_INSTANCE, "1");

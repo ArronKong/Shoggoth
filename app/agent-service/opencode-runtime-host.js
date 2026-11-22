@@ -1664,4 +1664,5 @@ class OpenCodeRuntimeHost {
 }
 
 module.exports = { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
-  usageFromTokens, preparePrivateOpenCodeConfig, nativePermissionRules, modelConnectionConfig, openCodeFailureCode };
+  usageFromTokens, preparePrivateOpenCodeConfig, nativePermissionRules, modelConnectionConfig, openCodeFailureCode,
+  openCodeRetryLimit };

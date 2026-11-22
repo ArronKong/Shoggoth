@@ -53,7 +53,7 @@ assert.match(
 assert.match(dashboard, /open=\{runModalOpen\}/);
 assert.match(dashboard, /onOpenChangeComplete=\{handleRunModalOpenChangeComplete\}/);
 
-// 全文请求只能在入场动画结束后启动，已有摘要在 loading 时仍继续渲染。
+// 全文请求在入场完成后启动。群报告读完前先显示加载状态。
 const openRunModalBody = dashboard.match(/const openRunModal = \(run: DashboardRunEntry\) => \{([\s\S]*?)\n  \};/)?.[1] || "";
 assert.doesNotMatch(openRunModalBody, /getCronLatestDelivery/);
 assert.match(
@@ -62,7 +62,7 @@ assert.match(
 );
 assert.match(
   dashboard,
-  /\.then\(\(nextDelivery\) => \{\s*if \(runDeliveryRequestRef\.current === requestId\) setDelivery\(nextDelivery\);/,
+  /\.then\(\(nextDelivery\) => \{\s*if \(runDeliveryRequestRef\.current === requestId && \(!runId \|\| nextDelivery\.runId === runId\)\) \{\s*setDelivery\(nextDelivery\);/,
 );
 assert.match(
   dashboard,
@@ -73,8 +73,7 @@ assert.match(
   /\.finally\(\(\) => \{\s*if \(runDeliveryRequestRef\.current === requestId\) setDeliveryLoading\(false\);/,
 );
 assert.match(dashboard, /const runHandoff = selectCronRunHandoffSource\(openRun, delivery\);/);
-assert.match(dashboard, /const visibleRunText = runHandoff\.report;/);
-assert.doesNotMatch(dashboard, /!deliveryLoading && visibleRunText/);
+assert.match(dashboard, /const visibleRunText = openRun\?\.deliveryTarget === "group" && deliveryLoading \? null : runHandoff\.report;/);
 
 // 入场保持舒展，退场更快；两者都只过渡合成友好的 opacity/transform。
 assert.match(globalStyles, /--ui-motion-modal-enter:\s*220ms;/);

@@ -5,7 +5,7 @@ import { BACKEND_ORDER } from "../lib/backendTabOrder";
 export { sortBackendTabs } from "../lib/backendTabOrder";
 
 export default function BackendTabIcon({ backend, label }: { backend: string; label: string }) {
-  const hasIcon = BACKEND_ORDER.includes(backend);
+  const hasIcon = BACKEND_ORDER.includes(backend) || backend === "opencode";
   return (
     <span className={`${styles.icon}${hasIcon ? ` ${styles.glyph}` : ""}`} data-backend-icon={backend} aria-hidden="true">
       {!hasIcon && Array.from(label).slice(0, 2).join("").toUpperCase()}

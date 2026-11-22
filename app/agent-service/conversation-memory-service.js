@@ -54,7 +54,9 @@ class ConversationMemoryService {
     if (hasSecret(JSON.stringify(args))) throw serviceError("MEMORY_SECRET_REJECTED", "记忆不能包含凭据");
     // A background session's input is a brief the Agent wrote for itself, not
     // the user's own words; direct-conversation memory writes stay closed.
-    if (run.source === "chat" && this.isBackgroundTaskSession?.(run.sourceId) === true) {
+    // Reading (memory_search binds here too) stays open to the same Agent.
+    if ((name === "memory_save" || name === "memory_forget")
+      && run.source === "chat" && this.isBackgroundTaskSession?.(run.sourceId) === true) {
       throw serviceError("MCP_TOOL_FORBIDDEN", "该记忆操作需要当前用户对话");
     }
     if (run.source === "inspiration") {

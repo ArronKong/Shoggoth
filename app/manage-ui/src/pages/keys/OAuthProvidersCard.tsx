@@ -5,7 +5,7 @@ import { disconnectOAuthProvider, getConfig, listOAuthProviders, runProviderComm
 import { useConfirm, useToast } from "../../components/ui";
 import BackendTabIcon from "../../components/BackendTabIcon";
 import { applyDisabledBackends } from "../../lib/backends";
-import { canReadOAuthAccountQuota, forgetOAuthQuota, prefetchMissingOAuthQuotas } from "../../lib/oauthAccountQuota";
+import { canShowOAuthAccountQuota, forgetOAuthQuota, prefetchMissingOAuthQuotas } from "../../lib/oauthAccountQuota";
 import { usePageCache } from "../../lib/usePageCache";
 import { SkeletonShape, SkeletonStatus } from "../../components/Skeleton";
 import { OAuthRowsSkeleton } from "./ProviderSkeleton";
@@ -172,9 +172,9 @@ function OAuthRow({
       ? t("keys.oauthLoginExternal")
       : t("keys.oauthLogin");
 
-  const hasQuota = showQuota && !busy && canReadOAuthAccountQuota(p);
+  const showQuotaPopover = showQuota && !busy && canShowOAuthAccountQuota(p);
   const mainButton = (
-    <button className={styles.oauthMain} title={hasQuota ? undefined : tip} disabled={busy} onClick={main}>
+    <button className={styles.oauthMain} title={showQuotaPopover ? undefined : tip} disabled={busy} onClick={main}>
       {runtimeIcon && ["antigravity", "codex", "pi"].includes(runtimeIcon)
         ? <span className={styles.logo}><BackendTabIcon backend={runtimeIcon} label={title} /></span>
         : <ProviderLogo name={runtimeIcon ?? (backend === "shoggoth" ? p.name : p.id)} />}
@@ -192,7 +192,7 @@ function OAuthRow({
 
   return (
     <div className={`${styles.oauthRow} ${p.status.error && !off ? styles.oauthRowErr : ""}`}>
-      {hasQuota ? <OAuthAccountQuota trigger={mainButton} account={p} backend={backend} title={title}
+      {showQuotaPopover ? <OAuthAccountQuota trigger={mainButton} account={p} backend={backend} title={title}
         onAccountChanged={onRecheck} /> : mainButton}
 
       <div className={showActionLabels ? styles.oauthActions : styles.oauthIcons}>

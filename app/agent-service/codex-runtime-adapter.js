@@ -927,7 +927,17 @@ class CodexRuntimeAdapter {
     if (binding.runtime !== "codex") {
       throw adapterError("RUNTIME_UNSUPPORTED", `Codex adapter cannot run ${binding.runtime}`);
     }
-    const { modelSecretProviderKind, ...acquireOptions } = options;
+    const { modelSecretProviderKind, sessionAffinity, ...acquireOptions } = options;
+    // Codex lets only the host that started or resumed a thread write it; any
+    // other host of the Binding gets "already has an active writer". Session
+    // maintenance (rename/archive/delete) therefore uses that live host.
+    if (typeof sessionAffinity === "string") {
+      for (const handle of this.handles.values()) {
+        if (handle.runtimeProfileId === binding.runtimeProfileId
+          && handle.runtimeAccountId === binding.runtimeAccountId
+          && handle.threadProviders.has(sessionAffinity)) return handle;
+      }
+    }
     const projected = this.secretGateway && ["chatgpt", "openai-api-key"].includes(modelSecretProviderKind);
     const host = await this.runtimePool.get(binding, {
       ...acquireOptions,

@@ -59,7 +59,9 @@ try {
     const names = new Set(["connectionFieldsChanged", "applyConfigChange"]);
     const hostFunctions = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text)).map((node) => node.getText(ast)).join("\n");
     assert.equal(hostFunctions.match(/function /g)?.length, 2);
-    fs.writeFileSync(path.join(temp, "preload.cjs"), 'const {contextBridge,ipcRenderer}=require("electron");contextBridge.exposeInMainWorld("fixtureHost",{configSaved:(config)=>ipcRenderer.send("fixture:config-saved",config)});');
+    fs.writeFileSync(path.join(temp, "preload.cjs"), `const {contextBridge,ipcRenderer}=require("electron");
+contextBridge.exposeInMainWorld("fixtureHost",{configSaved:(config)=>ipcRenderer.send("fixture:config-saved",config)
+  ${accounts ? ', accountInput:(point)=>ipcRenderer.invoke("fixture:account-input",point)' : ""}});`);
     const main = path.join(temp, "main.cjs");
     fs.writeFileSync(main, `const {app,BrowserWindow,ipcMain}=require("electron");
 const vm=require("node:vm"),assert=require("node:assert/strict");
@@ -73,6 +75,15 @@ app.whenReady().then(async()=>{
   const context=vm.createContext({configStore:{read:()=>config},appliedConfig:config,appBackendRegistry:null,configApplyQueue:Promise.resolve(),nativeTheme:{},appIconController:null,buildMenu:()=>menus++,mainWindow:{webContents:{reload:()=>{reloads++;w.webContents.reload();}}}});
   vm.runInContext(${JSON.stringify(hostFunctions)},context);
   ipcMain.on("fixture:config-saved",(_e,next)=>{config=next;context.applyConfigChange().catch(error=>hostFailures.push(error));});
+  if (${accounts}) {
+    w.webContents.debugger.attach("1.3");
+    ipcMain.handle("fixture:account-input",async (_event,point)=>{
+      if (point) return w.webContents.debugger.sendCommand("Input.dispatchMouseEvent",{type:"mouseMoved",x:point.x,y:point.y});
+      for (const type of ["keyDown","keyUp"]) await w.webContents.debugger.sendCommand("Input.dispatchKeyEvent",{
+        type,key:"Escape",code:"Escape",windowsVirtualKeyCode:27,
+      });
+    });
+  }
   try {
     await w.loadFile(${JSON.stringify(page)},{query:${JSON.stringify(query)}});
     let deadline;

@@ -546,13 +546,14 @@ function createChatServiceController(options = {}) {
   const inFlight = new Set();
   const remoteOperationsInFlight = new Map();
 
-  async function acquireRuntime(profile, workspace) {
+  async function acquireRuntime(profile, workspace, sessionAffinity = null) {
     const binding = {
       runtime: profile.runtime,
       runtimeProfileId: profile.runtimeProfileId,
       runtimeAccountId: profile.runtimeAccountId,
     };
-    const acquireOptions = { permissionPolicy: profile.permissionPolicy, workspace };
+    const acquireOptions = { permissionPolicy: profile.permissionPolicy, workspace,
+      ...(sessionAffinity ? { sessionAffinity } : {}) };
     if (typeof options.runtimeManager?.acquire === "function") {
       return options.runtimeManager.acquire(binding, acquireOptions);
     }
@@ -640,7 +641,8 @@ function createChatServiceController(options = {}) {
         runtimeSessionIdOf(preparedSession),
       );
       if (kind === "delete") {
-        preparedHost = await acquireRuntime(preparedProfile, preparedSession.workspace);
+        preparedHost = await acquireRuntime(preparedProfile, preparedSession.workspace,
+          runtimeSessionIdOf(preparedSession));
         fence(generation);
         if (preparedHost.capabilities
           && preparedHost.capabilities["session.delete"] !== true) {
@@ -693,7 +695,7 @@ function createChatServiceController(options = {}) {
       if (!localTitleClear && !detached) {
         const profile = preparedProfile || profileForSession(session);
         assertSessionOwned(profile, session, runtimeSessionId);
-        const host = preparedHost || await acquireRuntime(profile, session.workspace);
+        const host = preparedHost || await acquireRuntime(profile, session.workspace, runtimeSessionId);
         fence(generation);
         const runtimeMethod = kind === "rename" ? "sessionRename"
           : kind === "archive" ? "sessionArchive" : "sessionDelete";
@@ -1533,7 +1535,18 @@ function createChatServiceController(options = {}) {
           createdAt: operation.createdAt,
           ...(operation.kind === "rename" ? { title: operation.title } : {}),
         };
-        await runRemoteOperation(method, params, generation);
+        try {
+          await runRemoteOperation(method, params, generation);
+        } catch (error) {
+          // A Runtime that rejects one replayed rename/archive/delete must not
+          // keep the chat plane (and Service startup) closed. The operation
+          // stays pending for the next open; local commit uncertainty and
+          // lifecycle changes still stop this open.
+          if (error?.code === "CHAT_SESSION_COMMIT_UNCERTAIN") throw error;
+          fence(generation);
+          console.error(`[agent-service] pending chat session ${operation.kind} replay deferred: ${
+            typeof error?.code === "string" ? error.code : "UNKNOWN"}`);
+        }
         fence(generation);
       }
       await ensureDefaultSessions();

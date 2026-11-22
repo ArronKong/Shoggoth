@@ -569,6 +569,13 @@ function startProxyGateway({
         payload: { sessionKey: activity.sessionKey, backendId: event.backendId } }));
       return;
     }
+    if (activity.kind === "background.tasks.approvals.changed") {
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 1
+        || registry.getBackend(event.backendId)?.getBackendDescriptor?.().surfaces?.agentHarness !== true) return;
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "background.tasks.approvals.changed",
+        payload: { backendId: event.backendId } }));
+      return;
+    }
     if (activity.kind === "skills.changed") {
       if (!isPlainRecord(activity) || Object.keys(activity).length !== 5
         || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(activity.agentId)

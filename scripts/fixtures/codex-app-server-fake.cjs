@@ -266,6 +266,10 @@ process.stdin.on("data", (chunk) => {
       }
     } else if (message.method === "mcpServerStatus/list") {
       send({ id: message.id, result: { data: [], nextCursor: null } });
+    } else if (message.method === "config/read") {
+      // The isolated fixture home has no user settings. Session start reads
+      // this before granting an Agent workspace outside the session cwd.
+      send({ id: message.id, result: { config: {}, origins: {} } });
     } else if (message.method === "initialize") {
       send({
         id: message.id,
@@ -292,10 +296,6 @@ process.stdin.on("data", (chunk) => {
         inputModalities: ["text"], supportsPersonality: false, multiAgentVersion: null,
         additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, availableAccessPrograms: null,
       }], nextCursor: null } });
-    } else if (elicitationEnabled && message.method === "config/read"
-      && message.params?.includeLayers === false && typeof message.params.cwd === "string") {
-      // The fixture has no user workspace sandbox overrides.
-      send({ id: message.id, result: { config: {}, origins: {} } });
     } else if (elicitationEnabled && message.method === "thread/resume") {
       send({ id: message.id, result: threadConfigResponse(thread(message.params.threadId), message.params) });
     } else if (elicitationEnabled && message.method === "thread/inject_items") {

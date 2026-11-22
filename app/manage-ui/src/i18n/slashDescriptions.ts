@@ -3,7 +3,13 @@
 // Keep the English registry text as the key and never mutate the runtime catalog.
 // Some SDK commands ship an entire skill trigger prompt as help. Match its
 // distinctive opening, not its name, and show translated menu copy. Keep the
-// original full description available in the tooltip and in English mode.
+// full description available in the tooltip and in English mode.
+const CODEX_SKILL_DESCRIPTION = "OpenAI Codex CLI wrapper — three modes.";
+
+export function slashDescriptionDisplayText(source: string): string {
+  return source === CODEX_SKILL_DESCRIPTION ? "OpenAI Codex wrapper — three modes." : source;
+}
+
 const skillSynopses: Record<string, string> = {
   "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium": "创建图表、仪表盘或数据可视化；统一配色、标记和交互规则，兼顾可读性、无障碍以及明暗主题。",
   "Use this skill to configure the Claude Code harness via settings.json.": "通过 settings.json 配置 Claude Code 的权限、环境变量和钩子；自动行为由运行时钩子执行。主题、模型等简单设置可使用 /config。",
@@ -17,7 +23,7 @@ const skillSynopses: Record<string, string> = {
   "Performance regression detection using the browse daemon.": "检测性能回退，建立基线并对比页面性能变化。",
   "Post-deploy canary monitoring.": "部署后持续检查线上错误、性能和可用性，发现异常时提醒。",
   "Safety guardrails for destructive commands.": "对删除、数据库清理、强制推送等破坏性操作发出警告；每次警告均可由用户决定是否继续。",
-  "OpenAI Codex CLI wrapper — three modes.": "使用 Codex CLI 进行独立代码审查、对抗性检查或保留上下文的咨询，获取第二意见。",
+  [CODEX_SKILL_DESCRIPTION]: "使用 Codex 进行独立代码审查、对抗性检查或保留上下文的咨询，获取第二意见。",
   "Launch real Chrome controlled by gstack with the Side Panel extension auto-loaded.": "启动由 gstack 控制的 Chrome 并加载侧栏扩展，实时查看浏览器操作。",
   "Chief Security Officer mode. Infrastructure-first security audit:": "执行以基础设施为先的安全审计：密钥、依赖供应链、CI/CD、AI 安全、威胁建模和主动验证。",
   "Design consultation: understands your product, researches the landscape, proposes a complete design system": "理解产品并调研同类方案，制定视觉、字体、配色、布局和动效设计系统，生成预览及 DESIGN.md。",
@@ -579,5 +585,5 @@ export const slashDescriptionPrefixes = Object.keys(skillSynopses).map((key) => 
 
 export const slashDescriptionResources = {
   "zh-CN": zhCN,
-  en: Object.fromEntries(Object.keys(zhCN).map((key) => [key, key])),
+  en: Object.fromEntries(Object.keys(zhCN).map((key) => [key, slashDescriptionDisplayText(key)])),
 };

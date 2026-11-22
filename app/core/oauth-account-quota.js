@@ -73,14 +73,14 @@ function validCredits(credits) {
     return Array.isArray(wallets) && wallets.length > 0 && wallets.length <= 4
       && Array.from(wallets).every(wallet => exactObject(wallet, ["kind", "amount", "unit"])
         && ["recharge", "bonus"].includes(wallet.kind) && ["USD", "CNY"].includes(wallet.unit)
-        && positiveBalance(wallet.amount));
+        && validBalance(wallet.amount));
   }
   return exactObject(credits, ["kind", "amount", "unit"]) && credits.kind === "balance"
-    && positiveBalance(credits.amount) && ["credits", "USD", "CNY"].includes(credits.unit);
+    && validBalance(credits.amount) && ["credits", "USD", "CNY"].includes(credits.unit);
 }
 
-function positiveBalance(amount) {
-  return Number.isFinite(amount) && amount > 0 && amount <= Number.MAX_SAFE_INTEGER;
+function validBalance(amount) {
+  return Number.isFinite(amount) && amount >= 0 && amount <= Number.MAX_SAFE_INTEGER;
 }
 
 function positiveResetCount(count) {

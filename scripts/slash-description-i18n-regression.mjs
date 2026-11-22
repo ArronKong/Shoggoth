@@ -37,7 +37,11 @@ function load(file) {
   return module.exports;
 }
 const { default: i18n, applyConfiguredLocale } = load("app/manage-ui/src/i18n/index.ts");
+assert.equal(i18n.hasResourceBundle("en", "slashCommands"), false, "slash resources are deferred until chat loads");
 const { translateSlashDescription: describe } = load("app/manage-ui/src/lib/slashDescription.ts");
+assert.equal(i18n.hasResourceBundle("en", "slashCommands"), true);
+assert.equal(i18n.hasResourceBundle("zh-CN", "slashCommands"), true);
+const { slashDescriptionDisplayText } = load("app/manage-ui/src/i18n/slashDescriptions.ts");
 const policy = load("app/manage-ui/src/lib/slashCommands.ts");
 const { SlashCatalogStore } = load("app/manage-ui/src/lib/slashCatalog.ts");
 const tEn = i18n.getFixedT("en");
@@ -98,6 +102,10 @@ assert.equal(describe("压缩较早的会话历史", tEn), "Compact older conver
 const skillDescription = "Systematic debugging with root cause investigation. Four phases: investigate, analyze, hypothesize, implement.";
 assert.match(describe(skillDescription, tZh), /先确定根因，再修复/);
 assert.equal(describe(skillDescription, tEn), skillDescription, "English keeps the full skill metadata");
+const codexSkillDescription = "OpenAI Codex CLI wrapper — three modes.";
+assert.equal(describe(codexSkillDescription, tEn), "OpenAI Codex wrapper — three modes.");
+assert.match(describe(codexSkillDescription, tZh), /^使用 Codex 进行/u);
+assert.equal(slashDescriptionDisplayText(codexSkillDescription), "OpenAI Codex wrapper — three modes.");
 const rows = policy.mergeNativeSlashCommands(cliReferenceCommands("codex"));
 const before = JSON.stringify(rows);
 assert.ok(policy.filterSlashCommands("后台终端", rows, (cmd) => describe(cmd.description, tZh))
@@ -146,7 +154,7 @@ await store.load("hermes-main", "hermes", "session-hermes");
 const cached = store.getSnapshot()[SlashCatalogStore.key("hermes-main", "hermes", "session-hermes")].commands;
 const environment = {
   Fragment: React.Fragment, SlashIcon: () => null, CATEGORY_LABELS: policy.CATEGORY_LABELS,
-  translateSlashDescription: describe, slashOpen: true, slashMode: "command", slashIndex: 0,
+  translateSlashDescription: describe, slashDescriptionDisplayText, slashOpen: true, slashMode: "command", slashIndex: 0,
   slashItems: cached, activeSlashCatalog: null, activeNativeSlash: false,
   retrySlashCatalog: () => {}, setSlashIndex: () => {}, applySlashCommand: () => {}, applySlashArg: () => {},
   slashArgCmd: policy.SLASH_COMMANDS.find((cmd) => cmd.name === "verbose"), slashArgItems: ["on", "off"],

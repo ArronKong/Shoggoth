@@ -13,7 +13,7 @@ async function fixture(action) {
   let respond = (_req, res) => { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end("data: public-result\n\n"); };
   const provider = http.createServer(async (req, res) => {
     let data = ""; for await (const chunk of req) data += chunk;
-    received.push({ path: req.url, headers: req.headers, body: JSON.parse(data) }); respond(req, res);
+    received.push({ path: req.url, headers: req.headers, body: data ? JSON.parse(data) : null }); respond(req, res);
   });
   await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
   const projection = new ModelSecretProjection({ secrets });
@@ -21,7 +21,7 @@ async function fixture(action) {
     assert(Object.values(TARGETS).some(base => url.href.startsWith(base)), "only the approved production endpoints can be selected");
     // Dependency injection redirects the wire to a loopback fixture; no real
     // credentials, user history, external account or external request is used.
-    return http.request(new URL(url.pathname, `http://127.0.0.1:${provider.address().port}`), options, callback);
+    return http.request(new URL(url.pathname + url.search, `http://127.0.0.1:${provider.address().port}`), options, callback);
   } });
   try { await action({ gateway, secrets, received, diagnostics, projection, respond: handler => { respond = handler; } }); }
   finally { await gateway.close(); provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve));
@@ -49,6 +49,38 @@ test("actual upstream body is protected while original auth stays on the approve
   assert.equal(received[0].headers.cookie, undefined); assert.equal(received[0].headers["x-arbitrary-secret"], undefined);
   assert(!received[0].body.input[0].output.includes("123456")); assert(received[0].body.input[0].output.includes("Public receipt"));
   assert.equal(received[0].body.input[0].call_id, "call-123456"); assert(!result.text.includes(SYNTHETIC_AUTH));
+}));
+test("Codex cache-affinity and sticky-routing headers reach the provider; telemetry headers do not", async () => fixture(async ({ gateway, received }) => {
+  const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt" });
+  const routing = { "session-id": "fixture-thread", "thread-id": "fixture-thread", session_id: "fixture-thread",
+    "x-codex-window-id": "fixture-thread:0", "x-codex-turn-state": "fixture-turn-state", "x-codex-routing-hint": "model=fixture" };
+  const result = await send(route, { input: "public" }, { ...routing, "x-codex-turn-metadata": '{"installation_id":"fixture"}',
+    "x-codex-installation-id": "fixture-installation", cookie: "must-not-forward" });
+  assert.equal(result.status, 200);
+  for (const [name, value] of Object.entries(routing)) assert.equal(received[0].headers[name], value, name);
+  for (const name of ["x-codex-turn-metadata", "x-codex-installation-id", "cookie"]) assert.equal(received[0].headers[name], undefined, name);
+}));
+test("only a valid turn-state token from a successful model response is returned to Codex", async () => fixture(async ({ gateway, respond }) => {
+  const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt" });
+  const token = "fixture-turn-state.v1_ABC=";
+  respond((_req, res) => { res.writeHead(200, { "Content-Type": "text/event-stream", "x-codex-turn-state": token }); res.end("data: public-result\n\n"); });
+  const streamed = await send(route, { stream: true, input: "public" });
+  assert.equal(streamed.status, 200); assert.equal(streamed.headers.get("x-codex-turn-state"), token);
+  assert.equal(streamed.text, "data: public-result\n\n");
+  respond((_req, res) => { res.writeHead(200, { "Content-Type": "application/json", "x-codex-turn-state": token }); res.end('{"output":[]}'); });
+  assert.equal((await send(route, { stream: false, input: "public" })).headers.get("x-codex-turn-state"), token);
+  for (const invalid of ["has space", "a".repeat(1025)]) {
+    respond((_req, res) => { res.writeHead(200, { "Content-Type": "text/event-stream", "x-codex-turn-state": invalid }); res.end("data: public-result\n\n"); });
+    const rejected = await send(route, { stream: true, input: "public" });
+    assert.equal(rejected.status, 200); assert.equal(rejected.headers.get("x-codex-turn-state"), null);
+  }
+  respond((_req, res) => { res.writeHead(429, { "x-codex-turn-state": token }); res.end(SYNTHETIC_AUTH); });
+  const limited = await send(route, { stream: true, input: "public" });
+  assert.equal(limited.status, 429); assert.equal(limited.headers.get("x-codex-turn-state"), null);
+  respond((_req, res) => res.writeHead(200, { "Content-Type": "application/json", "x-codex-turn-state": token })
+    .end(JSON.stringify({ output: "Public result", results: [] })));
+  const search = await send(route, { id: "fixture-session", model: "fixture", commands: { search_query: [{ q: "docs" }] } }, {}, "/alpha/search");
+  assert.equal(search.status, 200); assert.equal(search.headers.get("x-codex-turn-state"), null);
 }));
 test("credentials rotated during the last route check are masked before the single upstream send", async () => fixture(async ({ gateway, secrets, received }) => {
   let revision = 0, reads = 0;
@@ -155,6 +187,29 @@ test("Grok's original-content fallback does not expose a retryable transport fai
   assert.equal((await send(route, { stream: true, input: "original fixture" })).status, 400);
   assert.equal(received.length, 1);
   assert.equal(received[0].body.input, "original fixture");
+}));
+test("the Grok OAuth worker can read billing through its fixed provider route", async () => fixture(async ({ gateway, received, respond }) => {
+  const cli = await gateway.bindGrokSession({ providerKind: "grok-cli", resolveScope: () => null });
+  const api = await gateway.bindGrokSession({ providerKind: "grok-api-key", resolveScope: () => null });
+  const balance = { config: { creditUsagePercent: 42 } };
+  respond((_req, res) => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(balance)));
+  for (const suffix of ["/billing?format=credits", "/billing"]) {
+    const response = await fetch(cli.baseUrl + suffix, { headers: {
+      authorization: SYNTHETIC_AUTH, "x-xai-token-auth": "fixture", cookie: "must-not-forward",
+    } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), balance);
+    const upstream = received.at(-1);
+    assert.equal(upstream.path, "/v1" + suffix);
+    assert.equal(upstream.headers.authorization, SYNTHETIC_AUTH);
+    assert.equal(upstream.headers["x-xai-token-auth"], "fixture");
+    assert.equal(upstream.headers.cookie, undefined);
+    assert.equal(upstream.body, null);
+  }
+  assert.equal((await fetch(api.baseUrl + "/billing")).status, 400);
+  assert.equal((await fetch(cli.baseUrl + "/billing?format=other")).status, 400);
+  assert.equal((await send(cli, {}, {}, "/billing")).status, 400);
+  assert.equal(received.length, 2);
 }));
 test("sessions have separate routes and known-value matching does not cross scope", async () => fixture(async ({ gateway, received, secrets }) => {
   await secrets.prepare({ scope: SCOPE, operationId: "secret", text: "password: 123456" });

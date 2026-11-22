@@ -46,6 +46,46 @@ test("reads only the active DeepSeek account's positive recharge and bonus balan
   assert.deepEqual(await quota(), { status: "unavailable" });
 });
 
+test("reads the official DeepSeek API key balance and rejects another key's late result", async () => {
+  let key = "synthetic-deepseek-key-a";
+  let baseURL = "https://api.deepseek.com/v1";
+  let selectedProvider = "deepseek-official";
+  let changeKey = false;
+  const requests = [];
+  const bridge = new BridgeRuntime({
+    get: name => name === "settings" ? { get: () => ({ baseURL }) } : null,
+    agentDefaultModel: { currentSelection: () => ({ provider: selectedProvider }) },
+    credentials: {
+      describe: async name => ({ configured: name === "DEEPSEEK_API_KEY" }),
+      listRecords: async () => [],
+      resolve: async () => ({ value: key, source: "file" }),
+    },
+  }, { fetch: async (url, options) => {
+    requests.push({ url, method: options.method, redirect: options.redirect, authorization: options.headers.Authorization });
+    if (changeKey) key = "synthetic-deepseek-key-b";
+    return Response.json({ is_available: false, balance_infos: [
+      { currency: "CNY", total_balance: "0.00", topped_up_balance: "0.00", granted_balance: "0.00" },
+    ] });
+  } });
+  const quota = () => bridge.dispatch("quota/read", { version: "0.1.1-rc.2" });
+  const auth = () => bridge.dispatch("auth/read", { includeQuotaScope: true });
+  const first = await auth();
+  assert.match(first.quotaScope, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(await quota(), { status: "available", quotaScope: first.quotaScope,
+    wallets: [{ kind: "recharge", amount: 0, unit: "CNY" }] });
+  assert.deepEqual(requests, [{ url: "https://api.deepseek.com/user/balance", method: "GET", redirect: "error",
+    authorization: "Bearer synthetic-deepseek-key-a" }]);
+  changeKey = true;
+  assert.deepEqual(await quota(), { status: "unavailable" });
+  assert.notEqual((await auth()).quotaScope, first.quotaScope);
+  baseURL = "https://proxy.example.test";
+  assert.deepEqual(await quota(), { status: "unsupported" });
+  baseURL = "https://api.deepseek.com";
+  selectedProvider = "custom-provider";
+  assert.deepEqual(await quota(), { status: "unsupported" });
+  assert.equal(requests.length, 2, "another provider's key is never used for a DeepSeek balance request");
+});
+
 // Enforce the native registry's ownership and complete-prompt contracts. A Map
 // that silently overwrites registrations hides both first- and second-turn bugs.
 function promptRegistry() {

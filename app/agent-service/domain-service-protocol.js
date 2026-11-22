@@ -23,6 +23,7 @@ const {
   validateWorkRun,
 } = require("./product-store");
 const { WORK_RUN_STATUSES } = require("./work-run");
+const { validScheduleRecovery } = require("./native-cron-recovery-store");
 const { validCronModelSelection } = require("./native-cron-model");
 
 const MAX_CONTENT_PREVIEW_BYTES = 512;
@@ -570,10 +571,14 @@ function validateDomainServiceParams(method, params) {
   } else if (method === "cron.run.list") {
     valid = validPage(params, ["jobId", "status", "cursor", "limit",
       ...(Object.hasOwn(params ?? {}, "failureSinceMs") ? ["failureSinceMs"] : []),
+      ...(Object.hasOwn(params ?? {}, "groupReplySinceMs") ? ["groupReplySinceMs"] : []),
+      ...(Object.hasOwn(params ?? {}, "includeScheduleRecovery") ? ["includeScheduleRecovery"] : []),
     ],
       (value) => validUuid(value.jobId)
         && (value.status === null || WORK_RUN_STATUSES.includes(value.status))
-        && (!Object.hasOwn(value, "failureSinceMs") || validTimestamp(value.failureSinceMs)));
+        && (!Object.hasOwn(value, "failureSinceMs") || validTimestamp(value.failureSinceMs))
+        && (!Object.hasOwn(value, "groupReplySinceMs") || validTimestamp(value.groupReplySinceMs))
+        && (!Object.hasOwn(value, "includeScheduleRecovery") || value.includeScheduleRecovery === true));
   } else if (method === "cron.run.trigger") {
     valid = validOperationBase(params, ["operationId", "jobId", "createdAt"])
       && validUuid(params.jobId);
@@ -749,6 +754,33 @@ function validateKanbanRunItem(value, params) {
 }
 
 function validateCronRunItem(value, params) {
+  if (Object.hasOwn(value || {}, "scheduleRecovery")) {
+    if (!ownDataObject(value) || params.includeScheduleRecovery !== true) failResponse();
+    const { scheduleRecovery, ...item } = value;
+    const validated = validateCronRunItem(item, params);
+    if (validated.kind !== "schedule" || !validScheduleRecovery(scheduleRecovery)
+      || scheduleRecovery.decidedAt < validated.createdAt
+      || (scheduleRecovery.reason === "catch-up"
+        ? validated.run.status === "skipped"
+        : validated.run.status !== "skipped" || validated.run.resultSummary !== "CRON_MISFIRE_SKIPPED")) {
+      failResponse();
+    }
+    return { ...validated, scheduleRecovery: cloneCanonical(scheduleRecovery) };
+  }
+  if (Object.hasOwn(value || {}, "groupReply")) {
+    if (!ownDataObject(value)) failResponse();
+    const { groupReply, ...item } = value;
+    const validated = validateCronRunItem(item, params);
+    if (params.groupReplySinceMs === undefined || validated.deliveryTarget !== "group"
+      || validated.run.status !== "completed" || validated.run.finishedAt < params.groupReplySinceMs
+      || validated.cronOutput?.disposition === "silent"
+      || !exactObject(groupReply, ["groupId", "ownerScope", "seq", "digest", "preview"])
+      || !validOpaqueId(groupReply.groupId) || !validString(groupReply.ownerScope, 256)
+      || !Number.isSafeInteger(groupReply.seq) || groupReply.seq <= 0
+      || !require("../group-result-content").validDigest(groupReply.digest)
+      || !validString(groupReply.preview, 1024)) failResponse();
+    return { ...validated, groupReply: cloneCanonical(groupReply) };
+  }
   if (Object.hasOwn(value || {}, "failure")) {
     if (!ownDataObject(value)) failResponse();
     const { failure, ...item } = value;
