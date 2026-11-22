@@ -1,11 +1,14 @@
-import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import BackendTabIcon from "../components/BackendTabIcon";
 import FilterTabs from "../components/FilterTabs";
 import FusionLoader from "../components/FusionLoader";
+import pickerStyles from "../components/Picker.module.css";
 import { IconModel, IconSearch } from "./chatIcons";
 import { useComposerPopupPosition } from "../lib/useComposerPopupPosition";
+import { useScrollFade } from "../lib/useScrollFade";
 import "./ChatModelMenu.css";
 
 export interface ModelMenuChoice {
@@ -96,7 +99,7 @@ export default function ChatModelMenu({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const [popupHost, setPopupHost] = useState<HTMLElement | null>(null);
   const [popupStyle, setPopupStyle] = useState<CSSProperties | undefined>();
   const portalSelector = portalTo ?? (portalInDialog ? "[role=dialog]" : undefined);
@@ -235,8 +238,23 @@ export default function ChatModelMenu({
     }
     return names;
   }, [models]);
-  const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name
-    || providerNames?.[id] || catalogProviderNames.get(id) || id;
+  const groupDisplay = (id: string) => {
+    const group = runtimeGroups?.find(group => (group.bindingId || group.runtime) === id);
+    const label = group?.name || providerNames?.[id] || catalogProviderNames.get(id) || id;
+    // The bundled Shoggoth harness and local Codex share the same runtime ID.
+    const iconId = group?.runtime === "codex" && group.name === "Shoggoth" ? "shoggoth" : group?.runtime;
+    return { label, iconId };
+  };
+  const renderGroupLabel = (id: string) => {
+    const { label, iconId } = groupDisplay(id);
+    if (!iconId) return label;
+    return (
+      <span className="model-menu__label-content">
+        <BackendTabIcon backend={iconId} label={label} />
+        {label}
+      </span>
+    );
+  };
   // 只点名失败的 Runtime：一个分组失败不应让其它已加载的分组看起来也失败了。
   const failedGroups = runtimeGroups?.filter(group => (!group.available || group.unavailableSource)
     && (!providerFilter || (group.bindingId || group.runtime) === providerFilter)) ?? [];
@@ -261,6 +279,13 @@ export default function ChatModelMenu({
     return entries.map(([provider, items]) => ({ provider, items }));
   }, [models, query, providerFilter, OTHER, runtimeGroups, providers, providerNames]);
 
+  const listContent = useMemo(() => [groups, loading, catalogFailed, emptyLabel], [groups, loading, catalogFailed, emptyLabel]);
+  const { ref: observeList, ...listFade } = useScrollFade(open, listContent);
+  const setList = useCallback((element: HTMLDivElement | null) => {
+    listRef.current = element;
+    observeList(element);
+  }, [observeList]);
+
   return (
     <div className="chat-model-menu" ref={rootRef}>
       <button
@@ -279,7 +304,7 @@ export default function ChatModelMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
         title={active?.runtimeName ? `${active.runtimeName} / ${activeModel}`
-          : activeProvider ? `${groupName(activeProvider)} / ${activeModel}` : t("chat.switchModel")}
+          : activeProvider ? `${groupDisplay(activeProvider).label} / ${activeModel}` : t("chat.switchModel")}
       >
         <span className="chat-pill__icon" aria-hidden="true"><IconModel /></span>
         <span className="chat-pill__label" id={labelledBy ? triggerLabelId : undefined}>{activeLabel}</span>
@@ -289,6 +314,7 @@ export default function ChatModelMenu({
         <div
           className={`model-menu model-menu--catalog chat-composer-menu-surface${popupHost ? " model-menu--portal" : ""}`}
           role="listbox"
+          data-filtered={providerFilter !== null || undefined}
           aria-label={labelledBy ? undefined : t("chat.switchModel")}
           aria-labelledby={labelledBy}
           ref={popupRef}
@@ -315,17 +341,23 @@ export default function ChatModelMenu({
                 className="model-menu__tabs"
                 ariaLabel={t("chat.switchModel")}
                 scrollable
+                fadeEdges
+                centerOnEdgeSelection
                 toggleOff=""
                 value={providerFilter ?? ""}
                 onChange={(v) => setProviderFilter(v === "" ? null : v)}
                 items={[
                   { value: "", label: t("chat.modelFilterAll") },
-                  ...providers.map((p) => ({ value: p, label: groupName(p), title: groupName(p) })),
+                  ...providers.map((value) => {
+                    const { label, iconId } = groupDisplay(value);
+                    return { value, label, title: label,
+                      leadingIcon: iconId ? <BackendTabIcon backend={iconId} label={label} /> : undefined };
+                  }),
                 ]}
               />
             ) : null}
           </div>
-          <div className="model-menu__list" ref={listRef}>
+          <div className={`model-menu__list ${pickerStyles.scrollFade}`} ref={setList} {...listFade}>
             {!multi && emptyLabel && (
               <button
                 type="button"
@@ -358,7 +390,9 @@ export default function ChatModelMenu({
             )}
             {groups.map((g) => (
               <Fragment key={g.provider}>
-                <div className="model-menu__label">{groupName(g.provider)}</div>
+                {providerFilter === null && (
+                  <div className="model-menu__label">{renderGroupLabel(g.provider)}</div>
+                )}
                 {g.items.map((m) => {
                   const price = priceLabel(m, t);
                   const isActive = isActiveChoice(m);

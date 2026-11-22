@@ -22,7 +22,7 @@ const defaultSnapshot = { bindings: [bundledCodex, nativeCodex], defaultBindingI
     { bindingId: second, available: true, reason: null },
   ] };
 const runtimeStatuses = [
-  { backendId: "shoggoth", runtime: "codex", name: "Codex CLI", runtimeAccountId: "native-codex-default-v1",
+  { backendId: "shoggoth", runtime: "codex", name: "Codex", runtimeAccountId: "native-codex-default-v1",
     enabled: true, releaseEnabled: true, installation: "available" as const, serviceConnected: true },
   { backendId: "shoggoth", runtime: "pi", name: "Pi", runtimeAccountId: "native-pi-default-v1",
     enabled: false, releaseEnabled: true, installation: "unavailable" as const, serviceConnected: true },
@@ -66,11 +66,11 @@ function Fixture() {
     <RuntimeStatusList runtimes={runtimeStatuses} loading={false} error={false} busy={false} onToggle={() => {}} />
     <ChatModelMenu models={[
       ...(bundledAvailable ? [bundledModel] : []),
-      { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Codex CLI", bindingId: second },
+      { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Codex", bindingId: second },
     ]} activeModel="gpt-fixture" activeBindingId={first} onSelect={(_id, _provider, bindingId) => { state.modelBinding = bindingId; }}
     runtimeGroups={[
       { runtime: "codex", bindingId: first, name: "Shoggoth", available: bundledAvailable },
-      { runtime: "codex", bindingId: second, name: "Codex CLI", available: true },
+      { runtime: "codex", bindingId: second, name: "Codex", available: true },
     ]} />
   </main></UiProvider>;
 }
@@ -125,14 +125,14 @@ state.checkOnboardingRuntime = async () => {
   check(trigger.textContent?.includes("Shoggoth"), "bundled default is labeled Shoggoth");
   trigger.click();
   await wait(() => [...document.querySelectorAll('[role="option"]')].some(option =>
-    option.textContent?.includes("Codex CLI（本机安装）")), "separate native Codex option");
+    option.firstElementChild?.textContent?.trim() === "Codex"), "separate native Codex option");
   const names = [...document.querySelectorAll('[role="option"]')].map(option => option.firstElementChild?.textContent?.trim());
   check(names.includes("Shoggoth"), "bundled option stays distinct");
-  check(names.some(name => name?.includes("Codex CLI（本机安装）")), "native CLI option stays distinct");
+  check(names.includes("Codex"), "native Codex option stays distinct");
   document.querySelector<HTMLButtonElement>(".chat-pill--model")!.click();
   await wait(() => document.querySelectorAll(".model-menu__label").length === 2, "separate Codex model groups");
   const groups = [...document.querySelectorAll(".model-menu__label")].map(entry => entry.textContent?.trim());
-  check(groups.join("|") === "Shoggoth|Codex CLI", "model menu groups are account-scoped");
+  check(groups.join("|") === "Shoggoth|Codex", "model menu groups are account-scoped");
   state.failBundledCatalog();
   await wait(() => document.querySelector(".model-menu__error")?.textContent?.includes("Shoggoth 模型加载失败")
     && document.querySelectorAll(".model-menu__item").length === 1, "Shoggoth catalog failure leaves the CLI model available");

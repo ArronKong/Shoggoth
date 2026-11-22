@@ -31,7 +31,7 @@ import { isVisibleCronJob } from "../lib/cronVisibility";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { useStickyState } from "../lib/useStickyState";
 import { createAsyncRequestController, type AsyncRequestTicket } from "../lib/lowUiLifecycle";
-import { canonicalCronSessionKey, firstNonBlankText, writeCronChatHandoff } from "../lib/cronChatHandoff";
+import { canonicalCronSessionKey, cronGroupChatPath, firstNonBlankText, writeCronChatHandoff } from "../lib/cronChatHandoff";
 import CronCalendar, {
   calendarRangeTitle,
   shiftCalendarCursor,
@@ -446,7 +446,9 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
   };
 
   const deliveryReport = firstNonBlankText(delivery?.fullText, delivery?.summary);
-  const deliverySessionKey = canonicalCronSessionKey(deliveryJob?.agentId, delivery?.sessionKey);
+  const deliverySessionKey = delivery?.deliveryTarget === "group" ? null
+    : canonicalCronSessionKey(deliveryJob?.agentId, delivery?.sessionKey);
+  const groupChat = delivery?.groupChat;
   const deliveryAgent = deliveryJob?.agentId
     ? agents[deliveryJob.backendId]?.find((agent) => agent.id === deliveryJob.agentId)
     : undefined;
@@ -867,6 +869,10 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
         onAskInChat={deliveryJob && deliverySessionKey && deliveryReport
           ? () => askInChat(deliveryJob.backendId, deliverySessionKey, deliveryReport)
           : undefined}
+        onOpenGroupChat={groupChat ? () => {
+          if (dialog) closeDelivery();
+          navigate(cronGroupChatPath(groupChat));
+        } : undefined}
         editDisabled={deliveryJob?.actions?.edit === false}
         onEdit={() => {
           const job = deliveryJob;

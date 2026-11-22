@@ -96,7 +96,7 @@ function resolveCodexSystemBinary(options = {}) {
     const resolved = executableRealpath(candidate, fileSystem);
     if (resolved) return resolved;
   }
-  throw runtimeError("CODEX_SYSTEM_BINARY_NOT_FOUND", "Codex CLI is not installed or executable");
+  throw runtimeError("CODEX_SYSTEM_BINARY_NOT_FOUND", "Codex is not installed or executable");
 }
 
 function resolveCodexMcpParentBinaries(options = {}) {

@@ -183,8 +183,18 @@ export interface CronFailureNotificationDelivery {
 }
 
 // One historical run of a cron job (see backend getCronRuns()).
+export interface CronScheduleRecovery {
+  reason: "catch-up" | "missed" | "expired";
+  scheduledAt: number;
+  decidedAt: number;
+  startedAt: number | null;
+  coalescedCount: number;
+  countCapped: boolean;
+}
+
 export interface CronRun {
   deliveryTarget?: "group";
+  groupChat?: CronGroupChat;
   outputDisposition?: "pending" | "deliver" | "silent";
   executionOrigin?: "codex-desktop" | "shoggoth";
   executionStatus?: string;
@@ -193,6 +203,7 @@ export interface CronRun {
   workspace?: string | null;
   taskRevision?: string;
   nameAtRun?: string;
+  scheduleRecovery?: CronScheduleRecovery;
   startedAt?: number | null;
   finishedAt?: number | null;
   status?: CronRunStatus | string;
@@ -214,8 +225,8 @@ export interface CronRun {
 }
 
 // Latest delivered content for a cron job (see backend getCronLatestDelivery()).
-// `source` says where `fullText` came from: "transcript" = full untruncated
-// run/session output, "summary" = the ≤2000-char run summary,
+// `source` says where `fullText` came from: "group" = published message,
+// "transcript" = full run/session output, "summary" = bounded preview,
 // "none" = no output recoverable (e.g. a never-run / errored job or an old backend).
 // R342:cron 单次运行的 Agent Trajectory（过程 parts，来自 run/session 转录）。
 // 后端不支持或转录不可用时 supported=false，UI 隐藏该区。
@@ -234,8 +245,15 @@ export interface CronRunTrajectory {
   parts: CronTrajectoryPart[];
 }
 
+export interface CronGroupChat {
+  groupId: string;
+  ownerScope: string;
+}
+
 export interface CronDelivery {
+  scheduleRecovery?: CronScheduleRecovery;
   deliveryTarget?: "group";
+  groupChat?: CronGroupChat;
   outputDisposition?: "pending" | "deliver" | "silent";
   deliverySuppressionReason?: string;
   runId?: string;
@@ -247,7 +265,7 @@ export interface CronDelivery {
   durationMs?: number;
   summary?: string;
   fullText?: string | null;
-  source?: "transcript" | "summary" | "none";
+  source?: "group" | "transcript" | "summary" | "none";
   sessionKey?: string;
   error?: string;
   deliveryStatus?: string;
@@ -2149,6 +2167,7 @@ export interface BackgroundTask {
   startedAt: number | null;
 }
 export interface BackgroundTaskList { supported: boolean; tasks: BackgroundTask[] }
+export interface BackgroundTaskApproval { sessionKey: string; taskId: string }
 export interface BackgroundTaskMessage {
   id: string;
   role: "user" | "assistant";
@@ -2974,8 +2993,10 @@ export interface DashboardBackendSection<T> {
 }
 
 export interface DashboardRunEntry {
+  scheduleRecovery?: CronScheduleRecovery;
   systemManaged?: boolean;
   deliveryTarget?: "group";
+  groupChat?: CronGroupChat;
   outputDisposition?: "pending" | "deliver" | "silent";
   backendId: string;
   /** 统一 id "<prefix>:<localId>"，可直接深链 /cron?job=。 */

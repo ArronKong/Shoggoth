@@ -21,10 +21,6 @@
   font-size: 0.75rem;
 }
 
-.quota[hidden] {
-  display: none;
-}
-
 .titleRow,
 .windowValues {
   display: flex;

@@ -17,8 +17,8 @@ const MAX_SEARCH_RESULTS = 10;
 // Chosen from recorded native tool calls and the flows that must not need a
 // search first: user input, workspace execution, help/state, memory and
 // definitions, Skills, web and browser, chat UI, the in-group tools (group
-// capability proof requires them in tools/list), heartbeat replies and Kanban
-// run reporting.
+// capability proof requires them in tools/list), heartbeat replies, Kanban
+// run reporting and background dispatch (the chat instructions name it).
 const RESIDENT_PRODUCT_TOOLS = Object.freeze(new Set([
   "request_user_input", "workspace_execute",
   "app_help_search", "app_help_get", "app_capabilities", "app_state_get",
@@ -33,6 +33,7 @@ const RESIDENT_PRODUCT_TOOLS = Object.freeze(new Set([
   "group_member_role_read", "group_messages_read",
   "proactive_respond",
   "kanban_update_progress", "kanban_add_comment", "kanban_request_complete",
+  "background_task_start",
 ]));
 
 const ENTRY_TOOL_DEFINITIONS = Object.freeze([

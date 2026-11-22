@@ -19,7 +19,7 @@ import type { RuntimeContextUsage, RuntimeContextCapabilities, ProductContextSta
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { compactConversation, runShoggothBackgroundAction, getShoggothProductStatus } from "../api/client";
 import { prepareChatInputForSend, prewarmChatSession } from "../api/client";
-import { listBackgroundTasks } from "../api/client";
+import { listBackgroundTaskApprovals, listBackgroundTasks } from "../api/client";
 import type { BackgroundTask, BackgroundTaskReportMeta, BackgroundTaskStatus } from "../types";
 import BackgroundTaskCard from "./chat-background-task/BackgroundTaskCard";
 import BackgroundTaskModal from "./chat-background-task/BackgroundTaskModal";
@@ -59,6 +59,7 @@ import {
 import { extractAgentMedia } from "../lib/agentMedia";
 import { SlashCatalogStore } from "../lib/slashCatalog";
 import { translateSlashDescription } from "../lib/slashDescription";
+import { slashDescriptionDisplayText } from "../i18n/slashDescriptions";
 import {
   canRunSlashDuringTurn,
   canRunServerSlashDuringTurn,
@@ -131,7 +132,7 @@ import ChatPromptCard, {
 import { applyPromptHistory, promptHistoryAnchor } from "../lib/chatPromptHistory";
 import ChatWidget from "../components/ChatWidget";
 import Modal from "../components/Modal";
-import { useConfirm } from "../components/ui";
+import { useConfirm, useToast } from "../components/ui";
 import SessionAdvancedModal from "./chat-session-advanced/SessionAdvancedModal";
 import {
   forkEditorDraft,
@@ -3309,6 +3310,7 @@ function ChatPageApp() {
   const routerLocation = useLocation();
   const { t } = useTranslation();
   const confirm = useConfirm();
+  const appToast = useToast();
   const chatBackendCatalog = useBackendCatalog("chat");
   const enabledChatBackends = useEnabledBackends("chat");
   const chatBackendScopeKey = [...enabledChatBackends].sort().join(",");
@@ -3482,6 +3484,7 @@ function ChatPageApp() {
   const [openGroup, setOpenGroup] = useState<{
     groupId: string; activeKey: string | null; searchTarget?: { ownerScope: string; message?: GroupChatMessage };
     continuationOwnerScope?: string;
+    fromLink?: boolean;
   } | null>(null);
   const [agentMenu, setAgentMenu] = useState<{ x: number; y: number; agent: GroupCandidateAgent } | null>(null);
   const [createGroupFor, setCreateGroupFor] = useState<GroupCandidateAgent | null>(null);
@@ -3489,7 +3492,7 @@ function ChatPageApp() {
   const [groupPanelCache] = useState(createGroupPanelCache);
   // 群功能关闭时不显示群，但内部会话的排除仍按全部群计算（见 groupInternalKeys）。
   const groupChats = useMemo(() => (groupChatEnabled ? allGroupChats : []), [groupChatEnabled, allGroupChats]);
-  const currentGroup = openGroup?.activeKey === activeKey ? openGroup : null;
+  const currentGroup = openGroup && (openGroup.fromLink || openGroup.activeKey === activeKey) ? openGroup : null;
   const groupRow = groupChats.find(group => group.group.id === currentGroup?.groupId);
   const activeGroupId = currentGroup && groupChatEnabled
     && (currentGroup.continuationOwnerScope ? groupRow?.ownerScope === currentGroup.continuationOwnerScope
@@ -3896,7 +3899,20 @@ function ChatPageApp() {
   const [backgroundTasks, setBackgroundTasks] = useState<{ key: string; tasks: BackgroundTask[] } | null>(null);
   const [backgroundRevision, setBackgroundRevision] = useState(0);
   const [backgroundPoll, setBackgroundPoll] = useState(0);
+  const [backgroundApprovalRevision, setBackgroundApprovalRevision] = useState(0);
+  const [backgroundApprovals, setBackgroundApprovals] = useState(() => new Map<string, string>());
   const [openBackgroundTask, setOpenBackgroundTask] = useState<{ key: string; taskId: string } | null>(null);
+  useEffect(() => {
+    if (!connected) return;
+    const controller = new AbortController();
+    listBackgroundTaskApprovals(controller.signal).then(({ approvals }) => {
+      if (controller.signal.aborted || !Array.isArray(approvals)) return;
+      const bySession = new Map<string, string>();
+      for (const { sessionKey, taskId } of approvals) if (!bySession.has(sessionKey)) bySession.set(sessionKey, taskId);
+      setBackgroundApprovals(bySession);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [connected, backgroundApprovalRevision]);
   const chatCapsRef = useRef(chatCaps);
   chatCapsRef.current = chatCaps;
   const capabilitiesForSession = useCallback((key: string) => runtimeModelsRef.current.key === key && runtimeModelsRef.current.data
@@ -5306,11 +5322,17 @@ function ChatPageApp() {
       }
       if (f.type === "event" && f.event === "background.tasks.changed") {
         const key = f.payload?.sessionKey;
-        if (typeof key === "string" && key === activeKeyRef.current) {
+        if (typeof key !== "string") return;
+        setBackgroundApprovalRevision(value => value + 1);
+        if (key === activeKeyRef.current) {
           setBackgroundRevision(value => value + 1);
           // A report may have been posted into this chat.
           void loadHistory(key, { refresh: true });
         }
+        return;
+      }
+      if (f.type === "event" && f.event === "background.tasks.approvals.changed") {
+        setBackgroundApprovalRevision(value => value + 1);
         return;
       }
       if (f.type === "event" && f.event === "chat.ui.revoked") {
@@ -5334,6 +5356,7 @@ function ChatPageApp() {
         // degraded / comes back, and when a slow backend (Hermes) finishes
         // starting. Re-pull the list so agents appear/disappear without a reload.
         void refreshSessions().catch(() => {});
+        setBackgroundApprovalRevision(value => value + 1);
         // A Service can recover without closing this Proxy socket. Recheck
         // durable originals after an earlier lookup failed during its restart.
         void verifyPendingTrackedSends();
@@ -6625,6 +6648,7 @@ function ChatPageApp() {
   const openSession = useCallback((key: string) => {
     sessionOpenIntentRef.current += 1;
     if (!isVisibleSession(sessionsRef.current.find(row => row.key === key) || { key })) return Promise.resolve();
+    setOpenGroup(group => group?.fromLink ? null : group);
     cancelInitialScroll();
     if (pendingSearchJumpKeyRef.current && pendingSearchJumpKeyRef.current !== key) {
       searchJumpTokenRef.current += 1;
@@ -6660,6 +6684,32 @@ function ChatPageApp() {
   deepLinkDepsRef.current = { ensureSessionRow, refreshSessions };
   const handledSessionLocationRef = useRef<string | null>(null);
   const routerNavigate = useNavigate();
+  useEffect(() => {
+    if (routerLocation.pathname !== "/chat") return;
+    const query = new URLSearchParams(routerLocation.search);
+    const groupId = query.get("group");
+    const ownerScope = query.get("ownerScope");
+    if (!groupId || !ownerScope) return;
+    let cancelled = false;
+    const openIntent = sessionOpenIntentRef.current;
+    const previousGroup = activeGroupIdRef.current;
+    const finish = (view: Awaited<ReturnType<typeof getGroupChat>> | null) => {
+      if (cancelled) return;
+      routerNavigate("/chat", { replace: true });
+      if (sessionOpenIntentRef.current !== openIntent || activeGroupIdRef.current !== previousGroup) return;
+      if (!groupChatEnabled || view?.group?.id !== groupId || view.ownerScope !== ownerScope
+        || view.group.status === "deleting") {
+        appToast.error(t("chat.originalGroupUnavailable"));
+        return;
+      }
+      setImmersive(false);
+      // Background restoration of a private session cannot displace a group link.
+      setOpenGroup({ groupId, activeKey: activeKeyRef.current, searchTarget: { ownerScope }, fromLink: true });
+      void refreshGroupChats();
+    };
+    void getGroupChat(groupId).then(finish, () => finish(null));
+    return () => { cancelled = true; };
+  }, [routerLocation, routerNavigate, groupChatEnabled, refreshGroupChats, appToast, t]);
   useEffect(() => {
     if (!shouldRefreshChatAvatars(routerLocation.pathname)) return;
     setAvatarVersion(Date.now());
@@ -10532,13 +10582,14 @@ function ChatPageApp() {
     const ranked = list.map((g) => {
       const rank = rankOf(g);
       const latestKey = latestKeyOf(g);
-      // A blocking prompt outranks the ordinary row preview. Prefer an approval
-      // over free-form input, and route the row click to the exact session that
-      // owns the card so users do not have to hunt through the session menu.
+      // Approvals outrank input and previews. Foreground prompts keep their
+      // existing route, and background approvals open their own task details.
       const approvalKey = g.statusSessions.find((s) => promptAttentionByKey[s.key] === "approval")?.key;
+      const backgroundApprovalKey = approvalKey ? undefined : g.statusSessions.find((s) => backgroundApprovals.has(s.key))?.key;
       const inputKey = g.statusSessions.find((s) => promptAttentionByKey[s.key] === "input")?.key;
-      const attentionKey = approvalKey || inputKey || "";
-      const attention = attentionKey ? promptAttentionByKey[attentionKey] : undefined;
+      const attentionKey = approvalKey || backgroundApprovalKey || inputKey || "";
+      const backgroundTaskId = backgroundApprovalKey ? backgroundApprovals.get(backgroundApprovalKey) : undefined;
+      const attention = backgroundTaskId ? "approval" : promptAttentionByKey[attentionKey];
       const runningKey = g.statusSessions.filter((s) => isSessionRunning(s.key))
         .sort((a, b) => activityOf(b) - activityOf(a) || a.key.localeCompare(b.key))[0]?.key;
       const unreadKey = g.sessions.filter(showSessionUnread)
@@ -10547,7 +10598,7 @@ function ChatPageApp() {
       const targetKey = liveKey || unreadKey || latestKey;
       const previewKey = liveKey || (g.agentId === aAgent && !activeGroupId && activeKey
         && g.sessions.some(s => s.key === activeKey) ? activeKey : targetKey);
-      return { ...g, rank, previewKey, targetKey, runningKey, attention,
+      return { ...g, rank, previewKey, targetKey, runningKey, attention, backgroundTaskId,
         rowTime: rowTimeOf(g, previewKey, rank), unread: !!unreadKey };
     });
     ranked.sort((a, b) => b.rank - a.rank || a.agentId.localeCompare(b.agentId));
@@ -10557,7 +10608,7 @@ function ChatPageApp() {
     // 网关一重启整组 agent 当场蒸发，是「聊着聊着 AI 全没了」的最后一刀。
     // 正在启动（startingBackends）本来就不该隐藏，现在天然涵盖。
     return disabledBackends.size ? ranked.filter((g) => !disabledBackends.has(backendOfKnownAgent(g.agentId))) : ranked;
-  }, [sessions, agentRoster, groupInternalKeys, disabledBackends, realTimes, realTimeBounds, activeKey, activeGroupId, previewTimes, activeRealPreview, chosenSessions, unreadState, promptAttentionByKey, showSessionUnread, isSessionRunning]);
+  }, [sessions, agentRoster, groupInternalKeys, disabledBackends, realTimes, realTimeBounds, activeKey, activeGroupId, previewTimes, activeRealPreview, chosenSessions, unreadState, promptAttentionByKey, backgroundApprovals, showSessionUnread, isSessionRunning]);
   // 单聊与群聊共用按最新消息倒序的列表。群资料修改不推进排序；无消息的群以创建时间兜底。
   const chatList = useMemo(() => [
     ...groupChats.map((group) => ({ kind: "group" as const, group, key: "group:" + group.group.id,
@@ -10821,7 +10872,7 @@ function ChatPageApp() {
                   </span>
                   <span className="slash-menu__name">/{cmd.name}</span>
                   {cmd.args && <span className="slash-menu__args">{cmd.args}</span>}
-                  <span className="slash-menu__desc" title={cmd.description}>{translateSlashDescription(cmd.description, t)}</span>
+                  <span className="slash-menu__desc" title={slashDescriptionDisplayText(cmd.description)}>{translateSlashDescription(cmd.description, t)}</span>
                   {cmd.source && <span className="slash-menu__badge" title={cmd.source}>{cmd.source}</span>}
                   {cmd.execution === "cli" && <span className="slash-menu__badge">{t("chat.slashCliOnly")}</span>}
                   {cmd.argOptions?.length ? (
@@ -10988,7 +11039,10 @@ function ChatPageApp() {
     {openBackgroundTask && openBackgroundTask.key === activeKey ? (
       <BackgroundTaskModal key={openBackgroundTask.taskId} sessionKey={openBackgroundTask.key} taskId={openBackgroundTask.taskId}
         agentName={chatAgentDisplayName(agentOf(openBackgroundTask.key))} revision={backgroundRevision} Conversation={BackgroundTaskConversation}
-        onChanged={() => setBackgroundPoll(value => value + 1)} onClose={() => setOpenBackgroundTask(null)} />
+        onChanged={() => {
+          setBackgroundPoll(value => value + 1);
+          setBackgroundApprovalRevision(value => value + 1);
+        }} onClose={() => setOpenBackgroundTask(null)} />
     ) : null}
     {advancedProbe && advancedProbe.key === activeKey ? (
       <SessionAdvancedModal
@@ -11209,7 +11263,9 @@ function ChatPageApp() {
                 className={!activeGroupId && isActive ? "chat-agent is-active" : "chat-agent"}
                 onClick={() => {
                   setOpenGroup(null);
-                  void openSession(g.targetKey || g.sessions[0].key);
+                  const key = g.targetKey || rep.key;
+                  setOpenBackgroundTask(g.backgroundTaskId ? { key, taskId: g.backgroundTaskId } : null);
+                  void openSession(key);
                 }}
                 onContextMenu={(e) => {
                   // 右键菜单目前只有「创建群组」；群功能关闭时不弹。
@@ -11234,7 +11290,8 @@ function ChatPageApp() {
                     {g.attention ? (
                       <>
                         <span className="chat-agent__attention-dot" aria-hidden="true" />
-                        <span className="chat-agent__subtext is-attention">{t(`chat.liveStatus.${g.attention}`)}</span>
+                        <span className="chat-agent__subtext is-attention">{t(g.backgroundTaskId
+                          ? "backgroundTask.sidebarApproval" : `chat.liveStatus.${g.attention}`)}</span>
                       </>
                     ) : g.runningKey ? (
                       <ChatTypingText className="chat-agent__subtext" text={t("chat.liveStatus.running")} />

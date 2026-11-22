@@ -965,7 +965,7 @@ class ChatSessionStore {
     const modelSettings = clone(input.modelSettings ?? INHERITED_MODEL_SETTINGS);
     if (require("./codex-desktop-session-store").isDesktopBinding(this.container.bindingOperations[sessionKey])
       && !(input.model !== undefined && target.id === session.runtimeBindingId && input.renewSession !== true)) {
-      throw chatSessionError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用原生 Codex CLI");
+      throw chatSessionError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用本机 Codex");
     }
     if (input.model !== undefined && session.runtimeBindingId === target.id && input.renewSession !== true) {
       if (!session.nextRuntimeSelection && session.modelOverride === input.model

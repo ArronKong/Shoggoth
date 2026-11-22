@@ -1,8 +1,13 @@
+import type { CronGroupChat } from "../types";
+
 const CRON_CHAT_HANDOFF_KEY = "shoggoth.chat.handoff";
 let suppressedHandoffKey: string | null = null;
 
 interface CronRunHandoffInput {
   deliveryTarget?: "group";
+  groupChat?: CronGroupChat;
+  backendId?: string;
+  runId?: string;
   agentId?: string;
   startedAt?: number | null;
   sessionKey?: string;
@@ -11,6 +16,8 @@ interface CronRunHandoffInput {
 
 interface CronDeliveryHandoffInput {
   deliveryTarget?: "group";
+  groupChat?: CronGroupChat;
+  runId?: string;
   startedAt?: number | null;
   sessionKey?: string;
   summary?: string;
@@ -20,6 +27,11 @@ interface CronDeliveryHandoffInput {
 export interface CronRunHandoffSource {
   sessionKey: string | null;
   report: string | null;
+  groupChat?: CronGroupChat;
+}
+
+export function cronGroupChatPath({ groupId, ownerScope }: CronGroupChat): string {
+  return `/chat?${new URLSearchParams({ group: groupId, ownerScope })}`;
 }
 
 export interface CronChatHandoff {
@@ -150,18 +162,22 @@ export function selectCronRunHandoffSource(
   delivery: CronDeliveryHandoffInput | null,
 ): CronRunHandoffSource {
   if (!openRun) return { sessionKey: null, report: null };
-  const exactDelivery =
-    typeof openRun.startedAt === "number" &&
-    typeof delivery?.startedAt === "number" &&
-    openRun.startedAt === delivery.startedAt
-      ? delivery
-      : null;
+  const matches = openRun.backendId === "shoggoth" && openRun.runId
+    ? delivery?.runId === openRun.runId
+    : typeof openRun.startedAt === "number" && openRun.startedAt === delivery?.startedAt;
+  const exactDelivery = matches ? delivery : null;
   const groupBound = openRun.deliveryTarget === "group" || exactDelivery?.deliveryTarget === "group";
+  const groupChat = exactDelivery ? exactDelivery.groupChat : openRun.groupChat;
   return {
     sessionKey: groupBound ? null : canonicalCronSessionKey(
       openRun.agentId,
       exactDelivery?.sessionKey || openRun.sessionKey,
     ),
-    report: firstNonBlankText(exactDelivery?.fullText, exactDelivery?.summary, openRun.summary),
+    report: groupBound ? firstNonBlankText(
+      exactDelivery?.fullText,
+      exactDelivery?.groupChat ? exactDelivery.summary : undefined,
+      !exactDelivery && openRun.groupChat ? openRun.summary : undefined,
+    ) : firstNonBlankText(exactDelivery?.fullText, exactDelivery?.summary, openRun.summary),
+    ...(groupBound && groupChat ? { groupChat } : {}),
   };
 }

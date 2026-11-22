@@ -282,6 +282,23 @@ class BackgroundTaskService {
     return tasks;
   }
 
+  listApprovals() {
+    const runs = this.dispatcher.listRuns({ source: "chat", status: "waiting_approval" });
+    runs.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+    const approvals = [];
+    for (const run of runs) {
+      const record = this.store.findByChildSession(run.sourceId);
+      if (!record || record.profileId !== run.profileId || record.closedReason || record.stopRequestedAt !== null
+        || currentGeneration(record).runId !== run.id || !this.#sourceSession(record.sourceSessionKey, record.profileId)) continue;
+      const interaction = this.#coordinator().getRunSnapshot(run.id)?.interaction;
+      const expiresAt = interaction?.payload?.expiresAt;
+      if (interaction?.type === "approval" && (expiresAt == null || expiresAt > this.now())) {
+        approvals.push({ profileId: record.profileId, sessionKey: record.sourceSessionKey, taskId: record.id });
+      }
+    }
+    return approvals;
+  }
+
   detail(sessionKey, taskId) {
     const session = this.#uiSession(sessionKey);
     const record = this.#owned(taskId, session);
@@ -511,15 +528,27 @@ class BackgroundTaskService {
       && source.runtimeBindingId === record.bindingId;
     const input = { operationId: opId, profileId: record.profileId, workspace: record.childWorkspace,
       createdAt: record.createdAt };
+    const { CHAT_PERMISSION_MODES, adapterPermissionMode, initialRuntimePermissionMode, isUnifiedPermissionMode }
+      = require("./runtime-permission-modes");
     if (sameBinding) input.parentSessionKey = source.sessionKey;
     else {
       const binding = this.productStore.getAgentRuntimeBinding(record.profileId, record.bindingId);
       if (!binding?.enabled) { this.#close(record.id, "start_failed"); return null; }
       input.defaultBindingId = binding.id;
-      input.permissionMode = require("./runtime-permission-modes").initialRuntimePermissionMode(binding.runtime);
+      // A task on another Runtime keeps the conversation's choice (full access
+      // stays full access); a legacy native mode falls back to the default.
+      const initial = initialRuntimePermissionMode(binding.runtime);
+      input.permissionMode = initial !== null && source && source.status !== "delete_pending"
+        && isUnifiedPermissionMode(source.permissionMode) ? source.permissionMode : initial;
     }
-    const session = prior?.sessionKey ? this.sessions.getSession(prior.sessionKey) : this.sessions.createSession(input);
+    let session = prior?.sessionKey ? this.sessions.getSession(prior.sessionKey) : this.sessions.createSession(input);
     if (!session) { this.#close(record.id, "child_deleted"); return null; }
+    // Grok Auto blocks unattended actions without asking anyone, since a task
+    // has no user message to authorize them. Ask mode routes them to the task
+    // card's approval instead. Replays after a crash repeat this step.
+    if (record.runtime === "grok-build" && adapterPermissionMode(record.runtime, session.permissionMode) === "auto") {
+      session = this.sessions.setPermissionMode(session.sessionKey, CHAT_PERMISSION_MODES.ask);
+    }
     this.transcripts.ensureSession({ profileId: session.profileId, sessionId: session.id });
     return session;
   }

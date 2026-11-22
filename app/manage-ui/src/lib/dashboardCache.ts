@@ -114,6 +114,9 @@ function isRunEntry(value: unknown): boolean {
   ];
   return (
     optionalStrings.every((key) => hasOptionalString(value, key)) &&
+    (value.groupChat === undefined || value.deliveryTarget === "group" && isRecord(value.groupChat)
+      && typeof value.groupChat.groupId === "string" && !!value.groupChat.groupId
+      && typeof value.groupChat.ownerScope === "string" && !!value.groupChat.ownerScope) &&
     hasOptionalFiniteNumber(value, "startedAt", true) &&
     hasOptionalFiniteNumber(value, "finishedAt", true) &&
     hasOptionalFiniteNumber(value, "durationMs") &&

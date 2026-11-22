@@ -20,9 +20,15 @@ const TARGETS = Object.freeze({
   "grok-cli": "https://cli-chat-proxy.grok.com/v1/",
   "grok-api-key": "https://api.x.ai/v1/",
 });
+// Codex 0.170 sends `session-id`/`thread-id` (hyphenated); ChatGPT derives
+// prompt-cache affinity from `session-id`. `x-codex-turn-state` is the per-turn
+// sticky-routing token Codex echoes back; `session_id` stays for older clients.
 const HEADERS = new Set(["authorization", "chatgpt-account-id", "openai-organization", "openai-project",
-  "openai-beta", "accept", "user-agent", "originator", "version", "session_id",
+  "openai-beta", "accept", "user-agent", "originator", "version", "session_id", "session-id", "thread-id",
+  "x-codex-window-id", "x-codex-turn-state", "x-codex-routing-hint",
   "x-codex-beta-features", "x-openai-client-user-agent", "x-client-request-id"]);
+const TURN_STATE_HEADER = "x-codex-turn-state";
+const TURN_STATE = /^[\x21-\x7e]{1,1024}$/u;
 const GROK_HEADERS = new Set(["authorization", "accept", "user-agent", "x-grok-client-mode", "x-xai-token-auth",
   "x-authenticateresponse", "x-grok-client-version", "x-grok-client-identifier", "x-grok-conv-group-id", "x-grok-conv-id",
   "x-grok-req-id", "x-grok-model-override", "x-grok-session-id", "x-grok-agent-id", "x-grok-turn-idx", "traceparent",
@@ -111,14 +117,17 @@ class ModelSecretGateway {
       || req.headers.host !== `127.0.0.1:${this.server.address().port}`
       || req.headers["content-encoding"] && req.headers["content-encoding"] !== "identity"
       || req.method === "POST" && !/^application\/json(?:\s*;|$)/iu.test(req.headers["content-type"] || "")) fail("SECRET_MODEL_REQUEST_INVALID");
-    const match = /^\/([a-f0-9]{64})\/(responses(?:\/(?:compact|input_tokens))?|alpha\/search|project|ready|models|api-key)$/u.exec(req.url || "");
+    const match = /^\/([a-f0-9]{64})\/(responses(?:\/(?:compact|input_tokens))?|alpha\/search|project|ready|models|api-key|billing(?:\?format=credits)?)$/u.exec(req.url || "");
     const route = match && this.routes.get(match[1]);
-    const discovery = match && ["models", "api-key"].includes(match[2]);
+    // The Grok ACP billing extension uses the same base URL as inference.
+    const billing = match?.[2].startsWith("billing");
+    const accountRead = billing || match && ["models", "api-key"].includes(match[2]);
     const search = match?.[2] === "alpha/search";
     if (!route || (["project", "ready"].includes(match[2])) !== (route.target === null)
       || match[2] === "ready" && !route.resolveScope
       || search && route.target !== TARGETS.chatgpt
-      || discovery && (!route.grok || req.method !== "GET") || !discovery && req.method !== "POST") fail("SECRET_MODEL_ROUTE_INVALID");
+      || billing && route.target !== TARGETS["grok-cli"]
+      || accountRead && (!route.grok || req.method !== "GET") || !accountRead && req.method !== "POST") fail("SECRET_MODEL_ROUTE_INVALID");
     const controller = new AbortController(); route.requests.add(controller); this.inflight.add(controller);
     const assertCurrent = () => {
       if (this.closed || !route.active || controller.signal.aborted) fail("SECRET_MODEL_CANCELED");
@@ -130,7 +139,7 @@ class ModelSecretGateway {
     try {
       assertCurrent();
       await route.validateRequest(); assertCurrent();
-      if (discovery) {
+      if (accountRead) {
         if (req.headers["transfer-encoding"] || Number(req.headers["content-length"] || 0) !== 0) fail("SECRET_MODEL_REQUEST_INVALID");
         const headers = {};
         for (const [name, value] of Object.entries(req.headers)) if (GROK_HEADERS.has(name) && typeof value === "string") headers[name] = value;
@@ -233,13 +242,18 @@ class ModelSecretGateway {
         return;
       }
       // No Location, Set-Cookie, auth material or provider diagnostics are
-      // reflected. Successful model streams keep their protocol bytes.
+      // reflected. Successful model streams keep their protocol bytes and the
+      // opaque Codex turn-state token, so later requests of the turn keep cache locality.
       // The fixed Responses endpoint can omit Content-Type on a valid SSE
       // response. In that case its request's stream flag is authoritative.
       const responseType = responseHeaders["content-type"]
         || (projected.stream === true ? "text/event-stream" : "application/json");
       sse = /text\/event-stream/iu.test(responseType);
-      const writeHeaders = () => res.writeHead(statusCode, { "Content-Type": responseType, "Cache-Control": "no-store" });
+      const turnState = responseHeaders[TURN_STATE_HEADER];
+      const turnStateHeader = !route.grok && typeof turnState === "string" && TURN_STATE.test(turnState)
+        ? { [TURN_STATE_HEADER]: turnState } : {};
+      const writeHeaders = () => res.writeHead(statusCode, { "Content-Type": responseType, "Cache-Control": "no-store",
+        ...turnStateHeader });
       const receipt = this.receiptStream(this.provenance && !disclosed ? requestScope : null, sse, {
         holdPrelude: route.grok && sse,
         requireTerminal: disclosed && sse && !route.grok,

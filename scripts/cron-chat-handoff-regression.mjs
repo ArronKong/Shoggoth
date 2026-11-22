@@ -216,6 +216,20 @@ try {
       { sessionKey: "agent:hermes-worker:historical-session", report: "historical summary" },
     );
   });
+  check("Dashboard 原生群任务按运行 ID 选择已投递正文和群聊目标", () => {
+    const groupChat = { groupId: "newsroom", ownerScope: "fixture-owner" };
+    const run = { ...openRun, backendId: "shoggoth", runId: "requested-run", deliveryTarget: "group" };
+    const delivery = { runId: "requested-run", startedAt: 2000, fullText: "published report", groupChat };
+    assert.deepEqual(selectCronRunHandoffSource(run, delivery), {
+      sessionKey: null, report: "published report", groupChat,
+    });
+    assert.deepEqual(selectCronRunHandoffSource(run, { ...delivery, runId: "other-run", startedAt: 1000 }), {
+      sessionKey: null, report: null,
+    });
+    assert.deepEqual(selectCronRunHandoffSource(run, { runId: "requested-run", summary: "raw progress" }), {
+      sessionKey: null, report: null,
+    });
+  });
 } finally {
   compiled.cleanup();
   delete globalThis.sessionStorage;
@@ -235,7 +249,7 @@ check("Cron 使用共享正文选择器与 canonical key", () => {
 
 check("Dashboard 正文与 session 共用同运行 handoff selector", () => {
   assert.match(dashboard, /selectCronRunHandoffSource\(openRun, delivery\)/);
-  assert.match(dashboard, /const visibleRunText = runHandoff\.report;/);
+  assert.match(dashboard, /const visibleRunText = .*: runHandoff\.report;/);
   assert.match(dashboard, /writeCronChatHandoff\(backendId, sessionKey, report\)/);
   assert.match(dashboard, /backend=\$\{encodeURIComponent\(backendId\)\}&session=\$\{encodeURIComponent\(sessionKey\)\}/);
   assert.match(dashboard, /runSessionKey && visibleRunText && visibleRunText\.trim\(\)/);

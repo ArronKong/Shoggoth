@@ -371,6 +371,29 @@ function dueOccurrences(job, wallNow, recovering, scanOptions = {}) {
   return { occurrences: [latest], skip: false };
 }
 
+function countCoalesced(job, before, runIndex, budget) {
+  let after = null;
+  for (const run of runIndex.byJob.get(job.id) || []) {
+    const at = runIndex.occurrenceByRunId.get(run.id)?.scheduledAt;
+    if (at >= job.nextRunAt && at < before && (after === null || at > after)) after = at;
+  }
+  // A previous tick can have committed an earlier WorkRun without advancing
+  // the job. Its decision already owns the earlier part of the backlog.
+  const start = after === null ? job.nextRunAt : computeNextOccurrence(job.schedule, after);
+  if (start === null || start >= before) return { count: 0, capped: false, steps: 0 };
+  if (job.schedule.kind === "every") {
+    const count = (BigInt(before) - BigInt(start)) / BigInt(job.schedule.everyMs);
+    return { count: Number(count), capped: false, steps: 0 };
+  }
+  let cursor = start;
+  let count = 0;
+  while (cursor !== null && cursor < before && count < budget) {
+    count += 1;
+    cursor = computeNextOccurrence(job.schedule, cursor);
+  }
+  return { count, capped: cursor !== null && cursor < before, steps: count };
+}
+
 class NativeCronScheduler {
   constructor(options = {}) {
     if (!options.cronStore || typeof options.cronStore.listJobs !== "function"
@@ -395,6 +418,7 @@ class NativeCronScheduler {
       ["randomUUID", options.randomUUID], ["onFatalError", options.onFatalError],
       ["resolveWorkspace", options.resolveWorkspace],
       ["resolveTargetState", options.resolveTargetState],
+      ["isSystemCronJob", options.isSystemCronJob],
     ]) {
       if (value !== undefined && typeof value !== "function") {
         throw schedulerError("CRON_SCHEDULER_OPTIONS_INVALID", `${name} 必须是函数`);
@@ -412,6 +436,7 @@ class NativeCronScheduler {
     this.onFatalError = options.onFatalError || null;
     this.resolveWorkspace = options.resolveWorkspace || ((_profileId, workspace) => workspace);
     this.resolveTargetState = options.resolveTargetState || (() => "enabled");
+    this.isSystemCronJob = options.isSystemCronJob || (() => false);
     this.state = "new";
     this.generation = 0;
     this.openPromise = null;
@@ -767,6 +792,8 @@ class NativeCronScheduler {
     const cronRuns = this.#cronRunSnapshot(generation);
     let cronRunCount = cronRuns.length;
     const runIndex = this.#buildRunIndex(cronRuns);
+    const recovery = this.cronStore.recovery;
+    if (recovering) recovery?.discardUnbound(cronRuns);
     const durablePlans = this.#recoverDurableRuns(generation, cronRuns, runIndex);
     const executionPlans = new Map(durablePlans.map((plan) => [plan.run.id, plan]));
     const overlapReservations = new Map();
@@ -784,6 +811,7 @@ class NativeCronScheduler {
     this.lastWallNow = wallNow;
     this.lastMonotonicNow = monotonicNow;
     this.#observeWallClock(wallNow);
+    let coalescedScanBudget = MAX_CRON_SCAN_STEPS;
     for (const initial of this.cronStore.listJobs({ enabled: true })) {
       this.#assertGeneration(generation);
       const job = this.cronStore.getJob(initial.id);
@@ -792,6 +820,7 @@ class NativeCronScheduler {
       if (!frozen.job.enabled || frozen.job.nextRunAt === null
         || frozen.job.nextRunAt > wallNow) continue;
       const due = dueOccurrences(frozen.job, wallNow, recovering);
+      const expired = recovery?.oneShotExpired(frozen.job, wallNow) === true && !this.isSystemCronJob(job.id);
       const plans = [];
       const reservation = this.#overlapReservation(overlapReservations, job.id);
       for (const scheduledAt of due.occurrences) {
@@ -802,7 +831,7 @@ class NativeCronScheduler {
         const newDisposition = owners.length === 0
           ? (frozen.targetDisabled
             ? "CRON_TARGET_DISABLED"
-            : this.#disposition(frozen.job, due.skip, reservation))
+            : this.#disposition(frozen.job, due.skip || expired, reservation))
           : null;
         const key = occurrenceKey(
           job.id, scheduledAt, frozen.execution, occurrenceDisposition(newDisposition),
@@ -832,6 +861,21 @@ class NativeCronScheduler {
             };
             this.#assertOccurrenceBinding(proposed, frozen, scheduledAt);
             const proposedId = this.#newRunId();
+            const missed = newDisposition === "CRON_MISFIRE_SKIPPED";
+            const catchUp = newDisposition === null
+              && ((recovering && scheduledAt < wallNow) || job.nextRunAt < scheduledAt);
+            if (recovery && (missed || catchUp)) {
+              const coalesced = scheduledAt === due.occurrences[0]
+                ? countCoalesced(frozen.job, scheduledAt, runIndex, coalescedScanBudget)
+                : { count: 0, capped: false, steps: 0 };
+              coalescedScanBudget -= coalesced.steps;
+              recovery.record({ id: proposedId, ...proposed }, scheduledAt, {
+                reason: missed ? (expired ? "expired" : "missed") : "catch-up",
+                decidedAt: wallNow,
+                coalescedCount: coalesced.count,
+                countCapped: coalesced.capped,
+              });
+            }
             run = newDisposition === "CRON_TARGET_DISABLED"
               ? this.dispatcher.enqueueSkipped(
                 { id: proposedId, ...proposed }, "CRON_TARGET_DISABLED",

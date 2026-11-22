@@ -108,6 +108,7 @@ const {
   validateUsageSeries,
 } = require("../agent-service/token-usage-protocol");
 const { collectSessionOutputArtifacts } = require("./session-output-artifacts");
+const { validResultPage } = require("../group-result-content");
 const { readSessionImage, resolveImageReference } = require("./session-image-media");
 const { CONNECTOR_METHODS, validateConnectorParams, validateConnectorResult } = require("./connector-dto");
 const { CONNECTOR_PUBLIC_MESSAGES } = require("./connector-errors");
@@ -896,6 +897,10 @@ function validateServiceEventPage(value, params) {
     } else if (event.type === "group.changed") {
       if (!exactObject(event.payload, ["groupId"]) || !safeString(event.payload.groupId, 128)
         || event.payload.groupId.length === 0) throw new TypeError("invalid group chat event");
+    } else if (event.type === "background.task.approvals.changed") {
+      if (!exactObject(event.payload, ["profileId"]) || !UUID_PATTERN.test(event.payload.profileId)) {
+        throw new TypeError("invalid background approvals event");
+      }
     } else if (event.type === "learning.changed") {
       const p = event.payload;
       if (!exactObject(p, ["noticeId", "profileId", "change", "attention"])
@@ -3942,6 +3947,16 @@ class ShoggothBackend extends AgentBackend {
     } catch (error) { throw safeError(error, "BACKGROUND_TASK_UNAVAILABLE"); }
   }
 
+  async listBackgroundTaskApprovals() {
+    const { approvals } = await this._call("background.task.approvals", {});
+    return approvals.flatMap(({ profileId, sessionKey, taskId }) => {
+      const profile = this._profilesById.get(profileId);
+      const session = this._sessionsByKey.get(sessionKey);
+      return profile && session?.profileId === profileId
+        ? [{ sessionKey: gatewaySessionKey(profile.agentId, sessionKey), taskId }] : [];
+    });
+  }
+
   async getBackgroundTask(sessionKey, taskId) {
     const target = this._sessionTarget(sessionKey);
     try {
@@ -4615,6 +4630,10 @@ class ShoggothBackend extends AgentBackend {
     try { this._readyNotifier?.(); } catch {}
   }
 
+  _notifyBackgroundTaskApprovalsChanged() {
+    try { this._sessionActivityNotifier?.({ kind: "background.tasks.approvals.changed" }); } catch {}
+  }
+
   async _pollServiceEvents(generation) {
     let nextDelayMs = this.serviceEventPollMs;
     try {
@@ -4634,6 +4653,7 @@ class ShoggothBackend extends AgentBackend {
         if (!reconciled || generation !== this._generation || this._state !== "started"
           || this._serviceEventPollGeneration !== generation) return;
         this._serviceEventStreamId = result.streamId;
+        this._notifyBackgroundTaskApprovalsChanged();
         nextDelayMs = 0;
       } else if (result.gap) {
         if (this._rows.some((row) => row.contextCapabilities)) await this._refreshManagedProfiles();
@@ -4642,6 +4662,7 @@ class ShoggothBackend extends AgentBackend {
         if (!reconciled || generation !== this._generation || this._state !== "started"
           || this._serviceEventPollGeneration !== generation) return;
         this._serviceEventCursor = result.nextCursor;
+        this._notifyBackgroundTaskApprovalsChanged();
         nextDelayMs = 0;
       } else {
         for (const event of result.events) {
@@ -4663,6 +4684,8 @@ class ShoggothBackend extends AgentBackend {
                 catch { /* UI listeners cannot invalidate a context observation. */ }
               }
             }
+          } else if (event.type === "background.task.approvals.changed") {
+            if (this._profilesById.has(event.payload.profileId)) this._notifyBackgroundTaskApprovalsChanged();
           } else if (event.type === "background.task.changed") {
             const profile = this._profilesById.get(event.payload.profileId);
             if (profile && UUID_PATTERN.test(event.payload.sessionKey || "")) {
@@ -6200,9 +6223,9 @@ class ShoggothBackend extends AgentBackend {
     if (isCodexAutomationId(id)) return this._codexAutomations().result(id, runId);
     if (typeof runId !== "string" || !runId) return { source: "none" };
     const target = await this._loadCronTarget(id);
-    const values = await this._cronRunsForTarget(target);
+    const values = await this._cronRunsForDelivery(target);
     const match = values.find((value) => value.run.id === runId);
-    return this._readCronDelivery(target, match ? this._mapCronRun(match) : null);
+    return this._readCronDelivery(target, match);
   }
 
   async getCronJobs(options = {}) {
@@ -6408,7 +6431,7 @@ class ShoggothBackend extends AgentBackend {
     }
   }
 
-  _mapCronRun(value) {
+  _mapCronRun(value, { publishedGroupSummary = false } = {}) {
     const run = value.run;
     let status;
     if (run.status === "completed") status = "ok";
@@ -6416,6 +6439,8 @@ class ShoggothBackend extends AgentBackend {
     else if (["failed", "canceled", "interrupted"].includes(run.status)) status = "error";
     else status = "running";
     const startedAt = run.startedAt === null ? value.createdAt : run.startedAt;
+    const groupBound = value.deliveryTarget === "group";
+    const groupChat = value.groupReply && { groupId: value.groupReply.groupId, ownerScope: value.groupReply.ownerScope };
     const output = {
       id: run.id,
       kind: value.kind,
@@ -6423,28 +6448,45 @@ class ShoggothBackend extends AgentBackend {
       finishedAt: run.finishedAt,
       status,
       error: run.errorCode || undefined,
-      summary: value.cronOutput?.disposition === "silent" ? undefined : run.resultSummary || undefined,
+      summary: value.cronOutput?.disposition === "silent" ? undefined
+        : publishedGroupSummary && groupBound && status === "ok" ? value.groupReply?.preview : run.resultSummary || undefined,
+      ...(value.scheduleRecovery ? { scheduleRecovery: {
+        ...value.scheduleRecovery, scheduledAt: value.createdAt, startedAt: run.startedAt,
+      } } : {}),
       ...(value.cronOutput ? { outputDisposition: value.cronOutput.disposition,
         ...(value.cronOutput.disposition === "silent" ? { deliveryStatus: "suppressed",
           deliverySuppressionReason: value.cronOutput.reason } : {}) } : {}),
       ...(value.sessionKey ? { sessionKey: gatewaySessionKey(
         this._assertKnownProfileId(run.profileId).agentId, value.sessionKey,
       ) } : {}),
-      ...(value.deliveryTarget === "group" ? { deliveryTarget: "group" } : {}),
+      ...(groupBound ? { deliveryTarget: "group" } : {}),
+      ...(groupChat ? { groupChat } : {}),
       durationMs: run.finishedAt === null ? undefined : Math.max(0, run.finishedAt - startedAt),
     };
     return output;
   }
 
-  async _cronRunsForJob(jobId, profile, failureSinceMs) {
+  async _cronRunsForJob(jobId, profile, { failureSinceMs, groupReplySinceMs, includeScheduleRecovery = false } = {}) {
     const params = { jobId, status: null };
+    const withFailure = Number.isSafeInteger(failureSinceMs) && failureSinceMs >= 0;
+    const withGroupReply = Number.isSafeInteger(groupReplySinceMs) && groupReplySinceMs >= 0;
+    const withDetails = { ...params,
+      ...(withFailure ? { failureSinceMs } : {}), ...(withGroupReply ? { groupReplySinceMs } : {}) };
     let values;
-    if (Number.isSafeInteger(failureSinceMs) && failureSinceMs >= 0) {
+    if (includeScheduleRecovery) {
       try {
-        values = await this._domainPage("cron.run.list", { ...params, failureSinceMs }, "runs");
+        values = await this._domainPage("cron.run.list", { ...withDetails, includeScheduleRecovery: true }, "runs");
+      } catch (error) {
+        if (!["INVALID_PARAMS", "RESPONSE_TOO_LARGE"].includes(error?.code)) throw error;
+      }
+    }
+    if (values === undefined && (withFailure || withGroupReply)) {
+      try {
+        values = await this._domainPage("cron.run.list", withDetails, "runs");
       } catch (error) {
         // Keep the list available on older Services and when optional details exceed its budget.
         if (!["INVALID_PARAMS", "RESPONSE_TOO_LARGE"].includes(error?.code)) throw error;
+        if (withFailure && withGroupReply) return this._cronRunsForJob(jobId, profile, { failureSinceMs });
       }
     }
     values ??= await this._domainPage("cron.run.list", params, "runs");
@@ -6458,6 +6500,13 @@ class ShoggothBackend extends AgentBackend {
 
   async _cronRunsForTarget(target) {
     return this._cronRunsForJob(target.jobId, target.profile);
+  }
+
+  _cronRunsForDelivery(target) {
+    return this._cronRunsForJob(target.jobId, target.profile, {
+      includeScheduleRecovery: true,
+      ...(target.job.deliveryTarget === "group" ? { groupReplySinceMs: 0 } : {}),
+    });
   }
 
   async runCronJob(id, mode = "force", options = {}) {
@@ -6486,7 +6535,9 @@ class ShoggothBackend extends AgentBackend {
   async getCronRuns(id, options = {}) {
     if (isCodexAutomationId(id)) return this._codexAutomations().runs(id, options);
     const target = await this._loadCronTarget(id);
-    let runs = (await this._cronRunsForTarget(target)).map((value) => this._mapCronRun(value));
+    let runs = (await this._cronRunsForJob(target.jobId, target.profile, {
+      includeScheduleRecovery: true,
+    })).map((value) => this._mapCronRun(value));
     if (options.status) runs = runs.filter((value) => value.status === options.status);
     if (options.query) {
       const query = String(options.query).toLocaleLowerCase();
@@ -6548,16 +6599,21 @@ class ShoggothBackend extends AgentBackend {
       const [jobs, descriptionsByJob] = await Promise.all([
         this._domainPage("cron.job.list", { profileId: profile.id, enabled: null }, "jobs"),
         mapBounded([...new Set(recent.map(run => run.sourceId))], MAX_PROFILE_SESSION_CONCURRENCY,
-          jobId => this._cronRunsForJob(jobId, profile, failedJobs.has(jobId) ? sinceMs : undefined)),
+          jobId => this._cronRunsForJob(jobId, profile, {
+            failureSinceMs: failedJobs.has(jobId) ? sinceMs : undefined,
+            groupReplySinceMs: sinceMs,
+            includeScheduleRecovery: true,
+          })),
       ]);
       const byId = new Map(jobs.map(job => [job.id, job]));
       const descriptions = new Map(descriptionsByJob.flat().map(value => [value.run.id, value]));
       return recent.map(value => {
-        const description = descriptions.get(value.id) || { run: value, createdAt: value.createdAt };
-        const run = this._mapCronRun(description);
+        const job = byId.get(value.sourceId);
+        const description = descriptions.get(value.id) || { run: value, createdAt: value.createdAt, deliveryTarget: job?.deliveryTarget };
+        const run = this._mapCronRun(description, { publishedGroupSummary: true });
         if (run.error) run.error = runtimeErrorMessage(displayedRuntimeErrorCode(run.error, description.failure), description.failure);
         return { backendId: this.id, jobId: `${this.id}:${value.sourceId}`,
-          jobName: byId.get(value.sourceId)?.name, agentId: profile.agentId, runId: value.id, ...run };
+          jobName: job?.name, agentId: profile.agentId, runId: value.id, ...run };
       });
     });
     const rows = grouped.flat();
@@ -6980,24 +7036,24 @@ class ShoggothBackend extends AgentBackend {
   async getCronLatestDelivery(id, atMs) {
     if (isCodexAutomationId(id)) return this._codexAutomations().latest(id, atMs);
     const target = await this._loadCronTarget(id);
-    const values = await this._cronRunsForTarget(target);
+    const values = await this._cronRunsForDelivery(target);
     let selected = null;
     if (Number.isFinite(atMs)) {
       const matches = values.filter((value) => (
         value.kind === "schedule" && value.createdAt === atMs
       ));
       if (matches.length > 1) throw safeError(null, "CRON_RUN_BINDING_INVALID");
-      selected = matches.length === 1 ? this._mapCronRun(matches[0]) : null;
+      selected = matches[0] ?? null;
     } else {
-      selected = values.map((value) => this._mapCronRun(value))
-        .filter((value) => typeof value.startedAt === "number")
-        .sort((left, right) => right.startedAt - left.startedAt)[0] || null;
+      selected = values.sort((left, right) => (right.run.startedAt ?? right.createdAt)
+        - (left.run.startedAt ?? left.createdAt))[0] ?? null;
     }
     return this._readCronDelivery(target, selected);
   }
 
-  async _readCronDelivery(target, selected) {
-    if (!selected) return { source: "none" };
+  async _readCronDelivery(target, value) {
+    if (!value) return { source: "none" };
+    const selected = this._mapCronRun(value, { publishedGroupSummary: true });
     const groupBound = target.job.deliveryTarget === "group";
     const output = {
       status: selected.status,
@@ -7010,6 +7066,8 @@ class ShoggothBackend extends AgentBackend {
       ...(selected.error ? { error: selected.error } : {}),
       ...(!groupBound && selected.sessionKey ? { sessionKey: selected.sessionKey } : {}),
       ...(groupBound ? { deliveryTarget: "group" } : {}),
+      ...(selected.groupChat ? { groupChat: selected.groupChat } : {}),
+      ...(selected.scheduleRecovery ? { scheduleRecovery: selected.scheduleRecovery } : {}),
       runId: selected.id,
     };
     if (selected.outputDisposition) output.outputDisposition = selected.outputDisposition;
@@ -7020,6 +7078,13 @@ class ShoggothBackend extends AgentBackend {
       if (selected.deliverySuppressionReason) output.deliverySuppressionReason = selected.deliverySuppressionReason;
       return output;
     }
+    if (value.groupReply) {
+      try {
+        output.fullText = await this._readPublishedCronReply(value.groupReply);
+        output.source = "group";
+      } catch { /* The published preview is still available. */ }
+      return output;
+    }
     if (selected.sessionKey && selected.status === "ok") {
       const messages = await this._cronRunMessages(target, selected, { audit: groupBound });
       const final = messages.filter((message) => message.role === "assistant")
@@ -7028,6 +7093,24 @@ class ShoggothBackend extends AgentBackend {
       if (final) { output.fullText = final; output.source = "transcript"; }
     }
     return output;
+  }
+
+  async _readPublishedCronReply({ groupId, seq, digest }) {
+    const chunks = [];
+    let offset = 0;
+    for (let index = 0; index < this.maxPages; index++) {
+      const { page } = await this.readGroupChatMessage(groupId, { seq, offset, digest });
+      if (!validResultPage(page) || page.offset !== offset || page.digest !== digest
+        || page.totalBytes > MAX_HISTORY_BYTES) throw safeError(null, "CONTENT_CURSOR_INVALID");
+      chunks.push(page.text);
+      if (page.nextOffset === null) {
+        const text = chunks.join("");
+        if (sha256(text) !== digest) throw safeError(null, "RESOURCE_CHANGED");
+        return text;
+      }
+      offset = page.nextOffset;
+    }
+    throw safeError(null, "PAGE_LIMIT_EXCEEDED");
   }
 
   async _cronRunMessages(target, selected, { audit = false } = {}) {

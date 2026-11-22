@@ -6,6 +6,7 @@ import DashboardPage from "../../app/manage-ui/src/pages/DashboardPage";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import { FALLBACK_BACKEND_DESCRIPTORS } from "../../app/manage-ui/src/lib/backends";
+import { runPageRefresh } from "../../app/manage-ui/src/lib/page-refresh";
 import i18n from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
@@ -16,6 +17,10 @@ const now = Date.now(), createdAt = now - 80_000, startedAt = now - 42_000;
 const runId = "preview-task", title = "Tibo 额度重置监测";
 let stage = options.get("state") === "completed" ? 4 : 0, outage = false, detailReads = 0, summaryReads = 0;
 let fullReportAvailable = true;
+let groupMode: "private" | "legacy" | "published" = "private";
+let groupReportGate: Promise<void> | undefined;
+const groupChat = { groupId: "fixture-newsroom", ownerScope: "ga1:fixture-owner" };
+const progressText = "task-557 has been launched in the background.";
 const resultText = "### 监测结果\n\n官方公告与生效时区已核对，本次监测已完成。\n\n- **公告来源**：已核对\n- **生效时间**：已完成时区换算\n\n这是一条用于查看界面效果的示例任务。";
 const reportEnding = "这是一条用于查看界面效果的示例任务。";
 const summaryOnlyText = "已核对公告摘要。";
@@ -40,13 +45,16 @@ const detail = () => ({ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, s
 const running = () => stage >= 4 ? [] : [{ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, kind: "cron", title, agentId: "preview-grok", status: "running", createdAt, startedAt }];
 const resultRun = () => ({ backendId: "shoggoth", jobId: "shoggoth:preview-job", jobName: title, runId,
   agentId: "preview-grok", sessionKey: "preview-session", startedAt, finishedAt: now + 20_000,
-  status: "ok", completionStatus: "succeeded", durationMs: 62_000, summary: resultText.split(reportEnding)[0] });
+  status: "ok", completionStatus: "succeeded", durationMs: 62_000,
+  summary: groupMode === "legacy" ? progressText + resultText : resultText.split(reportEnding)[0],
+  ...(groupMode === "private" ? {} : { deliveryTarget: "group" }),
+  ...(groupMode === "published" ? { groupChat } : {}) });
 const summary = () => ({ generatedAt: Date.now(), sinceMs: new Date().setHours(0, 0, 0, 0),
   status: [{ id: "shoggoth", name: "Shoggoth", connected: true, info: {} }], runs: stage >= 4 ? [resultRun()] : [],
   running: [{ backend: "shoggoth", supported: true, items: running() }], approvals: [],
   usage: [{ backend: "shoggoth", today: { totalCost: 0.86, totalTokens: 640_000 }, yesterday: { totalCost: 1.2, totalTokens: 820_000 }, availability: "complete" }],
   artifacts: [], activityPage: { items: stage >= 4 ? [{ id: `cron:shoggoth:preview-job:run:${runId}`, kind: "cron", backendId: "shoggoth",
-    occurredAt: now + 20_000, severity: "success", title, agentId: "preview-grok", summary: resultText, run: resultRun() }] : [], hasMore: false, degradedSources: [] },
+    occurredAt: now + 20_000, severity: "success", title, agentId: "preview-grok", summary: resultRun().summary, run: resultRun() }] : [], hasMore: false, degradedSources: [] },
   taskStats: { total: { ok: 8, error: 1 }, byKind: {}, byAgent: [{ agentId: "preview-grok", backendId: "shoggoth", ok: 3, error: 0 }], complete: true },
 });
 state.fetch = async (url: unknown, init: RequestInit = {}) => {
@@ -58,9 +66,14 @@ state.fetch = async (url: unknown, init: RequestInit = {}) => {
   else if (p.pathname === "/__api/dashboard/activities") value = summary().activityPage;
   else if (p.pathname === "/__api/cron/jobs" && p.searchParams.get("id") === "shoggoth:preview-job"
     && p.searchParams.get("action") === "result" && p.searchParams.get("runId") === runId) {
-    value = fullReportAvailable
-      ? { ...resultRun(), fullText: resultText, source: "transcript" }
-      : { ...resultRun(), summary: `### 监测结果\n\n${summaryOnlyText}`, source: "summary" };
+    if (groupMode !== "private") {
+      await groupReportGate;
+      value = { ...resultRun(), groupChat, sessionKey: undefined, fullText: resultText, source: "group" };
+    } else {
+      value = fullReportAvailable
+        ? { ...resultRun(), fullText: resultText, source: "transcript" }
+        : { ...resultRun(), summary: `### 监测结果\n\n${summaryOnlyText}`, source: "summary" };
+    }
   }
   else if (p.pathname.startsWith("/__api/dashboard/runs/")) {
     detailReads++;
@@ -144,8 +157,39 @@ state.runFixture = async () => {
   if (document.querySelectorAll('[role="dialog"] .cron-delivery-md h3').length !== 1) throw Error("Existing result Markdown missing");
   if (body().includes(i18n.t("turnLab.processLabel"))) throw Error("Execution activity leaked into result dialog");
   if (!document.querySelector(`[role="dialog"] button[aria-label="${i18n.t("cron.askInChat")}"]`)) throw Error("Existing result follow-up action missing");
+
+  const closeLabel = i18n.t("common.close");
+  document.querySelector<HTMLButtonElement>(`[role="dialog"] button[aria-label="${closeLabel}"]`)!.click();
+  await wait(() => !document.querySelector('[role="dialog"]'), "Private result dialog did not close");
+  const groupRow = () => document.querySelector<HTMLButtonElement>('.dash-feed .dash-run');
+  groupMode = "legacy";
+  await runPageRefresh("/dashboard");
+  await wait(() => groupRow() && !groupRow()!.innerText.includes("监测结果"), "Unverified cached group summary remained in the feed");
+  if (groupRow()!.innerText.includes(progressText)) throw Error("Progress leaked into the group feed");
+  groupMode = "published";
+  await runPageRefresh("/dashboard");
+  await wait(() => groupRow()?.innerText.includes("监测结果"), "The published group preview was not shown");
+  let resolveGroupReport!: () => void;
+  groupReportGate = new Promise<void>(resolve => { resolveGroupReport = resolve; });
+  groupRow()!.click();
+  await wait(() => body().includes(i18n.t("dashboard.fullTextLoading")), "Group result did not wait for the published text");
+  if (markdown() || body().includes(progressText)) throw Error("A provisional group report appeared");
+  resolveGroupReport();
+  await wait(() => markdown()?.textContent?.includes(reportEnding), "The published group result did not load");
+  if (body().includes(progressText)) throw Error("Progress leaked into the published group result");
+  const groupLink = document.querySelector<HTMLButtonElement>(`[role="dialog"] button[aria-label="${i18n.t("chat.openOriginalGroup")}"]`);
+  if (!groupLink || document.querySelector(`[role="dialog"] button[aria-label="${i18n.t("cron.askInChat")}"]`)) {
+    throw Error("The group result offered the wrong chat action");
+  }
+  groupLink.click();
+  await wait(() => {
+    const [route, query] = location.hash.slice(1).split("?");
+    const target = new URLSearchParams(query);
+    return route === "/chat" && target.get("group") === groupChat.groupId && target.get("ownerScope") === groupChat.ownerScope;
+  }, "The chat action did not open the original group route");
   return { language, theme, publicProgress: true, liveUpdate: true, separateResultCard: true, separateResultDialog: true,
-    replyDoesNotCompleteRun: true, markdown: true, failureRetention: true, terminalStopsPolling: true, reads: detailReads };
+    replyDoesNotCompleteRun: true, markdown: true, failureRetention: true, terminalStopsPolling: true,
+    publishedGroupReport: true, originalGroupLink: true, reads: detailReads };
 };
 if (!options.has("test")) {
   const bar = document.createElement("div");

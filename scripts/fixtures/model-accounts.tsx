@@ -9,6 +9,7 @@ export function installModelAccountsFixture(state: any) {
   const descriptors = FALLBACK_BACKEND_DESCRIPTORS;
   const loggedIn = new Map(descriptors.map(({ id }) => [id, true]));
   const versions = new Map(descriptors.map(({ id }) => [id, 1]));
+  const quotaRuntimes = new Set(["codex", "codex-harness", "deepseek-harness", "grok-build"]);
   state.accountCalls = [];
   const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
   return async (url: URL, init?: RequestInit): Promise<Response | undefined> => {
@@ -17,7 +18,8 @@ export function installModelAccountsFixture(state: any) {
     const name = descriptor?.name || backend;
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     const route = url.pathname;
-    state.accountCalls.push({ route, backend, method: init?.method || "GET", body });
+    const quotaProvider = url.searchParams.get("provider");
+    state.accountCalls.push({ route, backend, method: init?.method || "GET", body, quotaProvider });
     if (route === "/__api/oauth") {
       const connected = loggedIn.get(backend);
       if (state.delayAccountBackend === backend) await new Promise(resolve => setTimeout(resolve, 450));
@@ -27,12 +29,21 @@ export function installModelAccountsFixture(state: any) {
           source: "fixture", sourceLabel: "预览账号", tokenPreview: null, expiresAt: null,
           hasRefreshToken: false, error: null } };
       return reply({ profiles: ["default"], providers: backend === "shoggoth" ? [
-        ["antigravity", "Antigravity"], ["codex", "Codex CLI"], ["codex-harness", "Shoggoth"],
+        ["antigravity", "Antigravity"], ["codex", "Codex"], ["codex-harness", "Shoggoth"],
         ["deepseek-harness", "DeepSeek"], ["grok-build", "Grok"], ["opencode", "OpenCode"], ["pi", "Pi"],
-      ].map(([runtime, name]) => ({ ...account, name,
+      ].map(([runtime, name]) => ({ ...account, name, canReadQuota: quotaRuntimes.has(runtime),
         id: runtime === "codex-harness" ? "shoggoth-internal-codex-default-v1" : `native-${runtime}-default-v1`,
         ...(runtime === "codex-harness" ? {} : { connection: { id: runtime,
           enabled: !state.fixtureConfig().disabledBackends.includes(runtime) } }) })) : [account] });
+    }
+    if (route === "/__api/oauth/quota") {
+      if (quotaProvider === "native-deepseek-harness-default-v1") return reply({
+        status: "available", checkedAt: Date.now(), windows: [],
+        credits: { kind: "wallets", wallets: [{ kind: "recharge", amount: 0, unit: "CNY" }] },
+      });
+      if (quotaProvider === "native-grok-build-default-v1" && !state.grokQuotaReady) return reply({ status: "unavailable" });
+      return reply({ status: "available", checkedAt: Date.now(), accountName: "预览账号",
+        windows: [{ label: null, durationMinutes: 10_080, usedPercent: 60, resetsAt: null }] });
     }
     if (route === "/__api/oauth/start") {
       if (state.failAccountLogin) return reply({ error: "fixture login failed" }, 500);
@@ -114,10 +125,12 @@ export async function runModelAccountsFixture(state: any) {
     }
   };
   const buttons = (selector: string) => [...document.querySelectorAll<HTMLButtonElement>(selector)];
+  const providerRow = (name: string) => buttons(".models-page button").find(button =>
+    button.querySelector("[class*='oauthName']")?.textContent?.trim() === name);
   const selectBackend = async (name: string) => {
     buttons('.models-page [role="tab"]').find(button => button.getAttribute("aria-label") === name || button.textContent?.trim() === name)!.click();
     await wait(() => buttons('.models-page [role="tab"]').some(button => button.getAttribute("aria-label") === name && button.getAttribute("aria-selected") === "true"), `${name} selected`);
-    await wait(() => buttons(".models-page button").some(button => button.title === (name === "Shoggoth" ? "Codex CLI" : `${name} 账号`)), `${name} accounts`);
+    await wait(() => providerRow(name === "Shoggoth" ? "Codex" : `${name} 账号`), `${name} accounts`);
     const titleSelector = name === "Shoggoth" ? "#models-runtime-accounts h4" : "#keys-oauth h4";
     await wait(() => document.querySelector(titleSelector)?.textContent?.trim() === "Provider 登录（OAuth）", `${name} shared OAuth title`);
   };
@@ -138,8 +151,30 @@ export async function runModelAccountsFixture(state: any) {
   const grid = document.querySelector("#models-runtime-accounts [class*='oauthGrid']")!;
   check(getComputedStyle(grid).gridTemplateColumns.split(" ").length === 2, "native accounts use the shared two-column grid");
   check(grid.children.length === 7, "local CLI accounts are aggregated in the OAuth card");
-  check(buttons("#models-runtime-accounts button").some(button => button.title === "Shoggoth (内置codex)"),
-    "the Models page identifies the bundled Codex account");
+  check(providerRow("Shoggoth (内置codex)"), "the Models page identifies the bundled Codex account");
+  const checkQuota = async (name: string, expected: string) => {
+    const row = providerRow(name)!;
+    const popup = () => document.querySelector(`[aria-label="${name} · 账号额度"]`);
+    row.scrollIntoView({ block: "nearest" });
+    const { left, top, width, height } = row.getBoundingClientRect();
+    const input = state.fixtureHost.accountInput;
+    await input({ x: left + width / 2, y: top + height / 2 });
+    try {
+      await wait(() => popup()?.textContent?.includes(expected), `${name} quota shows ${expected}`);
+    } catch (error) {
+      throw Error(`${String(error)} (expanded=${row.getAttribute("aria-expanded")}, popup=${popup()?.textContent})`);
+    }
+    await input(null);
+    await wait(() => !popup(), `${name} quota dismissed`);
+    await input({ x: 3, y: 3 });
+  };
+  await checkQuota("DeepSeek", "¥0.00");
+  await checkQuota("OpenCode", "此运行时的账号额度暂未接入");
+  await checkQuota("Grok", "暂时无法读取账号额度");
+  state.grokQuotaReady = true;
+  await checkQuota("Grok", "剩余 40%");
+  check(!state.accountCalls.some((call: any) => call.quotaProvider === "native-opencode-default-v1"),
+    "an unintegrated runtime explains its status without attempting an upstream read");
   const removeButton = buttons("#models-runtime-accounts button").find(button => button.title === "删除")!;
   check(removeButton.querySelector("svg") && !removeButton.textContent?.trim()
     && removeButton.getAttribute("aria-label")?.includes("Fixture endpoint"), "custom model delete is an accessible icon action");
@@ -158,7 +193,7 @@ export async function runModelAccountsFixture(state: any) {
   cancelModel.click();
   await wait(() => !document.querySelector('[role="dialog"]'), "custom model form closed");
   const beforeLogin = oauthReads();
-  accountButton("Codex CLI — 重新登录").click();
+  accountButton("Codex — 重新登录").click();
   await wait(() => document.querySelector('[role="dialog"] input'), "login code input");
   const submitCode = buttons('[role="dialog"] button').find(button => button.textContent?.includes("提交"))!;
   check(submitCode.getBoundingClientRect().height === 48 && getComputedStyle(submitCode).borderRadius === "32px",
@@ -169,12 +204,12 @@ export async function runModelAccountsFixture(state: any) {
   await pause(20);
   buttons('[role="dialog"] button').find(button => button.textContent?.includes("提交"))!.click();
   await wait(() => oauthReads() > beforeLogin && !document.querySelector('[role="dialog"]'), "successful login refreshes account state");
-  accountButton("Codex CLI — 断开").click();
+  accountButton("Codex — 断开").click();
   await wait(() => document.querySelector('[role="alertdialog"]'), "account disconnect confirmation");
   buttons('[role="alertdialog"] button').at(-1)!.click();
-  await wait(() => state.fixtureConfig().disabledBackends.includes("codex") && accountButton("Codex CLI — 重新连接"), "native disconnect updates its app connection");
-  accountButton("Codex CLI — 重新连接").click();
-  await wait(() => !state.fixtureConfig().disabledBackends.includes("codex") && accountButton("Codex CLI — 断开"), "native reconnect restores its app connection");
+  await wait(() => state.fixtureConfig().disabledBackends.includes("codex") && accountButton("Codex — 重新连接"), "native disconnect updates its app connection");
+  accountButton("Codex — 重新连接").click();
+  await wait(() => !state.fixtureConfig().disabledBackends.includes("codex") && accountButton("Codex — 断开"), "native reconnect restores its app connection");
   check(!state.accountCalls.some((call: any) => call.route === "/__api/oauth/disconnect"), "native connection toggle never signs out");
   check(!document.querySelector(".model-grid, #models-runtime-accounts details"), "account changes keep catalog and per-assistant defaults hidden");
 
@@ -192,5 +227,5 @@ export async function runModelAccountsFixture(state: any) {
   buttons('[role="dialog"] button').find(button => button.getAttribute("aria-label") === "关闭")!.click();
   await selectBackend("Shoggoth");
   check(!document.querySelector('[role="dialog"]'), "backend switch must not retain the previous account dialog");
-  return { writes: state.fixtureWrites, checks: "settings removal / 7 local CLI accounts in shared OAuth grid / endpoints without catalog or assistant-default reads / native connection toggle / login refresh / backend isolation / delayed responses / login failure" };
+  return { writes: state.fixtureWrites, checks: "settings removal / 7 local CLI accounts in shared OAuth grid / account quota and retry / endpoints without catalog or assistant-default reads / native connection toggle / login refresh / backend isolation / delayed responses / login failure" };
 }

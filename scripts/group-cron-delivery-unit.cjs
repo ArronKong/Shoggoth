@@ -18,6 +18,7 @@ const { InspirationRuntime } = require("./fixtures/inspiration-runtime.cjs");
 const id = () => crypto.randomUUID();
 const QUOTE = "持续查看示例观测站的维护公告，有新消息请发到本群";
 const REPORT = "有一项新的官方披露。[示例公告](https://example.com/news/observatory-update)";
+const PROGRESS_TEXT = "task-557 has been launched in the background. I will wait for it to complete.";
 const INTERVAL = 30 * 60_000;
 
 async function until(read, label) {
@@ -45,9 +46,15 @@ test("group Cron uses shared silence and duplicate rules and delivers only to it
     runtimePool: { async get() { return host; }, async stopAll() {} },
   });
   const activities = [];
+  let runWithLegacySummary;
   const backend = new ShoggothBackend({ paths, serviceEventPollMs: 25,
     async requestService(servicePaths, request, options) {
       const result = await requestService(servicePaths, request, options);
+      if (request.method === "cron.run.list" && runWithLegacySummary) {
+        for (const item of result.runs) {
+          if (item.run.id === runWithLegacySummary) item.run.resultSummary = PROGRESS_TEXT + REPORT;
+        }
+      }
       return request.method === "service.status" ? { ...result, mcpCredentialsLocked: false } : result;
     },
   });
@@ -203,6 +210,18 @@ test("group Cron uses shared silence and duplicate rules and delivers only to it
   assert.equal(message.origin.runId, firstReport.id);
   assert.equal((await history(other.id)).messages.length, 0);
   assert.ok((await history(newsroom.id)).messages.some(item => item.id === message.id));
+  runWithLegacySummary = firstReport.id;
+  const dashboard = await backend.getRecentCronRuns({ sinceMs: firstReport.createdAt });
+  const activity = dashboard.runs.find(item => item.runId === firstReport.id);
+  assert.equal(activity?.summary, REPORT, "the preview must come from the published message");
+  const exact = await backend.getCronRunResult(backendJobId, firstReport.id);
+  assert.equal(exact.fullText, REPORT);
+  assert.equal(exact.source, "group");
+  assert.equal(exact.sessionKey, undefined);
+  assert.deepEqual(exact.groupChat, { groupId: newsroom.id, ownerScope: view.ownerScope });
+  assert.deepEqual((await backend.getCronLatestDelivery(backendJobId)).groupChat, exact.groupChat);
+  const withheld = await backend.getCronRunResult(backendJobId, previouslyWithheld.id);
+  assert.equal(withheld.groupChat, undefined, "an unpublished run must not suggest a group result exists");
   const reportEvents = (await ipc("events.subscribe", { afterSeq: beforeReport })).events;
   assert.ok(reportEvents.some(event => event.type === "group.changed" && event.payload.groupId === newsroom.id));
   assert.ok(!reportEvents.some(event => event.type === "federation.chat.terminal" && event.payload.runId === firstReport.id));
@@ -231,6 +250,11 @@ test("group Cron uses shared silence and duplicate rules and delivers only to it
   await service.start();
   const recovered = await until(() => updates().find(item => item.origin.runId === missedDelivery.id), "recovered publication");
   assert.equal(recovered.body, recoveredReport);
+  assert.equal(await backend.start(), true);
+  const recoveredDelivery = await backend.getCronRunResult(backendJobId, missedDelivery.id);
+  assert.equal(recoveredDelivery.fullText, recoveredReport, "paginate the published result after restart");
+  assert.deepEqual(recoveredDelivery.groupChat, exact.groupChat);
+  await backend.stop();
   const published = updates().map(item => item.id);
   assert.deepEqual(published, [homepageMessage.id, message.id, recovered.id]);
 

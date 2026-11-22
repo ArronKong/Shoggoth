@@ -764,6 +764,11 @@ class AgentBackend {
     return { supported: false, tasks: [] };
   }
 
+  /** Pending background approvals across the backend's visible source sessions. */
+  async listBackgroundTaskApprovals() {
+    return [];
+  }
+
   /** One task's status, the child's public messages, files and pending request. */
   async getBackgroundTask(sessionKey, taskId) {
     throw Object.assign(new Error("此后端不支持后台任务"), { code: "BACKGROUND_TASK_UNSUPPORTED" });
@@ -1407,6 +1412,8 @@ class AgentBackend {
    * Recent run history for a cron job (newest first).
    * Runs may expose outputDisposition (pending/deliver/silent), deliveryStatus
    * and deliverySuppressionReason. Silent runs retain execution audit details.
+   * Scheduled recovery may expose scheduleRecovery with its reason, planned
+   * and actual start times, decision time, and the coalesced occurrence count.
    * @param {string} id full unified id
    * @param {object} [options] backend-specific query filters
    * @returns {Promise<{runs: Array<{startedAt?: number|null, finishedAt?: number|null, status?: string, error?: string, sessionKey?: string}>}>}

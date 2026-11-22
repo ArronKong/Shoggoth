@@ -4,7 +4,7 @@ const METHODS = Object.freeze(["source", "owner", "list", "get", "create", "upda
   .map(name => `codex.automation.${name}`));
 const MESSAGES = Object.freeze({
   CODEX_AUTOMATION_UNAVAILABLE: "Codex 客户端任务来源暂不可用",
-  CODEX_AUTOMATION_OWNER_UNAVAILABLE: "需要一个默认运行时为 Codex CLI 的 AI 助理",
+  CODEX_AUTOMATION_OWNER_UNAVAILABLE: "需要一个默认运行时为 Codex 的 AI 助理",
   CODEX_AUTOMATION_NOT_FOUND: "Codex 任务或运行记录不存在",
   CODEX_AUTOMATION_FORMAT_UNSUPPORTED: "任务文件格式不受支持，原文件已保留",
   CODEX_AUTOMATION_STORAGE_UNKNOWN: "无法确认客户端存储模式，暂不能写入任务",
@@ -14,7 +14,7 @@ const MESSAGES = Object.freeze({
   CODEX_AUTOMATION_CONFLICT: "任务已被另一端修改，请刷新后再保存",
   CODEX_AUTOMATION_COMMIT_UNCERTAIN: "保存结果待核验，请刷新任务；不要重复提交",
   CODEX_AUTOMATION_SCHEDULE_UNSUPPORTED: "当前客户端支持每周指定时间或按小时间隔；原高级计划已保留",
-  CODEX_AUTOMATION_MODEL_UNAVAILABLE: "所选模型或思考强度在原生 Codex CLI 中不可用",
+  CODEX_AUTOMATION_MODEL_UNAVAILABLE: "所选模型或思考强度在本机 Codex 中不可用",
   CODEX_AUTOMATION_RUN_UNSUPPORTED: "此任务需要 Codex 客户端原会话或项目环境，暂不能在 Shoggoth 手动运行",
   CODEX_AUTOMATION_WORKSPACE_UNAVAILABLE: "任务工作目录不可用，未使用默认目录代替",
   CODEX_AUTOMATION_RUN_BUSY: "此任务已有进行中的手动运行，请查看运行记录",

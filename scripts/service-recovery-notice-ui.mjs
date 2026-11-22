@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { viteArtworkFixturePlugin } from './fixtures/vite-artwork-esbuild.cjs';
 
 const root = path.resolve(process.env.SHOGGOTH_TEST_SOURCE_ROOT || path.join(import.meta.dirname, '..'));
 const uiRequire = createRequire(path.join(root, 'app/manage-ui/package.json'));
@@ -54,6 +55,10 @@ window.addEventListener('error', event => { state.fixtureError = event.error?.st
 window.addEventListener('unhandledrejection', event => { state.fixtureError = String(event.reason?.stack || event.reason); });
 window.fetch = async (input, init = {}) => {
   const url = new URL(String(input), location.href);
+  // Credential preparation only echoes the draft; it is not a service mutation.
+  if (url.pathname === '/__api/chat/secrets/prepare') {
+    return new Response(JSON.stringify({ text: JSON.parse(String(init.body)).text, references: [], version: 1 }));
+  }
   if (init.method && init.method !== 'GET') {
     apiWrites++; if (url.pathname.includes('/shoggoth/background')) backgroundActions++;
     if (url.pathname === '/__api/shoggoth/background/repair') {
@@ -406,7 +411,7 @@ state.runDraftReturnFixture = async () => {
 try {
   fs.mkdirSync(output, { recursive: true });
   await build({ stdin: { contents: fixture, loader: 'tsx', resolveDir: root }, bundle: true, format: 'esm', jsx: 'automatic',
-    nodePaths: [path.join(root, 'app/manage-ui/node_modules')], define: { 'process.env.NODE_ENV': '"production"' },
+    plugins: [viteArtworkFixturePlugin(root)], nodePaths: [path.join(root, 'app/manage-ui/node_modules')], define: { 'process.env.NODE_ENV': '"production"' },
     loader: { '.woff2': 'dataurl', '.woff': 'dataurl', '.svg': 'dataurl', '.webp': 'dataurl', '.png': 'dataurl' },
     outfile: path.join(temp, 'fixture.js'), logLevel: 'silent' });
   fs.writeFileSync(path.join(temp, 'index.html'), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column;height:100vh}</style><div id="root"></div><script type="module" src="fixture.js"></script>');

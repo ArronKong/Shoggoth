@@ -71,7 +71,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   ...require("../core/connector-errors").CONNECTOR_PUBLIC_MESSAGES,
   PLUGIN_PLATFORM_RETIRED: "旧插件选择已停用，请重新选择连接器账号",
   ...require("./active-memory-command-protocol").MESSAGES,
-  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用原生 Codex CLI",
+  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用本机 Codex",
   CODEX_DESKTOP_CONTEXT_CHANGED: "原对话的 Shoggoth 记忆或撤回状态已变化，请新建会话继续",
   CODEX_DESKTOP_BUSY: "原对话正在 Codex 客户端运行，请等当前回合结束后再发送",
   ...INSPIRATION_PUBLIC_MESSAGES,

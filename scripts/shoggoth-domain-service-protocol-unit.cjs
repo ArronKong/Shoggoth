@@ -726,6 +726,25 @@ test("cron.run.list 使用 exact run/kind/createdAt item 并锁定 retry lineage
   }
 });
 
+test("cron.run.list exposes a recovery decision only for an opted-in scheduled occurrence", () => {
+  const method = "cron.run.list";
+  const params = { ...VALID_PARAMS.get(method), status: null, includeScheduleRecovery: true };
+  assert.deepEqual(validateDomainServiceParams(method, params), params);
+  const scheduleRecovery = { reason: "catch-up", decidedAt: 1000, coalescedCount: 3, countCapped: false };
+  const item = cronRunListItem({ createdAt: 900, scheduleRecovery });
+  const page = run => ({ runs: [run], nextCursor: null, hasMore: false });
+  assert.deepEqual(validateDomainServiceResult(method, page(item), params), page(item));
+  const { includeScheduleRecovery, ...legacyParams } = params;
+  expectCode(() => validateDomainServiceResult(method, page(item), legacyParams), "DOMAIN_RESPONSE_INVALID");
+  for (const invalid of [
+    { ...item, kind: "manual" },
+    { ...item, scheduleRecovery: { ...scheduleRecovery, decidedAt: 899 } },
+    { ...item, scheduleRecovery: { ...scheduleRecovery, reason: "expired" } },
+  ]) {
+    expectCode(() => validateDomainServiceResult(method, page(invalid), params), "DOMAIN_RESPONSE_INVALID");
+  }
+});
+
 test("cron.run.list returns bounded provider detail only for a requested failed occurrence", () => {
   const method = "cron.run.list";
   const legacy = { ...VALID_PARAMS.get(method), status: null };
@@ -750,6 +769,31 @@ test("cron.run.list returns bounded provider detail only for a requested failed 
     { ...item.failure, upstreamCode: "denied response" },
   ]) {
     expectCode(() => validateDomainServiceResult(method, page({ ...item, failure }), params), "DOMAIN_RESPONSE_INVALID");
+  }
+});
+
+test("cron.run.list returns a bounded published reply for a requested completed group occurrence", () => {
+  const method = "cron.run.list";
+  const legacy = { ...VALID_PARAMS.get(method), status: null };
+  const params = { ...legacy, groupReplySinceMs: 114 };
+  const groupReply = { groupId: "newsroom", ownerScope: "ga1:fixture", seq: 4,
+    digest: "a".repeat(64), preview: "已投递的报告" };
+  const item = {
+    ...cronRunListItem({ run: workRun({ source: "cron", sourceId: JOB_ID, status: "completed", startedAt: 113, finishedAt: 114 }) }),
+    deliveryTarget: "group", groupReply,
+  };
+  const page = (run) => ({ runs: [run], nextCursor: null, hasMore: false });
+  assert.deepEqual(validateDomainServiceParams(method, params), params);
+  assert.deepEqual(validateDomainServiceResult(method, page(item), params), page(item));
+  expectCode(() => validateDomainServiceResult(method, page(item), legacy), "DOMAIN_RESPONSE_INVALID");
+  expectCode(() => validateDomainServiceResult(method, page(item), { ...params, groupReplySinceMs: 115 }), "DOMAIN_RESPONSE_INVALID");
+  for (const invalid of [
+    { ...item, cronOutput: { version: 1, disposition: "silent", reason: "token" } },
+    { ...item, deliveryTarget: undefined },
+    { ...item, groupReply: { ...groupReply, digest: "unverified" } },
+    { ...item, groupReply: { ...groupReply, preview: "例".repeat(342) } },
+  ]) {
+    expectCode(() => validateDomainServiceResult(method, page(invalid), params), "DOMAIN_RESPONSE_INVALID");
   }
 });
 

@@ -1,13 +1,13 @@
 "use strict";
 
 // Exact Service request shapes for the App's background-task management. The
-// UI acts only on the conversation the user has open; ownership is checked
-// again by BackgroundTaskService against the stored source conversation.
+// Task details and controls are scoped to the stored source conversation.
 const { serviceError } = require("./security");
 const { MAX_GENERATIONS, MAX_MESSAGE_BYTES, MAX_TASK_TITLE_BYTES, TASK_ID_PATTERN, validText } = require("./background-task-protocol");
 
 const BACKGROUND_TASK_SERVICE_METHODS = new Set([
   "background.task.list", "background.task.get", "background.task.session", "background.task.send", "background.task.cancel", "background.task.respond",
+  "background.task.approvals",
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -24,6 +24,10 @@ function validAnswers(value) {
 }
 
 function validateBackgroundTaskParams(method, params) {
+  if (method === "background.task.approvals") {
+    if (!exact(params, [])) throw invalid();
+    return params;
+  }
   const base = ["sessionKey"];
   const withTask = [...base, "taskId"];
   let ok;
@@ -74,6 +78,9 @@ function validateBackgroundTaskResult(method, value) {
   let ok;
   if (method === "background.task.list") ok = exact(value, ["tasks"]) && Array.isArray(value.tasks) && value.tasks.length <= 4096
     && value.tasks.every(validTask);
+  else if (method === "background.task.approvals") ok = exact(value, ["approvals"]) && Array.isArray(value.approvals)
+    && value.approvals.length <= 256 && value.approvals.every(item => exact(item, ["profileId", "sessionKey", "taskId"])
+      && UUID.test(item.profileId) && UUID.test(item.sessionKey) && TASK_ID_PATTERN.test(item.taskId));
   else if (method === "background.task.session") {
     ok = exact(value, ["session", "brief"]) && (value.brief === null || validMessage(value.brief) && value.brief.role === "user")
       && (value.session === null

@@ -6,7 +6,7 @@ const { RUNTIME_SUPPORT_CODES } = require("./runtime-support");
 const SESSION_RUNTIME_METHODS = Object.freeze(["chat.session.runtime.get", "chat.session.runtime.state",
   "chat.session.runtime.switch", "chat.session.runtime.model.set"]);
 const SESSION_RUNTIME_PUBLIC_MESSAGES = Object.freeze({
-  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用原生 Codex CLI",
+  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用本机 Codex",
   INVALID_PARAMS: "会话 Runtime 请求无效", SESSION_RUNTIME_RESPONSE_INVALID: "会话 Runtime 响应无效",
   POLICY_REJECTED: "目标必须是该 Agent 已启用的 Runtime Binding", SESSION_BUSY: "会话仍有排队或运行中的任务",
   SESSION_RUNTIME_DISABLED: "手动续接尚未启用", SESSION_RUNTIME_CONFIRMATION_REQUIRED: "请确认模型和权限设置的变化",

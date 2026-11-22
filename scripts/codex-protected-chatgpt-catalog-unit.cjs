@@ -95,3 +95,23 @@ test("an explicit effort or an unprotected ChatGPT host keeps the execution proc
   assert.equal(listed.data[0].model, "gpt-6.2-sol");
   assert.deepEqual(gets, ["chatgpt", null], "the management host reads its own catalog");
 });
+
+// Codex lets only the host that started or resumed a thread write it. Deleting
+// a just-used protected conversation through the management host failed with
+// "already has an active writer" (2026-11-21), leaving a durable delete_pending.
+test("session maintenance reuses the live host that owns the native thread", async () => {
+  const { adapter, management, projection, gets } = fixture();
+  const owner = await adapter.acquire(BINDING, { modelSecretProviderKind: "chatgpt" });
+  const sessionId = await protectedThread(owner, "gpt-6.2-sol");
+  assert.equal(owner.host, projection);
+
+  const affine = await adapter.acquire(BINDING, { sessionAffinity: sessionId, workspace: "/fixture/workspace" });
+  assert.equal(affine, owner, "the writer host handles rename/archive/delete of its own thread");
+  assert.deepEqual(gets, ["chatgpt"], "no extra host is acquired for the owned thread");
+
+  const unknown = await adapter.acquire(BINDING, { sessionAffinity: "another-thread" });
+  assert.equal(unknown.host, management, "a thread no live host owns keeps the default host");
+  const other = await adapter.acquire({ ...BINDING, runtimeProfileId: "other-runtime" }, { sessionAffinity: sessionId })
+    .catch(error => error);
+  assert.ok(other instanceof Error || other.host !== projection, "affinity never crosses Bindings");
+});

@@ -13,6 +13,7 @@ const { WORKSPACE_EXECUTION_CAPABILITY } = require("./workspace-execution-tools"
 const { MCP_CONNECTOR_TOOL_CAPABILITIES } = require("./mcp-connector-tools");
 const { MEMORY_GET_ARGUMENT_HINT } = require("./memory-mcp-tools");
 const { TOOL_CAPABILITIES: APPLE_DEVICE_TOOL_CAPABILITIES } = require("./apple-device-tools");
+const { BACKGROUND_TASK_RUNTIMES } = require("./background-task-protocol");
 const PRODUCT_CAPABILITIES = Object.freeze([
   ...APPLE_DEVICE_TOOL_CAPABILITIES,
   ...MCP_CONNECTOR_TOOL_CAPABILITIES,
@@ -314,6 +315,10 @@ const TOOL_WORKFLOWS = Object.freeze({
   system_application_search: "For application launch, first call system_application_search with the user's exact name, including localized names, then launch the returned exact bundle ID or path. Never use shell discovery such as ls or mdfind for this workflow, never run the macOS open command or osascript application automation, and never execute an .app/Contents/MacOS binary directly. An empty shell or sandbox result does not prove an application is absent or damaged; only report the bounded System Host search result.",
 });
 
+// Sent only to chat runs on Runtimes that can host a background task, so other
+// Runtimes, sources and external Agents never see a tool they cannot use.
+const BACKGROUND_TASK_DISPATCH_INSTRUCTION = "Background tasks: in a direct chat with the user (not a group chat and not inside a background task session), when a new request is a long, self-contained job with a clear deliverable, such as research across many sources, collecting or organizing many items, or a report or file that needs many tool calls or more than a few minutes, call the Shoggoth background_task_start product tool instead of doing the job in this turn, unless the user asks you to do it here. Load the mcp__shoggoth namespace first when the runtime uses namespaced tool discovery. After the receipt, tell the user in their language that it runs in the background. Keep short answers, quick edits and work that needs the user's decisions along the way in this conversation. Decide before you start; do not hand off a job you have already started in this turn.";
+
 const SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS = SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS
   .split("\n").slice(1).filter((line) => !SHOGGOTH_NATIVE_AGENT_INSTRUCTIONS.includes(line)).join("\n");
 
@@ -348,6 +353,7 @@ function shoggothProductDeveloperInstructions(context = null, { includeWorkSourc
     ...(context.runtime === "codex" ? [
       "In the Codex runtime, never call the unnamespaced Codex request_user_input tool; it is unavailable in the runtime's Default mode. Use the namespaced Shoggoth product tool instead.",
     ] : []),
+    ...(context.source === "chat" && BACKGROUND_TASK_RUNTIMES.has(context.runtime) ? [BACKGROUND_TASK_DISPATCH_INSTRUCTION] : []),
     ...(includeWorkSource ? [`Trusted current work source: ${trusted}`] : []),
   ].join("\n");
 }
@@ -357,6 +363,7 @@ module.exports = {
   PRODUCT_DOMAIN_NOTES,
   SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS,
   SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS,
+  BACKGROUND_TASK_DISPATCH_INSTRUCTION,
   shoggothProductDeveloperInstructions,
   productToolDescription,
   productToolAnnotations,

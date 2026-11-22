@@ -32,7 +32,9 @@ class RuntimeAdapterRegistry {
     this.isIdle = options.isIdle;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.now = options.now || Date.now;
-    this.warmTimeoutMs = options.warmTimeoutMs ?? 15 * 60_000;
+    // Recent Codex Bindings stay warm long enough that a reply after a short
+    // break skips process start, login read and native thread resume.
+    this.warmTimeoutMs = options.warmTimeoutMs ?? 60 * 60_000;
     this.setTimer = options.setTimer || setTimeout;
     this.clearTimer = options.clearTimer || clearTimeout;
     this.onIdleError = options.onIdleError || (() => {});

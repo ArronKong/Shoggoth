@@ -322,9 +322,10 @@ class DeepSeekHarnessRuntimeHost {
         fs: this.fs,
       });
       const versionResult = await this._runControl(["--version"], { timeoutMs: 5_000 });
-      // The bridge protocol and projection readiness establish compatibility;
-      // an older, newer or nonstandard CLI label is only diagnostic metadata.
-      this.cliVersion = versionResult.code === 0 ? parseDeepSeekHarnessVersion(versionResult.stdout) : null;
+      // The bridge still establishes compatibility. Keep the prerelease label
+      // for account requests that identify the calling client.
+      this.cliVersion = versionResult.code === 0 && parseDeepSeekHarnessVersion(versionResult.stdout)
+        ? versionResult.stdout.trim() : null;
       this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new DeepSeekHarnessRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", DEEPSEEK_HARNESS_RUNTIME),

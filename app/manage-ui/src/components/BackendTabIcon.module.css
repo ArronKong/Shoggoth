@@ -29,6 +29,7 @@
 .icon[data-backend-icon="antigravity"] { --backend-tab-glyph: url("../assets/backend-icons/antigravity.svg"); }
 .icon[data-backend-icon="deepseek-harness"] { --backend-tab-glyph: url("../assets/backend-icons/deepseek-harness.svg"); }
 .icon[data-backend-icon="pi"] { --backend-tab-glyph: url("../assets/backend-icons/pi.svg"); }
+.icon[data-backend-icon="opencode"] { --backend-tab-glyph: url("../assets/provider-logos/opencode-go.svg"); }
 
 /* These three exports contain the inner glyph rather than its 16px frame. */
 .icon[data-backend-icon="shoggoth"]::before { inset: 9.375% 8.59375% 8.59375% 9.375%; }

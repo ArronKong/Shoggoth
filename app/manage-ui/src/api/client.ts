@@ -1,6 +1,6 @@
 import type {
   AgentManagedFile,
-  BackgroundTask, BackgroundTaskControl, BackgroundTaskDetail, BackgroundTaskList,
+  BackgroundTask, BackgroundTaskApproval, BackgroundTaskControl, BackgroundTaskDetail, BackgroundTaskList,
   AgentManagedFilesPage,
   InteractiveApprovalChoice,
   DesktopProductTelemetryBridge,
@@ -2397,6 +2397,10 @@ export async function forkSessionAtEntry(
 export async function listBackgroundTasks(sessionKey: string, signal?: AbortSignal): Promise<BackgroundTaskList> {
   const q = new URLSearchParams({ sessionKey });
   return jsonFetch<BackgroundTaskList>(`/__api/background-tasks?${q.toString()}`, { signal });
+}
+
+export function listBackgroundTaskApprovals(signal?: AbortSignal): Promise<{ approvals: BackgroundTaskApproval[] }> {
+  return jsonFetch(`/__api/background-tasks/approvals`, { signal });
 }
 
 export async function getBackgroundTask(sessionKey: string, taskId: string, signal?: AbortSignal): Promise<BackgroundTaskDetail> {

@@ -249,7 +249,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     if (freshSession && (before.status !== "draft" || before.runtimeSessionId !== null
       || before.runtimeBindingId !== params.bindingId)) throw serviceError("POLICY_REJECTED", "新会话的模型绑定已变化");
     if (isDesktop(before) && params.bindingId !== before.runtimeBindingId) {
-      throw serviceError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用原生 Codex CLI");
+      throw serviceError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用本机 Codex");
     }
     if (!getNativeRuntimeConfig().flags.runtimeConversationHandoff
       && ((!resetModel && params.model === undefined) || params.bindingId !== before.runtimeBindingId)) {

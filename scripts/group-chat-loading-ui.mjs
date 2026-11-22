@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { viteArtworkFixturePlugin } from './fixtures/vite-artwork-esbuild.cjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.resolve(process.env.GROUP_LOADING_SOURCE_ROOT || root);
@@ -63,13 +64,17 @@ class FixtureSocket{
     const payload=request.method==='sessions.list'?{sessions,hasMore:false}:
       request.method==='agents.list'?{agents:[{id:'fixture',name:'Direct Fixture',backendId:'openclaw'}]}:
       request.method==='chat.history'?{messages:[{role:'user',content:'Existing direct history',timestamp:now}]}:{};
-    setTimeout(()=>this.emit({type:'res',id:request.id,ok:true,payload}),0);}
+    setTimeout(()=>this.emit({type:'res',id:request.id,ok:true,payload}),
+      options.has('coldLink')&&request.method==='sessions.list'?900:0);}
   close(){this.readyState=3;}
 }
 state.WebSocket=FixtureSocket;
 window.addEventListener('error',event=>{state.fixtureError=event.error?.stack||event.message;});
 window.addEventListener('unhandledrejection',event=>{state.fixtureError=String(event.reason);});
-localStorage.clear();localStorage.setItem('shoggoth.chat.sessions.v1',JSON.stringify(sessions));localStorage.setItem('shoggoth.chat.lastActive.v1',key);
+localStorage.clear();
+if(!options.has('coldLink')){
+  localStorage.setItem('shoggoth.chat.sessions.v1',JSON.stringify(sessions));localStorage.setItem('shoggoth.chat.lastActive.v1',key);
+}
 await i18n.changeLanguage(language);document.documentElement.setAttribute('data-theme',language==='en'?'dark':'light');
 createRoot(document.getElementById('root')!).render(<HashRouter><UiProvider><ScrollbarProvider/><ChatPage/></UiProvider></HashRouter>);
 const wait=async(check:()=>unknown,label:string)=>{const end=performance.now()+8000;while(!check()){
@@ -112,31 +117,53 @@ state.runFixture=async()=>{
     if(!visible('History a 61')||visible('History b 60'))throw Error('late read crossed groups');
     const warmCalls=calls.filter(c=>c.kind==='messages'&&c.after!==null);
     if(warmCalls.length<4)throw Error('warm refreshes are not incremental');
+    location.hash='/chat?'+new URLSearchParams({group:'b',ownerScope});
+    await wait(()=>location.hash==='#/chat'&&visible('History b 60')&&!visible('History a 61'),'group link did not open the original chat');
+    location.hash='/chat?'+new URLSearchParams({group:'a',ownerScope:'different-owner'});
+    await wait(()=>location.hash==='#/chat'&&visible(i18n.t('chat.originalGroupUnavailable')),'foreign owner link was not rejected');
+    if(!visible('History b 60')||visible('History a 61'))throw Error('foreign owner link switched groups');
   }
   if(writes)throw Error('unexpected API write');
   return {language,baseline,detailDelayMs:delay,coldMs:cold,warmMs:warm,fromDirectMs:fromDirect,writes,
-    draftPreserved:true,incrementalMessages:true,readCount:calls.length};
+    draftPreserved:true,incrementalMessages:true,groupLinks:!baseline,readCount:calls.length};
+};
+state.runColdLinkFixture=async()=>{
+  await wait(()=>location.hash==='#/chat'&&visible('History b 60')&&visible('Direct Fixture'),'cold group link was displaced by private restoration');
+  const direct=Array.from(document.querySelectorAll<HTMLButtonElement>('.chat-aside__list button.chat-agent')).find(b=>b.textContent?.includes('Direct Fixture'))!;
+  direct.click();await wait(()=>visible('Existing direct history')&&!visible('History b 60'),'explicit private chat selection did not leave the linked group');
+  if(writes)throw Error('unexpected API write');
+  return {coldGroupLink:true,explicitSessionSelection:true,writes};
 };
 `;
 
 try {
   await build({stdin:{contents:fixture,loader:'tsx',resolveDir:sourceRoot},bundle:true,format:'esm',jsx:'automatic',
     nodePaths:[path.join(root,'app/manage-ui/node_modules')],define:{'process.env.NODE_ENV':'"production"'},
-    loader:{'.woff2':'dataurl','.svg':'dataurl','.webp':'dataurl'},outfile:path.join(temp,'fixture.js'),logLevel:'silent'});
+    external:['/fonts/*'],loader:{'.woff2':'dataurl','.svg':'dataurl','.webp':'dataurl','.png':'dataurl'},
+    plugins:[viteArtworkFixturePlugin(sourceRoot)],outfile:path.join(temp,'fixture.js'),logLevel:'silent'});
   fs.writeFileSync(path.join(temp,'index.html'),'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
   fs.mkdirSync(output,{recursive:true});
   const main=path.join(temp,'main.cjs');
   fs.writeFileSync(main,`const {app,BrowserWindow}=require('electron'),fs=require('node:fs');
 app.setPath('userData',${JSON.stringify(path.join(temp,'profile'))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1200,height:800,webPreferences:{backgroundThrottling:false}});let passed=false;
+w.webContents.on('console-message',event=>{if(event.level==='error')console.error(event.message);});
 try{const results=[];for(const language of ['zh-CN','en']){for(const width of [1200,600]){w.setContentSize(width,800);
-await w.loadFile(${JSON.stringify(path.join(temp,'index.html'))},{query:{language,baseline:${JSON.stringify(baseline?'1':'0')}}});
-results.push({...await w.webContents.executeJavaScript('window.runFixture()'),width});
+await w.loadFile(${JSON.stringify(path.join(temp,'index.html'))},{query:{language,baseline:${JSON.stringify(baseline?'1':'0')}},hash:'/chat'});
+await w.webContents.executeJavaScript('new Promise((resolve,reject)=>{const deadline=Date.now()+5000;const check=()=>window.fixtureError?reject(Error(window.fixtureError)):window.runFixture?resolve():Date.now()>deadline?reject(Error("Fixture did not start")):setTimeout(check,20);check()})');
+const result=await w.webContents.executeJavaScript('window.runFixture().catch(error=>({error:error.stack||String(error)}))');
+if(result.error)throw Error(result.error);results.push({...result,width});
 fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'.png',(await w.webContents.capturePage()).toPNG());}}
+if(!${JSON.stringify(baseline)}){
+await w.loadFile(${JSON.stringify(path.join(temp,'index.html'))},{query:{language:'zh-CN',coldLink:'1'},hash:'/chat?group=b&ownerScope=loading-fixture-owner'});
+const cold=await w.webContents.executeJavaScript('window.runColdLinkFixture().catch(error=>({error:error.stack||String(error)}))');
+if(cold.error)throw Error(cold.error);results.push(cold);
+}
 fs.writeFileSync(${JSON.stringify(output)}+'/results.json',JSON.stringify(results,null,2));console.log(JSON.stringify(results));passed=true;
 }catch(e){console.error(e.stack||e);console.error(await w.webContents.executeJavaScript('document.body.innerText.slice(-2000)'));}
 finally{w.destroy();app.exit(passed?0:1);}});`);
-  const child=spawn(require('electron'),[main],{env:{...process.env,ELECTRON_DISABLE_SECURITY_WARNINGS:'true'},stdio:['ignore','pipe','pipe']});
+  const env={...process.env,ELECTRON_DISABLE_SECURITY_WARNINGS:'true'};delete env.ELECTRON_RUN_AS_NODE;
+  const child=spawn(require('electron'),[main],{env,stdio:['ignore','pipe','pipe']});
   child.stdout.on('data',x=>process.stdout.write(x));child.stderr.on('data',x=>process.stderr.write(x));
   const timer=setTimeout(()=>child.kill('SIGTERM'),90000);
   let status;try{status=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});}finally{clearTimeout(timer);}

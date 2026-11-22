@@ -52,6 +52,7 @@ export default function CronRunReportModal({
   model,
   children,
   onAskInChat,
+  onOpenGroupChat,
   onEdit,
   editDisabled,
 }: {
@@ -64,28 +65,40 @@ export default function CronRunReportModal({
   backendId?: string;
   runId?: string;
   agentName?: string;
-  run?: Pick<CronRun, "status" | "summary" | "startedAt" | "finishedAt" | "durationMs"> | null;
+  run?: Pick<CronRun, "status" | "summary" | "startedAt" | "finishedAt" | "durationMs" | "scheduleRecovery"> | null;
   // 这次运行用的模型；页面负责回退（任务配置 / 默认模型文案），缺省显示「—」。
   model?: string;
   children: ReactNode;
   // 没有可追问的会话或正文时不传，图标随之隐藏。
   onAskInChat?: () => void;
+  onOpenGroupChat?: () => void;
   onEdit: () => void;
   editDisabled?: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage || i18n.language;
-  const missedSchedule = isCronMisfireSkipped(backendId, run);
-  const time = formatCronTime(run?.startedAt, locale);
+  const recovery = run?.scheduleRecovery;
+  const expired = recovery?.reason === "expired";
+  const catchUp = recovery?.reason === "catch-up" ? recovery : undefined;
+  const missedSchedule = expired || recovery?.reason === "missed" || isCronMisfireSkipped(backendId, run);
+  const time = formatCronTime(missedSchedule ? recovery?.scheduledAt ?? run?.startedAt
+    : catchUp ? catchUp.startedAt : run?.startedAt, locale);
   const skippedAt = missedSchedule ? formatCronTime(run?.finishedAt, locale) : undefined;
+  const earlierMisses = recovery?.countCapped
+    ? t("cron.runEarlierMissesCapped")
+    : recovery?.coalescedCount
+      ? t(catchUp ? "cron.runEarlierCoalesced" : "cron.runEarlierMisses", { count: recovery.coalescedCount })
+      : "";
   const displayModel = missedSchedule ? undefined : model;
   const timeClass = missedSchedule ? styles.missedRunTime : undefined;
+  const chatAction = onOpenGroupChat ?? onAskInChat;
+  const chatLabel = t(onOpenGroupChat ? "chat.openOriginalGroup" : "cron.askInChat");
 
   const actions = (
     <>
-      {!missedSchedule && onAskInChat && (
-        <button type="button" className={styles.iconBtn} onClick={onAskInChat}
-          aria-label={t("cron.askInChat")} title={t("cron.askInChat")}>
+      {!missedSchedule && chatAction && (
+        <button type="button" className={styles.iconBtn} onClick={chatAction}
+          aria-label={chatLabel} title={chatLabel}>
           <ChatGlyph />
         </button>
       )}
@@ -116,7 +129,7 @@ export default function CronRunReportModal({
             </span>
           ) : "—"}
         </dd>
-        <dt>{t(missedSchedule ? "cron.runScheduledAt" : "dashboard.timeLabel")}</dt>
+        <dt>{t(missedSchedule ? "cron.runScheduledAt" : catchUp ? "cron.runStartedAt" : "dashboard.timeLabel")}</dt>
         <dd className={timeClass} title={missedSchedule ? time : undefined}>{time}</dd>
         <dt>{t("dashboard.modelLabel")}</dt>
         <dd title={displayModel}>{displayModel || "—"}</dd>
@@ -128,14 +141,19 @@ export default function CronRunReportModal({
       <section className={styles.card}>
         {missedSchedule ? (
           <>
-            <h4 className={styles.cardLabel}>{t("cron.resultSkipped")}</h4>
+            <h4 className={styles.cardLabel}>{t(expired ? "cron.resultExpired" : "cron.resultSkipped")}</h4>
             <p data-selectable-text>
               {time !== "—" && `${t("cron.misfireScheduledFor", { time })} `}
-              {t("cron.misfireSkippedMessage")}
+              {t(expired ? "cron.misfireExpiredMessage" : "cron.misfireSkippedMessage")}
+              {earlierMisses && ` ${earlierMisses}`}
             </p>
           </>
         ) : (
           <>
+            {catchUp && <ReportNote>
+              {t("cron.runCatchUp", { time: formatCronTime(catchUp.scheduledAt, locale) })}
+              {earlierMisses && ` · ${earlierMisses}`}
+            </ReportNote>}
             {children}
             {open && backendId && agentId && runId && <ManagedRunFiles backend={backendId} agentId={agentId} runId={runId} />}
           </>

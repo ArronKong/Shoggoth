@@ -10,6 +10,8 @@ const require = createRequire(path.join(root, "app/manage-ui/package.json"));
 const ts = require("typescript");
 const React = require("react");
 const { act, create } = require("react-test-renderer");
+const FilterTabs = () => null;
+const BackendTabIcon = ({ backend }) => React.createElement("span", { "data-backend-icon": backend });
 const filename = path.join(root, "app/manage-ui/src/pages/ChatModelMenu.tsx");
 const compiled = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
   fileName: filename,
@@ -25,7 +27,9 @@ vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(requir
     : name === "react-dom" ? { createPortal: node => node }
     : name === "react-i18next" ? { useTranslation: () => ({ t: key => key }) }
     : name === "../lib/useComposerPopupPosition" ? { useComposerPopupPosition: () => ({}) }
-    : name === "../components/FilterTabs" ? () => null
+    : name === "../lib/useScrollFade" ? { useScrollFade: () => ({ ref() {} }) }
+    : name === "../components/BackendTabIcon" ? BackendTabIcon
+    : name === "../components/FilterTabs" ? FilterTabs
     : name === "../components/FusionLoader" ? ({ label }) => React.createElement("span", { role: "status" }, label)
     : name === "./chatIcons" ? { IconSearch: () => React.createElement("svg", { "aria-hidden": true }), IconModel: () => React.createElement("svg", { "aria-hidden": true }) }
     : require(name),
@@ -38,6 +42,40 @@ const trigger = renderer => renderer.root.findByProps({ "aria-haspopup": "listbo
 const triggerLabel = renderer => trigger(renderer).findByProps({ className: "chat-pill__label" }).children.join("");
 const contents = renderer => JSON.stringify(renderer.toJSON());
 const choice = { id: "native-default", name: "Native Default", provider: "native" };
+
+test("native tabs show runtime icons and section titles appear only in All", () => {
+  const runtimeGroups = [
+    { runtime: "codex", bindingId: "bundled", name: "Shoggoth", available: true },
+    { runtime: "codex", bindingId: "local", name: "Codex", available: true },
+  ];
+  const models = runtimeGroups.map(group => ({
+    ...choice, name: `${group.name} Model`, bindingId: group.bindingId, runtime: group.runtime, runtimeName: group.name,
+  }));
+  let renderer;
+  act(() => { renderer = create(React.createElement(Menu, {
+    models, runtimeGroups, activeModel: "", onSelect() {},
+  })); });
+  try {
+    act(() => trigger(renderer).props.onClick());
+    const filter = renderer.root.findByType(FilterTabs);
+    const listbox = renderer.root.findByProps({ role: "listbox" });
+    assert.equal(filter.props.centerOnEdgeSelection, true);
+    const labels = () => renderer.root.findAllByProps({ className: "model-menu__label" });
+    assert.equal(listbox.props["data-filtered"], undefined);
+    assert.deepEqual(Array.from(filter.props.items, item => item.leadingIcon?.props.backend ?? null), [null, "shoggoth", "codex"]);
+    assert.deepEqual(labels().map(label => label.findByType(BackendTabIcon).props.backend), ["shoggoth", "codex"]);
+    for (const group of runtimeGroups) {
+      act(() => filter.props.onChange(group.bindingId));
+      assert.equal(listbox.props["data-filtered"], true);
+      assert.equal(labels().length, 0);
+      const option = renderer.root.findByProps({ role: "option" });
+      assert.deepEqual(option.findByProps({ className: "model-menu__name" }).children, [`${group.name} Model`]);
+    }
+    act(() => filter.props.onChange(""));
+    assert.equal(listbox.props["data-filtered"], undefined);
+    assert.deepEqual(labels().map(label => label.findByType(BackendTabIcon).props.backend), ["shoggoth", "codex"]);
+  } finally { act(() => renderer.unmount()); }
+});
 
 test("unavailable configured models stay visible and selected but cannot be chosen", () => {
   let renderer;

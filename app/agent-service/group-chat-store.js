@@ -803,6 +803,19 @@ class GroupChatStore {
       .get(groupId, `cron:${jobId}:${runId}`));
   }
 
+  getPublishedCronReply({ target, jobId, runId }) {
+    this.#ready();
+    if (target.ownerScope !== this.getOwnerScope()) return null;
+    const group = this.#group(target.groupId);
+    if (!group || group.status === "deleting") return null;
+    const message = parse(this.db.prepare("SELECT data FROM messages WHERE group_id=? AND origin_key=?")
+      .get(group.id, `cron:${jobId}:${runId}`));
+    if (message?.author.kind !== "member" || message.author.memberId !== target.memberId
+      || message.origin?.cronJobId !== jobId || message.origin.runId !== runId || !message.fullResult) return null;
+    return { groupId: group.id, ownerScope: target.ownerScope, seq: message.seq,
+      digest: message.fullResult.digest, preview: utf8Prefix(message.body, 1024) };
+  }
+
   hasCronDelivery({ groupId, jobId, runId }) {
     this.#ready();
     return Boolean(this.db.prepare("SELECT 1 FROM meta WHERE key=?")

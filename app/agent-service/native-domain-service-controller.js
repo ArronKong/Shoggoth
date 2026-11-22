@@ -231,6 +231,7 @@ class NativeDomainServiceController {
     this.getRunSessionKey = options.getRunSessionKey || (() => null);
     this.getCronOutput = options.getCronOutput || (() => null);
     this.getCronFailure = options.getCronFailure || (() => null);
+    this.getCronGroupReply = options.getCronGroupReply || (() => null);
     this.validateCronModel = options.validateCronModel;
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
@@ -403,7 +404,12 @@ class NativeDomainServiceController {
         || !Number.isSafeInteger(description.createdAt) || description.createdAt < 0) {
         throw internalError("DOMAIN_RESPONSE_INVALID");
       }
+      const scheduleRecovery = params.includeScheduleRecovery === true && description.kind === "schedule"
+        ? this.cronStore.recovery?.get(runValue, description.createdAt) : null;
       const sessionKey = this.getRunSessionKey(runValue);
+      const groupReply = job.groupDelivery && params.groupReplySinceMs !== undefined && runValue.status === "completed"
+        && runValue.finishedAt >= params.groupReplySinceMs && cronOutput?.disposition !== "silent"
+        ? this.getCronGroupReply({ target: job.groupDelivery, jobId: job.id, runId: runValue.id }) : null;
       const failure = sessionKey && params.failureSinceMs !== undefined && runValue.errorCode
         && ["failed", "interrupted", "canceled"].includes(runValue.status)
         && (runValue.finishedAt ?? runValue.startedAt ?? description.createdAt) >= params.failureSinceMs
@@ -411,8 +417,10 @@ class NativeDomainServiceController {
       return {
         key: stableTimestampKey(description.createdAt, runValue.id),
         item: { run: runValue, kind: description.kind, createdAt: description.createdAt,
+          ...(scheduleRecovery ? { scheduleRecovery } : {}),
           ...(groupBound ? { deliveryTarget: "group" } : {}),
           ...(cronOutput ? { cronOutput } : {}),
+          ...(groupReply ? { groupReply } : {}),
           ...(sessionKey ? { sessionKey } : {}),
           ...(failure ? { failure } : {}) },
       };

@@ -65,7 +65,7 @@ async function run() {
     const otherCatalog = await request(undefined, server.url, otherRoute);
     assert.equal(otherCatalog.status, 200, JSON.stringify(otherCatalog.body));
     assert.deepEqual(otherCatalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
-      .map(runtime => runtime.name).sort(), ["Codex CLI", "Shoggoth"],
+      .map(runtime => runtime.name).sort(), ["Codex", "Shoggoth"],
     "an Agent with a native CLI default must also offer Shoggoth");
     const otherBindings = f.service.productStore.getAgentRuntimeBindings(otherProfile.id);
     const otherHarness = otherBindings.bindings.find(binding =>
@@ -104,7 +104,7 @@ async function run() {
     assert.equal(catalog.body.selection.canSwitch, true, "fresh App must allow cross-Runtime selection");
     assert.deepEqual(new Set(catalog.body.runtimes.map(runtime => runtime.runtime)), new Set(["codex", "pi", "opencode", "deepseek-harness"]));
     assert.deepEqual(catalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
-      .map(runtime => runtime.name), ["Shoggoth", "Codex CLI"]);
+      .map(runtime => runtime.name), ["Shoggoth", "Codex"]);
     assert.equal(catalog.body.models.length, 10, JSON.stringify(catalog.body));
     assert.equal(catalog.body.models.filter(model => model.id === "fixture-model").length, 5);
     assert.equal(new Set(catalog.body.models.map(model => `${model.bindingId}:${model.id}`)).size, 10);

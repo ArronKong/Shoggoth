@@ -276,6 +276,12 @@ test("ownership: other conversations, other Agents and background sessions canno
   const memory = service.mcpProductToolController.conversationMemoryService;
   assert.throws(() => memory.bind("memory_save", { scope: "user" }, service.workRunCoordinator.getRun(child.id)),
     error => error.code === "MCP_TOOL_FORBIDDEN");
+  assert.throws(() => memory.bind("memory_forget", { id: "m1" }, service.workRunCoordinator.getRun(child.id)),
+    error => error.code === "MCP_TOOL_FORBIDDEN");
+  // Reading the Agent's own memory and conversations stays open to the task.
+  const childSource = { source: "chat", sourceId: child.sourceId };
+  assert.equal(Array.isArray((await callTool(f, child, "memory_search", { ...childSource, query: "job" })).items), true);
+  assert.equal(typeof (await callTool(f, child, "conversation_search", { ...childSource, query: "job" })), "object");
   // Only bindings that passed background verification can be chosen.
   await expectCode(callTool(f, runB, "background_task_start", { brief: "unsupported", bindingRef: f.binding("deepseek-harness").id }),
     "BACKGROUND_TASK_BINDING_UNAVAILABLE");
@@ -400,7 +406,7 @@ test("cross runtime: each supported binding reports back to the same Agent's ori
       service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime, runtimeAccountId }, { operationId: `bind-${runtime}` });
     }
   }
-  assert.deepEqual([...BACKGROUND_TASK_RUNTIMES].sort(), ["antigravity", "codex", "deepseek-harness", "opencode", "pi"]);
+  assert.deepEqual([...BACKGROUND_TASK_RUNTIMES].sort(), ["antigravity", "codex", "deepseek-harness", "grok-build", "opencode", "pi"]);
   const source = ownSession(f);
   let reportCount = 0;
   for (const runtime of BACKGROUND_TASK_RUNTIMES) {
@@ -438,14 +444,41 @@ test("cross runtime: each supported binding reports back to the same Agent's ori
   const asker = await f.send(source.sessionKey, "op-cross-refuse", "Try other runtimes.");
   await expectCode(callTool(f, asker, "background_task_start", { brief: "foreign", bindingRef: otherBinding.id }),
     "BACKGROUND_TASK_BINDING_UNAVAILABLE");
-  await expectCode(callTool(f, asker, "background_task_start", { brief: "unqualified", bindingRef: f.binding("grok-build").id }),
-    "BACKGROUND_TASK_BINDING_UNAVAILABLE");
   const { revision } = service.productStore.getAgentRuntimeBindings(f.profile.id);
   service.productStore.updateAgentRuntimeBinding(f.profile.id, f.binding("pi").id, { enabled: false }, { revision });
   await expectCode(callTool(f, asker, "background_task_start", { brief: "disabled pi", bindingRef: "pi" }),
     "BACKGROUND_TASK_BINDING_UNAVAILABLE");
   assert.equal(service.backgroundTaskStore.list({}).length, before, "nothing is accepted");
   await f.complete(asker, "ok");
+});
+
+test("a task keeps the conversation's approval choice; Grok asks instead of Auto blocking", { timeout: 60_000 }, async t => {
+  const f = await open(t);
+  const store = f.service.chatSessionStore;
+  f.service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "grok-build", runtimeAccountId: accountIds["grok-build"] },
+    { operationId: "bind-grok-build" });
+  // The conversation's choice is read when the task's session is created; the
+  // fixture Codex host cannot run the dispatching turn itself in these modes.
+  const dispatch = async (session, mode, bindingRef) => {
+    const parent = await f.send(session.sessionKey, `${mode}-${bindingRef ?? "same"}`, "A long job.");
+    store.setPermissionMode(session.sessionKey, mode);
+    const { task: started } = await callTool(f, parent, "background_task_start", { brief: "Research", ...(bindingRef ? { bindingRef } : {}) });
+    const worker = await childRun(f, started.taskId);
+    await f.complete(parent, "Dispatched.");
+    await f.complete(worker, "Done.");
+    return { mode: store.getSession(task(f, started.taskId).childSessionKey).permissionMode, runtime: worker.runtimeSessionRef.runtime };
+  };
+  // Full access carries over to another Runtime.
+  assert.deepEqual(await dispatch(ownSession(f), "full-access", "pi"), { mode: "full-access", runtime: "pi" });
+  assert.deepEqual(await dispatch(ownSession(f), "full-access", "grok-build"), { mode: "full-access", runtime: "grok-build" });
+  // Auto stays Auto, except on Grok, whose Auto would block without asking.
+  assert.deepEqual(await dispatch(ownSession(f), "auto-review", "pi"), { mode: "auto-review", runtime: "pi" });
+  assert.deepEqual(await dispatch(ownSession(f), "auto-review", "grok-build"), { mode: "request-approval", runtime: "grok-build" });
+  // A Grok conversation's own task (same binding) asks as well.
+  const grok = store.createSession({ operationId: "grok-source", profileId: f.profile.id,
+    workspace: fs.mkdtempSync(path.join(f.root, "chat-")), defaultBindingId: f.binding("grok-build").id, createdAt: Date.now() });
+  assert.deepEqual(await dispatch(grok, "auto-review"), { mode: "request-approval", runtime: "grok-build" });
+  assert.equal(store.getSession(grok.sessionKey).permissionMode, "auto-review", "the conversation keeps its own choice");
 });
 
 test("two bindings return distinct same-name files to their source chat on fixture hosts", { timeout: 60_000 }, async t => {

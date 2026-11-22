@@ -29,5 +29,8 @@ export function activityStatusRows(
     rows.delete(key);
     return row ? [row] : [];
   });
-  return [...ordered, ...rows.values()];
+  // A linked approval can omit its run source.
+  return [...ordered, ...rows.values()].filter(row => (
+    row.running?.kind !== "kanban" && row.approval?.source !== "kanban"
+  ));
 }

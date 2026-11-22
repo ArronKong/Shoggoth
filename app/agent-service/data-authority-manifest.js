@@ -159,6 +159,16 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         "definitionDigest", "grants", "approvedAt", "runId"] }) }),
       recovery: "Exact task and operation grants survive restart; definition edits revoke before the job changes",
     }),
+    cronRecovery: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/native-cron-recovery-v1.sqlite", "stateDir/native-cron-recovery-v1.sqlite-wal"]),
+      records: Object.freeze({
+        CronLegacyJob: recordAuthority({ authority: ["jobId", "createdAt"] }),
+        CronRecoveryDecision: recordAuthority({ authority: ["jobId", "scheduledAt", "runId", "runKey",
+          "reason", "decidedAt", "coalescedCount", "countCapped"] }),
+      }),
+      recovery: "The Cron writer records decisions first and only exact durable WorkRuns expose them",
+    }),
     runtimeExtensions: Object.freeze({
       owner: "shoggoth", schemaVersion: 1,
       pathRules: Object.freeze(["stateDir/runtime-extensions-v1.json"]),

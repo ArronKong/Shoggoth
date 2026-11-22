@@ -56,7 +56,7 @@ const AUTH_SPECS = Object.freeze([
   }),
   Object.freeze({
     runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
-    name: "Codex CLI",
+    name: "Codex",
     homeEnv: "CODEX_HOME",
     credentialFile: "auth.json",
     credentialProbe: "file",
@@ -159,7 +159,7 @@ function nativeHomeFallback(userHome, runtime) {
   return path.join(userHome, ...NATIVE_HOME_SEGMENTS[runtime]);
 }
 
-function resolveAccountHome(spec, account, options) {
+function resolveAccountHome(commandName, account, options) {
   if (account.kind === "shoggoth-managed") {
     return resolveManagedCodexHome(options.paths, options.fs);
   }
@@ -182,7 +182,7 @@ function resolveAccountHome(spec, account, options) {
   } catch {
     return {
       home: nativeHomeFallback(options.userHome, account.runtime),
-      error: `${spec.name} CLI Home is invalid or unsafe`,
+      error: `${commandName} Home is invalid or unsafe`,
     };
   }
 }
@@ -275,7 +275,8 @@ function createRuntimeCliAuth(options = {}) {
       && require("./runtime-availability").isRuntimeAvailable(account.runtime);
   }).map((spec) => {
     const account = ACCOUNT_BY_ID.get(spec.runtimeAccountId);
-    const accountHome = resolveAccountHome(spec, account, context);
+    const commandName = account.id === NATIVE_CODEX_RUNTIME_ACCOUNT_ID ? spec.name : `${spec.name} CLI`;
+    const accountHome = resolveAccountHome(commandName, account, context);
     const authorityConflict = authorityConflictReason(account, context);
     let binaryPath = null;
     let unavailableReason = accountHome.error || authorityConflict;
@@ -284,7 +285,7 @@ function createRuntimeCliAuth(options = {}) {
         binaryPath = resolveBinary(account, context);
       } catch (error) {
         unavailableReason = spec.unavailableReasons?.[error?.code]
-          || `${spec.name} CLI is not installed or executable`;
+          || `${commandName} is not installed or executable`;
       }
     }
     const loginCommand = spec.loginScript && !accountHome.error && !authorityConflict

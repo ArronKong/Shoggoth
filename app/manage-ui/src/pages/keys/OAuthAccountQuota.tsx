@@ -2,7 +2,7 @@ import { useId, useState, useSyncExternalStore, type ReactElement } from "react"
 import { useTranslation } from "react-i18next";
 import { Popover } from "@base-ui/react/popover";
 import type { OAuthProvider } from "../../types";
-import { readCachedOAuthQuota, refreshOAuthQuota, subscribeOAuthQuota } from "../../lib/oauthAccountQuota";
+import { canReadOAuthAccountQuota, readCachedOAuthQuota, refreshOAuthQuota, subscribeOAuthQuota } from "../../lib/oauthAccountQuota";
 import styles from "./OAuthAccountQuota.module.css";
 
 function quotaDuration(minutes: number, locale: string) {
@@ -12,7 +12,7 @@ function quotaDuration(minutes: number, locale: string) {
 }
 
 function formatBalance(amount: number, unit: "credits" | "USD" | "CNY", locale: string) {
-  const precision = amount < 0.01 ? { maximumSignificantDigits: 6 } : { maximumFractionDigits: 2 };
+  const precision = amount > 0 && amount < 0.01 ? { maximumSignificantDigits: 6 } : { maximumFractionDigits: 2 };
   return new Intl.NumberFormat(locale, unit === "credits"
     ? precision
     : { style: "currency", currency: unit, ...precision }).format(amount);
@@ -28,7 +28,12 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
   const { t, i18n } = useTranslation();
   const triggerId = useId();
   const [open, setOpen] = useState(false);
-  const result = useSyncExternalStore(subscribeOAuthQuota, () => readCachedOAuthQuota(backend, account));
+  const snapshot = useSyncExternalStore(subscribeOAuthQuota, () => readCachedOAuthQuota(backend, account));
+  const canRead = canReadOAuthAccountQuota(account);
+  const result = canRead && snapshot?.status === "available" ? snapshot : undefined;
+  const statusKey = !account.canReadQuota ? "keys.oauthQuotaNotIntegrated"
+    : !canRead || snapshot?.status === "unsupported" ? "keys.oauthQuotaUnsupported"
+    : snapshot?.status === "unavailable" ? "keys.oauthQuotaUnavailable" : "keys.oauthQuotaLoading";
   const locale = i18n.resolvedLanguage || i18n.language;
   const percent = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 });
   const dateTime = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -36,7 +41,7 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
 
   const changeOpen = (next: boolean) => {
     if (next === open) return;
-    if (next) void refreshOAuthQuota(backend, account).then(changed => { if (changed) onAccountChanged(); });
+    if (next && canRead) void refreshOAuthQuota(backend, account).then(changed => { if (changed) onAccountChanged(); });
     setOpen(next);
   };
 
@@ -48,21 +53,22 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
       onFocus={event => { if (event.currentTarget.matches(":focus-visible")) changeOpen(true); }} />
     <Popover.Portal>
       <Popover.Positioner className={styles.positioner} side="bottom" align="start" sideOffset={5} collisionPadding={10}>
-        <Popover.Popup className={styles.quota} initialFocus={false} finalFocus={false} hidden={!result}
+        <Popover.Popup className={styles.quota} initialFocus={false} finalFocus={false}
           aria-label={`${title} · ${t("keys.oauthQuota")}`}>
-          {result && <div aria-live="polite">
+          <div aria-live="polite">
             <div className={styles.heading}>
               <div className={styles.titleRow}>
                 <div className={styles.title}>{title}</div>
-                <time className={styles.checkedAt} dateTime={new Date(result.checkedAt).toISOString()}>
+                {result && <time className={styles.checkedAt} dateTime={new Date(result.checkedAt).toISOString()}>
                   {t("keys.oauthQuotaCheckedAt", { time: dateTime.format(result.checkedAt) })}
-                </time>
+                </time>}
               </div>
-              {result.accountName && <div className={styles.identity} dir="auto">
+              {result?.accountName && <div className={styles.identity} dir="auto">
                 {result.accountName}
               </div>}
+              {!result && <div className={styles.identity}>{t(statusKey)}</div>}
             </div>
-            {result.windows.length > 0 && <ul className={styles.windows}>
+            {result && result.windows.length > 0 && <ul className={styles.windows}>
               {result.windows.map(({ label, durationMinutes, usedPercent, resetsAt }, index) => {
                 const duration = durationMinutes === null ? null : quotaDuration(durationMinutes, locale);
                 const windowLabel = [label, duration].filter(Boolean).join(" · ") || t("keys.oauthQuotaWindow");
@@ -81,7 +87,7 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
                 </li>;
               })}
             </ul>}
-            {(credits || result.resetCredits) && <div className={styles.credits}>
+            {(credits || result?.resetCredits) && <div className={styles.credits}>
               {credits?.kind === "wallets" ? credits.wallets.map(({ kind, amount, unit }) =>
                 <div className={styles.credit} key={`${kind}:${unit}`}>
                   <span>{t(kind === "bonus" ? "keys.oauthQuotaBonus" : "keys.oauthQuotaBalance")}</span>
@@ -93,12 +99,12 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
                   <strong>{credits.kind === "balance" ? formatBalance(credits.amount, credits.unit, locale)
                     : t("keys.oauthQuotaUnlimited")}</strong>
                 </div>}
-              {result.resetCredits && <div className={styles.credit}>
+              {result?.resetCredits && <div className={styles.credit}>
                 <span>{t("keys.oauthQuotaResetCredits")}</span>
                 <strong>{new Intl.NumberFormat(locale).format(result.resetCredits)}</strong>
               </div>}
             </div>}
-          </div>}
+          </div>
         </Popover.Popup>
       </Popover.Positioner>
     </Popover.Portal>

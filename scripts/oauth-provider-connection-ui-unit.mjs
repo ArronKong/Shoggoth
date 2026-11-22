@@ -249,3 +249,21 @@ quotaReads[5].resolve(currentQuota);
 await fetchLatest;
 assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', otherAccount), currentQuota);
 console.log('OAuth persisted quota hydration and verified account changes: PASS');
+
+const unknownQuota = { ...provider(true), id: 'unknown-quota' };
+assert.equal(quotaCache.canShowOAuthAccountQuota(unknownQuota), true);
+assert.equal(quotaCache.canReadOAuthAccountQuota(unknownQuota), false);
+await quotaCache.prefetchMissingOAuthQuotas('shoggoth', [unknownQuota]);
+assert.equal(quotaReads.length, 6, 'connected rows without an integration do not request quota');
+
+const newQuota = { ...account, id: 'first-quota' };
+const attempt = quotaCache.refreshOAuthQuota('shoggoth', newQuota);
+quotaReads.at(-1).resolve({ status: 'unavailable' });
+await attempt;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', newQuota)?.status, 'unavailable');
+const quotaRetry = quotaCache.refreshOAuthQuota('shoggoth', newQuota);
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', newQuota), undefined);
+quotaReads.at(-1).resolve({ status: 'unsupported' });
+await quotaRetry;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', newQuota)?.status, 'unsupported');
+console.log('OAuth quota shows first-read failures and distinguishes unsupported accounts: PASS');

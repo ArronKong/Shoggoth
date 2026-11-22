@@ -62,6 +62,10 @@ for (const scenario of ["chat", "model-only", "protected"]) test(scenario === "c
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body); admitted?.();
     if (mode === "hang") { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.flushHeaders(); return; }
+    if (mode === "limited") {
+      res.writeHead(429, { "Content-Type": "application/json", "retry-after": "3600" });
+      res.end(JSON.stringify({ error: { message: "Rate limit reached for fixture-model", type: "rate_limit_error" } })); return;
+    }
     if (mode === "error") {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: "PRIVATE_PROVIDER_ERROR_BODY", type: "invalid_request_error" } })); return;
@@ -195,6 +199,15 @@ for (const scenario of ["chat", "model-only", "protected"]) test(scenario === "c
     mode = "tool";
     await assert.rejects(handle.generateModelOnly({ ...input, operationId: "model-forbidden-tool" }), { code: "MODEL_ONLY_TOOLS_FORBIDDEN" });
     assert.equal(fs.existsSync(marker), false, "a fabricated tool call cannot write through the native CLI");
+    // A provider limit leaves OpenCode retrying without a reply until its
+    // retry-after. The model task stops on the same rule as a chat turn.
+    mode = "limited";
+    const limitedAt = Date.now();
+    await assert.rejects(handle.generateModelOnly({ ...input, operationId: "model-limited", timeoutMs: 60_000 }), cause => {
+      assert.match(cause.code, /^RUNTIME_(?:RATE_LIMITED|QUOTA_EXHAUSTED|UPSTREAM_UNAVAILABLE)$/u, cause.code); return true;
+    });
+    assert.ok(Date.now() - limitedAt < 20_000, "a far-away provider retry is not held until a transport timeout");
+    assert.equal(host.modelWorkers.size, 0);
     mode = "hang";
     const controller = new AbortController(), started = new Promise(resolve => { admitted = resolve; });
     const pending = handle.generateModelOnly({ ...input, operationId: "model-cancel", signal: controller.signal });

@@ -152,6 +152,25 @@ function createEveryJob(ctx, overrides = {}) {
   });
 }
 
+function createOneShotJob(ctx, name, at) {
+  return ctx.cronStore.createJob({
+    operationId: `create-${name}`,
+    name,
+    enabled: true,
+    profileId: DEFAULT_AGENT_PROFILE_ID,
+    prompt: "Run once",
+    workspace: null,
+    schedule: { kind: "at", at },
+    misfirePolicy: "latest",
+    maxCatchUp: 1,
+    overlapPolicy: "skip",
+    threadPolicy: "new",
+    threadId: null,
+    nextRunAt: at,
+    createdAt: ctx.clock.value,
+  });
+}
+
 function cronRuns(ctx, jobId) {
   return ctx.dispatcher.listRuns({ source: "cron", sourceId: jobId });
 }
@@ -1960,6 +1979,9 @@ test("latest/all-bounded/skip 恢复策略只选择有界 occurrence", async () 
     ));
     assert.deepEqual(runs.map((run) => Number(run.idempotencyKey.split(":").at(-1))), entry.expected);
     assert.deepEqual(runs.map((run) => run.status), entry.statuses);
+    const recovery = ctx.cronStore.recovery.get(runs[0], entry.expected[0]);
+    assert.deepEqual(recovery, { reason: entry.policy === "skip" ? "missed" : "catch-up",
+      decidedAt: tickAt(5), coalescedCount: entry.expected[0] / EVERY_INTERVAL_MS - 1, countCapped: false });
     assert.equal(ctx.cronStore.getJob(job.id).nextRunAt, tickAt(6));
     await scheduler.close();
     ctx.close();
@@ -2540,6 +2562,120 @@ test("one-shot at 触发后原子停用，时钟回拨与重复 tick 不复活",
   ctx.clock.monotonic = 12_000;
   await scheduler.tick();
   assert.equal(cronRuns(ctx, job.id).length, 1);
+  await scheduler.close();
+  ctx.close();
+});
+
+test("新一次性任务按两分钟自动过期，升级前的任务和系统任务仍可派发", async () => {
+  const ctx = fixture({ clock: { value: 1, monotonic: 10_000 } });
+  const legacy = createOneShotJob(ctx, "legacy", 60_000);
+  ctx.cronStore.close();
+  // The Job is in the original v3 format. Simulate its first open on upgrade.
+  fs.unlinkSync(ctx.cronStore.recovery.file);
+  ctx.cronStore.open();
+  const expired = createOneShotJob(ctx, "expired", 60_000);
+  const boundary = createOneShotJob(ctx, "boundary", 60_001);
+  const system = createOneShotJob(ctx, "system", 60_000);
+  ctx.cronStore.close();
+  ctx.cronStore.open();
+  ctx.clock.value = 180_001;
+  const scheduler = ctx.createScheduler({ isSystemCronJob: id => id === system.id });
+  await scheduler.open();
+
+  assert.deepEqual(ctx.executor.calls.map(call => call.job.name).sort(), ["boundary", "legacy", "system"]);
+  const [skipped] = cronRuns(ctx, expired.id);
+  assert.equal(skipped.status, "skipped");
+  assert.equal(skipped.resultSummary, "CRON_MISFIRE_SKIPPED");
+  assert.deepEqual(ctx.cronStore.recovery.get(skipped, expired.nextRunAt),
+    { reason: "expired", decidedAt: 180_001, coalescedCount: 0, countCapped: false });
+  for (const job of [legacy, expired, boundary, system]) {
+    const saved = ctx.cronStore.getJob(job.id);
+    assert.equal(saved.enabled, false);
+    assert.equal(saved.nextRunAt, null);
+  }
+  await scheduler.close();
+  ctx.close();
+});
+
+test("重启保留已受理的补跑决定，即使计划后来超过宽限期", async () => {
+  const ctx = fixture({ clock: { value: 1, monotonic: 10_000 } });
+  const job = createOneShotJob(ctx, "accepted", 60_000);
+  const cronStore = new Proxy(ctx.cronStore, {
+    get(target, key) {
+      if (key === "setJobEnabled") return () => { throw new Error("crash before advancing schedule"); };
+      const value = target[key];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  ctx.clock.value = 61_000;
+  const scheduler = ctx.createScheduler({ cronStore });
+  await assert.rejects(() => scheduler.open(), /crash before advancing schedule/);
+  await scheduler.close();
+  const [accepted] = cronRuns(ctx, job.id);
+  assert.equal(accepted.status, "queued");
+  assert.equal(ctx.executor.calls.length, 0);
+  ctx.cronStore.close();
+  ctx.cronStore.open();
+  ctx.clock.value = 600_000;
+  ctx.clock.monotonic = 20_000;
+
+  const restarted = ctx.createScheduler();
+  await restarted.open();
+  assert.deepEqual(cronRuns(ctx, job.id).map(run => run.id), [accepted.id]);
+  assert.deepEqual(ctx.executor.calls.map(call => [call.kind, call.run.id]), [["recover", accepted.id]]);
+  assert.deepEqual(ctx.cronStore.recovery.get(accepted, job.nextRunAt),
+    { reason: "catch-up", decidedAt: 61_000, coalescedCount: 0, countCapped: false });
+  assert.equal(ctx.cronStore.getJob(job.id).enabled, false);
+  await restarted.close();
+  ctx.close();
+});
+
+test("WorkRun 入队前中断留下的补跑记录会在重启时清理", async () => {
+  const ctx = fixture();
+  const job = createEveryJob(ctx);
+  const dispatcher = {
+    ...ctx.dispatcher,
+    enqueue() { throw new Error("crash before enqueue"); },
+  };
+  const scheduler = ctx.createScheduler({ dispatcher });
+  await assert.rejects(() => scheduler.open(), /crash before enqueue/);
+  await scheduler.close();
+  assert.equal(cronRuns(ctx, job.id).length, 0);
+  assert.equal(ctx.cronStore.getJob(job.id).nextRunAt, tickAt(1));
+
+  ctx.cronStore.close();
+  ctx.cronStore.open();
+  ctx.clock.value = tickAt(6);
+  ctx.clock.monotonic += EVERY_INTERVAL_MS;
+  const restarted = ctx.createScheduler();
+  await restarted.open();
+  const [run] = cronRuns(ctx, job.id);
+  assert.equal(ctx.executor.calls.length, 1);
+  assert.equal(ctx.executor.calls[0].scheduledAt, tickAt(6));
+  assert.deepEqual(ctx.cronStore.recovery.get(run, tickAt(6)),
+    { reason: "catch-up", decidedAt: tickAt(6), coalescedCount: 5, countCapped: false });
+  assert.equal(ctx.cronStore.getJob(job.id).nextRunAt, tickAt(7));
+  await restarted.close();
+  ctx.close();
+});
+
+test("长期离线的 Cron 表达式最多统计扫描预算内的合并次数", async () => {
+  const latest = tickAt(MAX_CRON_SCAN_STEPS + 10);
+  const ctx = fixture({ clock: { value: latest + 1, monotonic: 10_000 } });
+  const job = ctx.cronStore.createJob({
+    operationId: "create-bounded-miss-count", name: "Every minute", enabled: true,
+    profileId: DEFAULT_AGENT_PROFILE_ID, prompt: "Run", workspace: null,
+    schedule: { kind: "cron", expr: "* * * * *", tz: "UTC" },
+    misfirePolicy: "latest", maxCatchUp: 1, overlapPolicy: "skip",
+    threadPolicy: "new", threadId: null, nextRunAt: tickAt(1), createdAt: 1,
+  });
+  const scheduler = ctx.createScheduler();
+  await scheduler.open();
+  const [run] = cronRuns(ctx, job.id);
+  assert.equal(ctx.executor.calls.length, 1);
+  assert.equal(ctx.executor.calls[0].scheduledAt, latest);
+  assert.deepEqual(ctx.cronStore.recovery.get(run, latest),
+    { reason: "catch-up", decidedAt: latest + 1, coalescedCount: MAX_CRON_SCAN_STEPS, countCapped: true });
   await scheduler.close();
   ctx.close();
 });

@@ -15,7 +15,6 @@ import {
 } from "../api/client";
 import type {
   CronDelivery,
-  DashboardActivityKanban,
   DashboardApprovalItem,
   DashboardRunEntry,
   DashboardRunningItem,
@@ -34,7 +33,7 @@ import { PageHead } from "../components/PageHead";
 import Modal from "../components/Modal";
 import { useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
-import { selectCronRunHandoffSource, writeCronChatHandoff } from "../lib/cronChatHandoff";
+import { cronGroupChatPath, selectCronRunHandoffSource, writeCronChatHandoff } from "../lib/cronChatHandoff";
 import { fmtCost, fmtTokens } from "./usage/charts";
 import { cronDeliveryView, cronExecutionView } from "./cron/runPresentation";
 import ActivityFeed from "./dashboard/ActivityFeed";
@@ -442,7 +441,7 @@ export default function DashboardPage() {
         return;
       }
 
-      // 等入场过渡完成后再读 transcript；已有摘要先稳定占位，不在动画中途换全文。
+      // Wait for the entry transition before loading the full report.
       const requestId = runDeliveryRequestRef.current;
       // 原生 Cron 的实际启动时间可能晚于计划时刻，运行 ID 可以直接定位这次结果。
       const runId = run.backendId === "shoggoth" ? run.runId : undefined;
@@ -494,12 +493,11 @@ export default function DashboardPage() {
   };
 
   const statusRows = visibleSnapshot?.status || [];
-  // delivery 端点可能只能给“最新一次”结果；只有 startedAt 精确一致时才允许覆盖
-  // 用户点开的历史 run，否则正文与 session 始终一起回退 openRun。
   const runHandoff = selectCronRunHandoffSource(openRun, delivery);
   const openRunExecution = openRun ? cronExecutionView(openRun) : null;
   const openRunDelivery = openRun ? cronDeliveryView(openRun) : null;
-  const visibleRunText = runHandoff.report;
+  const visibleRunText = openRun?.deliveryTarget === "group" && deliveryLoading ? null : runHandoff.report;
+  const groupChat = runHandoff.groupChat;
   const runSessionKey = runHandoff.sessionKey;
   const askInChat = (backendId: string, sessionKey: string, report: string) => {
     writeCronChatHandoff(backendId, sessionKey, report);
@@ -588,7 +586,7 @@ export default function DashboardPage() {
 
           {/* 主体两栏（照设计）：左「今日动态」活动面板 : 右「最近产出」≈ 2:1。 */}
           <div className="dash-columns">
-            {/* 今日动态：统一活动流（cron/kanban/inspiration），独立组件承载筛选与分页。 */}
+            {/* 今日动态的筛选与分页由 ActivityFeed 处理。 */}
             <ActivityFeed
               status={statusRows}
               firstPage={activityData?.activityPage}
@@ -604,11 +602,6 @@ export default function DashboardPage() {
               onOpenRunning={openBackendRun}
               canOpenRunning={(item) => !!item.backendId && dashboardRunBackends.has(item.backendId)}
               getAgentDisplayName={currentAgentName}
-              onOpenTask={(e: DashboardActivityKanban) => {
-                const q = new URLSearchParams({ backend: e.backendId, task: e.kanban.taskId });
-                if (e.kanban.board) q.set("board", e.kanban.board);
-                navigate(`/tasks?${q.toString()}`);
-              }}
               onOpenInspiration={(e) => {
                 setOpenInspirationId(e.inspiration.ideaId);
                 setInspirationModalOpen(true);
@@ -629,7 +622,8 @@ export default function DashboardPage() {
               {(artifactData?.groupArtifacts?.reason === "unavailable" || artifactData?.groupArtifacts?.partial) && (
                 <div className="dash-remote-note">{t("dashboard.artifactsGroupUnavailable")}</div>
               )}
-              {artifactSections.filter(s => s.partial || (!s.supported && s.reason !== "unsupported" && s.reason !== "remote")).map(s => (
+              {artifactSections.filter(s => s.backend !== "shoggoth"
+                && (s.partial || (!s.supported && s.reason !== "unsupported" && s.reason !== "remote"))).map(s => (
                 <div key={s.backend} className="dash-remote-note">
                   {t("dashboard.artifactsUnavailable", { backend: statusRows.find(row => row.id === s.backend)?.name || s.backend })}
                 </div>
@@ -694,6 +688,7 @@ export default function DashboardPage() {
         onAskInChat={openRun && runSessionKey && visibleRunText && visibleRunText.trim()
           ? () => askInChat(openRun.backendId, runSessionKey, visibleRunText)
           : undefined}
+        onOpenGroupChat={groupChat ? () => navigate(cronGroupChatPath(groupChat)) : undefined}
         // 与 Cron 页同一个编辑：跳过去直接打开该任务的编辑表单。
         onEdit={() => {
           if (openRun) navigate(`/cron?job=${encodeURIComponent(openRun.jobId)}&edit=1`);
@@ -707,7 +702,6 @@ export default function DashboardPage() {
             {openRunDelivery.detail ? ` · ${openRunDelivery.detail}` : ""}
           </ReportNote>
         )}
-        {/* 全文优先（本机 transcript），退回摘要；合成行（Hermes 末次状态）两者皆无。 */}
         {visibleRunText && (
           <div
             className="chat-md cron-delivery-md"

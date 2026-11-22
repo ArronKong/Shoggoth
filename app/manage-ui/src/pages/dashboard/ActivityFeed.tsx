@@ -19,27 +19,26 @@ import ApprovalRow from "./ApprovalRow";
 import { activityStatusRows } from "./activityStatusRows";
 import { DashboardActivitySkeleton } from "./DashboardSkeleton";
 
-// 统一活动流（今日动态）：cron / kanban / inspiration，隐藏跳过的定时任务、静默输出、系统健康及 heartbeat 记录。
+// 今日动态展示定时任务与灵感动态，隐藏跳过的定时任务、静默输出及 heartbeat 记录。
 // - 首屏来自 summary.activityPage（默认筛选第一页）；筛选/加载更多走
 //   /__api/dashboard/activities（服务端筛选 + opaque cursor）。
 // - 45s 轮询的新首屏替换其覆盖范围，只保留已加载的更旧记录；来源降级时保留旧数据。
 //   summary.sinceMs 变化（跨本地午夜）时整体重置。
-// - 点击：cron → 运行弹窗（父组件既有逻辑）；kanban → Tasks 深链；
-//   inspiration → 当前页面的灵感详情弹窗。
+// - 点击条目打开定时任务运行结果或当前页面的灵感详情弹窗。
 
 const KIND_FILTERS = ["", "cron", "inspiration"] as const;
+type VisibleActivity = Extract<DashboardActivityEntry, { kind: "cron" | "inspiration" }>;
 
 // 旧缓存和尚未升级的服务端也要过滤执行中、已跳过、静默输出及 heartbeat。
-// 与 core/dashboard-activity.js 保持一致，仅匹配系统结果，不按任务名过滤。
-export function isVisibleDashboardActivity(entry: DashboardActivityEntry): entry is Exclude<DashboardActivityEntry, { kind: "health" }> {
-  if (entry.kind === "health") return false;
-  if (entry.kind === "cron" && (entry.run.status === "running" || entry.run.status === "skipped"
-    || entry.run.outputDisposition === "pending" || entry.run.outputDisposition === "silent")) return false;
-  if (entry.kind === "cron" && entry.backendId === "openclaw" && entry.run.systemManaged === true) return false;
-  return !(entry.kind === "cron" && entry.backendId === "openclaw"
-    && [entry.summary, entry.run.summary, entry.run.error].some((message) =>
-      typeof message === "string" && /^heartbeat (?:(?:wake requested|(?:task )?completed)$|(?:failed|skipped):)/.test(message),
-    ));
+// 定时任务的降噪规则与 core/dashboard-activity.js 保持一致。
+export function isVisibleDashboardActivity(entry: DashboardActivityEntry): entry is VisibleActivity {
+  if (entry.kind !== "cron") return entry.kind === "inspiration";
+  if (entry.run.status === "running" || entry.run.status === "skipped"
+    || entry.run.outputDisposition === "pending" || entry.run.outputDisposition === "silent") return false;
+  if (entry.backendId !== "openclaw") return true;
+  return entry.run.systemManaged !== true && ![entry.summary, entry.run.summary, entry.run.error].some((message) =>
+    typeof message === "string" && /^heartbeat (?:(?:wake requested|(?:task )?completed)$|(?:failed|skipped):)/.test(message),
+  );
 }
 
 function fmtClock(ts: number): string {
@@ -128,7 +127,6 @@ export default function ActivityFeed({
   onOpenRunning,
   canOpenRunning,
   getAgentDisplayName,
-  onOpenTask,
   onOpenInspiration,
 }: {
   status: DashboardSectionScope["status"];
@@ -145,7 +143,6 @@ export default function ActivityFeed({
   onOpenRunning?: (entry: DashboardRunningItem) => void;
   canOpenRunning?: (entry: DashboardRunningItem) => boolean;
   getAgentDisplayName: (agentId: string, backendId?: string, fallback?: string) => string;
-  onOpenTask: (entry: Extract<DashboardActivityEntry, { kind: "kanban" }>) => void;
   onOpenInspiration: (entry: Extract<DashboardActivityEntry, { kind: "inspiration" }>) => void;
 }) {
   const { t } = useTranslation();
@@ -258,35 +255,28 @@ export default function ActivityFeed({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasMore, nextCursor, busy, fetchError, loading, unavailable]);
 
-  const kanbanActionLabel = (action: string): string =>
-    t(`dashboard.activityAction.${action}`, { defaultValue: action });
-
-  const rowSubtitle = (e: DashboardActivityEntry): string => {
+  const rowSubtitle = (e: VisibleActivity): string => {
     if (e.kind === "cron" && e.backendId === "shoggoth" && e.severity === "error" && e.run.error) {
       return translateGatewayError(e.run.error, t);
     }
+    // A cached group run can still carry the engine's raw summary.
+    if (e.kind === "cron" && e.run.deliveryTarget === "group" && e.run.status === "ok" && !e.run.groupChat) return "";
     if (e.kind === "inspiration") {
       const state = t(`inspiration.status.${e.inspiration.status}`);
       return e.summary ? `${state} · ${stripMdMarks(e.summary)}` : state;
     }
-    if (e.kind === "kanban") {
-      const move = e.kanban.fromStatus && e.kanban.toStatus ? ` ${e.kanban.fromStatus} → ${e.kanban.toStatus}` : "";
-      return `${kanbanActionLabel(e.kanban.action)}${move}`;
-    }
     return e.summary ? stripMdMarks(e.summary) : "";
   };
 
-  const onRowClick = (e: DashboardActivityEntry) => {
+  const onRowClick = (e: VisibleActivity) => {
     if (e.kind === "cron") onOpenRun(e);
-    else if (e.kind === "kanban") onOpenTask(e);
-    else if (e.kind === "inspiration") onOpenInspiration(e);
+    else onOpenInspiration(e);
   };
 
-  const kindLabel = (k: typeof KIND_FILTERS[number] | "kanban"): string =>
+  const kindLabel = (k: typeof KIND_FILTERS[number]): string =>
     k === "" ? t("dashboard.filterAll")
       : k === "cron" ? t("dashboard.filterCron")
-        : k === "kanban" ? t("dashboard.filterKanban")
-          : t("dashboard.filterInspiration");
+        : t("dashboard.filterInspiration");
 
   return (
     <section className="dash-section" aria-busy={loading || busy || undefined}>
@@ -368,9 +358,7 @@ export default function ActivityFeed({
                     {e.agentId && (
                       <span className="dash-run-agent">{getAgentDisplayName(e.agentId, e.backendId)}</span>
                     )}
-                    <span className="dash-run-name">
-                      {e.title || (e.kind === "kanban" ? t("dashboard.deletedTask") : e.id)}
-                    </span>
+                    <span className="dash-run-name">{e.title || e.id}</span>
                     <span className={`dash-kind-chip dash-kind-${e.kind}${e.severity === "error" ? " is-error" : ""}`}>
                       {kindLabel(e.kind)}
                     </span>

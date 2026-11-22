@@ -2358,6 +2358,9 @@ function createAgentService(options) {
   const handleRunInteraction = (run, interaction) => {
     if (run?.source === "inspiration") inspirationService.onInteraction(run, interaction);
     if (isGroupChatRun(run)) setImmediate(() => { try { groupChatDriver.onRunInteraction(run, interaction); } catch {} });
+    if (interaction?.eventType === "approval" && run?.source === "chat" && isBackgroundTaskSession(run.sourceId)) {
+      try { eventBuffer.append("background.task.approvals.changed", { profileId: run.profileId }); } catch {}
+    }
     const sessionKey = synchronizedSessionKey(run);
     if (!sessionKey) return;
     try {
@@ -2510,10 +2513,12 @@ function createAgentService(options) {
         }
         assertExecutionProviderRouteCurrent(route, { productStore, secretStore });
       };
+      const executionContract = Object.freeze({ ...route, ...binding, profileId: profile.id });
       return { profileId: profile.id, binding, assertCurrent,
         identity: [route, session.revision, account.generation],
-        options: { permissionPolicy: profile.permissionPolicy,
-          executionContract: Object.freeze({ ...route, ...binding, profileId: profile.id }) } };
+        // Same pool key as the turn's acquisition, so the warmed host is the one it uses.
+        options: { permissionPolicy: profile.permissionPolicy, executionContract,
+          ...require("./codex-session-provider").codexHostAcquireOptions({ productStore, temporarySecrets, contract: executionContract }) } };
     },
   });
   const cronReportIndex = new (require("./cron-report-index").CronReportIndex)({
@@ -3191,6 +3196,7 @@ function createAgentService(options) {
     setTimer: options.setCronTimer,
     clearTimer: options.clearCronTimer,
     randomUUID: options.randomUUID,
+    isSystemCronJob: (jobId) => codexMemoryImportService?.isSystemJob(jobId) === true,
     resolveTargetState(profileId, job) {
       const profile = productStore.getAgentProfile(profileId);
       if (!profile) {
@@ -3338,6 +3344,10 @@ function createAgentService(options) {
       describeCronRun,
       getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey?.(run) ?? null,
       getCronOutput: (run) => workRunCoordinator.getCronOutput?.(run) ?? null,
+      getCronGroupReply(input) {
+        try { return groupChatStore.getPublishedCronReply(input); }
+        catch { return null; }
+      },
       getCronFailure(run, sessionKey) {
         try {
           const session = chatSessionStore.getSession(sessionKey);
@@ -3628,6 +3638,11 @@ function createAgentService(options) {
     const failed = failures.find(([, failure]) => Boolean(failure));
     if (!failed) return null;
     const [component, , errorCode, error] = failed;
+    // The triggering error's own closed code (no message or path). A poisoned
+    // Coordinator is otherwise indistinguishable from a storage failure.
+    const ownCode = probeDataProperty(error, "code");
+    const poisonCode = ownCode.ok && typeof ownCode.value === "string"
+      && /^[A-Z][A-Z0-9_]{0,95}$/u.test(ownCode.value) ? ownCode.value : null;
     let causeCode = null;
     let cause = error;
     for (let depth = 0; depth < 3 && cause; depth += 1) {
@@ -3646,7 +3661,7 @@ function createAgentService(options) {
       const next = probeDataProperty(cause, "cause");
       cause = next.ok ? next.value : null;
     }
-    return { component, errorCode, causeCode };
+    return { component, errorCode, causeCode, poisonCode };
   }
 
   function rejectCoreRecoveryRequest(socket, id, failure) {
@@ -4673,6 +4688,7 @@ function createAgentService(options) {
         const params = validateBackgroundTaskParams(request.method, exactObject(request, [...baseFields, "params"]) ? request.params : null);
         const { sessionKey, ...input } = params;
         if (request.method === "background.task.list") result = { tasks: backgroundTaskService.list(sessionKey) };
+        else if (request.method === "background.task.approvals") result = { approvals: backgroundTaskService.listApprovals() };
         else if (request.method === "background.task.get") result = backgroundTaskService.detail(sessionKey, input.taskId);
         else if (request.method === "background.task.session") result = backgroundTaskService.conversationSession(sessionKey, input.taskId);
         else if (request.method === "background.task.send") result = await backgroundTaskService.uiSend(sessionKey, input);
