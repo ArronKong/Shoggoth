@@ -277,6 +277,16 @@ test("initialize 拒绝越界或额外字段并返回当前受支持协议", asy
     {
       protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
       capabilities: {},
+      clientInfo: { name: "fixture", version: "1", description: "x".repeat(4 * 1024 + 1) },
+    },
+    {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "fixture", version: "1", websiteUrl: { url: "https://example.com" } },
+    },
+    {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+      capabilities: {},
       clientInfo: { name: "fixture", version: "1" },
       token: "forbidden",
     },
@@ -335,6 +345,33 @@ test("initialize 拒绝越界或额外字段并返回当前受支持协议", asy
     const response = await extensionHandler(initialize(10, { capabilities }));
     assert.equal(response.error, undefined, JSON.stringify(capabilities));
     extensionHandler.close();
+  }
+});
+
+test("Claude Code 2.1.329 的 MCP 客户端信息可完成初始化并读取产品工具", async () => {
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a",
+    sessionToken: token(0x2e),
+    requestService: async () => assert.fail("handshake and catalog must not call a tool"),
+  });
+  try {
+    const initialized = await handler(initialize(1, {
+      protocolVersion: "2025-11-25",
+      capabilities: { roots: { listChanged: true }, elicitation: { form: {}, url: {} } },
+      clientInfo: {
+        name: "claude-code",
+        title: "Claude Code",
+        version: "2.1.329",
+        description: "Anthropic's agentic coding tool",
+        websiteUrl: "https://claude.com/claude-code",
+      },
+    }));
+    assert.equal(initialized.error, undefined);
+    assert.equal(initialized.result.protocolVersion, MCP_STDIO_PROTOCOL_VERSION);
+    assert.deepEqual((await listAllTools(handler, 2)).map((tool) => tool.name),
+      [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
+  } finally {
+    handler.close();
   }
 });
 

@@ -14,6 +14,7 @@ const { assignBuiltinAgentAvatar } = require("../app/agent-service/builtin-agent
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { readClientToken, requestService } = require("../app/agent-service/client");
 const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME } = require("../app/agent-service/runtime-account");
+const { isRuntimeAvailable } = require("../app/runtime-availability");
 const { startStaticServer } = require("../app/static-server");
 const builtin = require("../app/assets/agent-avatars/builtin/manifest.json");
 const library = require("../app/assets/agent-avatars/manifest.json");
@@ -22,6 +23,8 @@ const assetDir = path.resolve(__dirname, "../app/assets/agent-avatars");
 const spec = (runtime) => BUILTIN_CLI_AGENT_PROFILES.find(profile => profile.runtime === runtime);
 const entryFor = (profileId) => builtin.entries.find(entry => entry.profileId === profileId);
 const reservedBytes = (entry) => fs.readFileSync(path.join(assetDir, "builtin", entry.file));
+const availableCliSpecs = BUILTIN_CLI_AGENT_PROFILES.filter(profile => isRuntimeAvailable(profile.runtime));
+const activeReserved = [entryFor(DEFAULT_AGENT_PROFILE_ID), ...availableCliSpecs.map(profile => entryFor(profile.id))];
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/5ZkAAAAASUVORK5CYII=", "base64");
 
 function fixture(t, installed = []) {
@@ -41,10 +44,10 @@ function fixture(t, installed = []) {
   f.ensure = () => f.call("agent.builtin.ensure", {
     runtimeAccountIds: Object.values(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME), locale: "zh-CN",
   });
-  f.readAvatar = async (agentId) => {
+  f.readAvatar = async (agentId, mediaType = "image/jpeg") => {
     const response = await fetch(`${f.http.url}/avatar/${agentId}`);
     assert.equal(response.status, 200);
-    assert.equal(response.headers.get("content-type"), "image/jpeg");
+    assert.equal(response.headers.get("content-type"), mediaType);
     return Buffer.from(await response.arrayBuffer());
   };
   t.after(async () => {
@@ -63,11 +66,11 @@ function assertRandomAvatar(f, agentId, bytes) {
   assert.ok(library.entries.some(entry => entry.file === selections.assignments[agentId]));
 }
 
-test("fresh startup assigns all seven exact reserved images before any avatar request", async t => {
+test("fresh startup assigns every available built-in its exact reserved image before any avatar request", async t => {
   const f = fixture(t, Object.values(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME));
   await f.start();
-  assert.equal(f.service.productStore.listAgentProfiles().length, 7);
-  for (const entry of builtin.entries) {
+  assert.equal(f.service.productStore.listAgentProfiles().length, activeReserved.length);
+  for (const entry of activeReserved) {
     const profile = f.service.productStore.getAgentProfile(entry.profileId);
     assert.equal(profile.agentId, entry.agentId);
     assert.deepEqual(fs.readFileSync(f.avatarFile(entry)), reservedBytes(entry), "assignment happens at creation");
@@ -76,7 +79,9 @@ test("fresh startup assigns all seven exact reserved images before any avatar re
   await f.service.stop();
   await f.start();
   assert.deepEqual((await f.ensure()).createdProfileIds, []);
-  for (const entry of builtin.entries) assert.deepEqual(await f.readAvatar(entry.agentId), reservedBytes(entry));
+  for (const entry of activeReserved) {
+    assert.deepEqual(await f.readAvatar(entry.agentId), reservedBytes(entry));
+  }
 });
 
 test("CLIs installed or connected later receive their reserved images through an already running avatar server", async t => {
@@ -91,14 +96,16 @@ test("CLIs installed or connected later receive their reserved images through an
   const codex = entryFor(spec("codex").id);
   assertRandomAvatar(f, codex.agentId, await f.readAvatar(codex.agentId));
   f.installed.push(...Object.values(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME));
-  assert.equal((await f.ensure()).createdProfileIds.length, 6);
-  for (const entry of builtin.entries) assert.deepEqual(await f.readAvatar(entry.agentId), reservedBytes(entry));
+  assert.equal((await f.ensure()).createdProfileIds.length, availableCliSpecs.length);
+  for (const entry of activeReserved) {
+    assert.deepEqual(await f.readAvatar(entry.agentId), reservedBytes(entry));
+  }
   const selections = JSON.parse(fs.readFileSync(path.join(f.paths.userDataRoot,
     "agent-avatars/.default-selections.json"), "utf8"));
   assert.equal(selections.assignments[codex.agentId], undefined, "reserved image releases the earlier random selection");
 });
 
-test("delete, restart and create an Agent with the same name uses the random library; archive restore retains the old identity", async t => {
+test("after an archive, a distinct new Agent uses the random library and restore keeps the original image", async t => {
   const grok = spec("grok-build");
   const f = fixture(t, [DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[grok.runtime]]);
   await f.start();
@@ -110,8 +117,10 @@ test("delete, restart and create an Agent with the same name uses the random lib
   await f.start();
   assert.deepEqual((await f.ensure()).createdProfileIds, []);
   assert.equal(f.service.productStore.getAgentProfile(grok.id).enabled, false);
+  await assert.rejects(f.call("agent.create", { operationId: "duplicate-grok", backendId: "shoggoth",
+    name: "Grok", defaultCwd: null, createdAt: Date.now() }), { code: "AGENT_NAME_CONFLICT" });
   const replacement = await f.call("agent.create", { operationId: "new-grok", backendId: "shoggoth",
-    name: "Grok", defaultCwd: null, createdAt: Date.now() });
+    name: "Grok copy", defaultCwd: null, createdAt: Date.now() });
   assert.notEqual(replacement.profile.agentId, grok.agentId);
   assertRandomAvatar(f, replacement.profile.agentId, await f.readAvatar(replacement.profile.agentId));
   await f.call("agent.update", { operationId: "rename-new-grok", profileId: replacement.profile.id,
@@ -144,15 +153,15 @@ test("custom uploads keep priority and removing them after restart does not reas
 });
 
 test("an existing installation keeps its current default selections without receiving the new reserved images", async t => {
-  const codex = spec("codex");
-  const f = fixture(t, [DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[codex.runtime]]);
+  const specs = availableCliSpecs.filter(profile => ["codex", "claude-code"].includes(profile.runtime));
+  const f = fixture(t, specs.map(profile => DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[profile.runtime]));
   const store = new JsonlProductStore({ paths: f.paths }).open();
   const state = new BuiltinAgentState({ paths: f.paths });
   state.open();
   ensureBuiltinCliAgentProfiles(store, new Set(f.installed), state);
   store.close();
   f.http = await startStaticServer(0, { homeDir: f.paths.homeDir, userDataRoot: f.paths.userDataRoot });
-  const entries = [entryFor(DEFAULT_AGENT_PROFILE_ID), entryFor(codex.id)];
+  const entries = [entryFor(DEFAULT_AGENT_PROFILE_ID), ...specs.map(profile => entryFor(profile.id))];
   const previous = await Promise.all(entries.map(entry => f.readAvatar(entry.agentId)));
   await f.start();
   await f.ensure();

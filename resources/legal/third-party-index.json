@@ -2,6 +2,48 @@
   "version": 1,
   "npm": [
     {
+      "name": "@anthropic-ai/claude-agent-sdk-darwin-arm64",
+      "version": "0.3.329",
+      "license": "SEE LICENSE IN LICENSE.md",
+      "integrity": "sha512-SaVFEDYHofgKftJGX8Uf5oa1wG9d2E9QAQqEpSCtiJrt7Ih82Ekn9b4ir0GufgwoOKx5IOv/CnMsXIWRl9vWrg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "CLAUDE-AGENT-SDK-LICENSE.md"
+      ],
+      "source": "https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk/v/0.3.329"
+    },
+    {
+      "name": "@anthropic-ai/claude-agent-sdk-darwin-x64",
+      "version": "0.3.329",
+      "license": "SEE LICENSE IN LICENSE.md",
+      "integrity": "sha512-nYtGrz5oe/SK8jMKr/JArzrjEBtTqLWlRBlGu6QLXBoXd4PB5Fdj+Nh7Idnf+LD8OwWz1fqXj8zt0HTIUMSvYA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "CLAUDE-AGENT-SDK-LICENSE.md"
+      ],
+      "source": "https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk/v/0.3.329"
+    },
+    {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.329",
+      "license": "SEE LICENSE IN README.md",
+      "integrity": "sha512-aKVIgPBmgNHBoNXUFG5eVJXudDd+amObxT6QH9b6R2yGKf4eisPZ3Ij5RSpkFHDvJvaZy8m1AJeEkbKSusTU/Q==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "CLAUDE-AGENT-SDK-LICENSE.md"
+      ],
+      "source": "https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk/v/0.3.329"
+    },
+    {
       "name": "@babel/runtime",
       "version": "7.29.7",
       "license": "MIT",
@@ -381,6 +423,20 @@
       "source": "https://registry.npmjs.org/builder-util-runtime/-/builder-util-runtime-9.7.0.tgz"
     },
     {
+      "name": "call-bind-apply-helpers",
+      "version": "1.0.2",
+      "license": "MIT",
+      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/call-bind-apply-helpers@1.0.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz"
+    },
+    {
       "name": "cookie",
       "version": "1.1.1",
       "license": "MIT",
@@ -495,6 +551,20 @@
       "selectedLicense": "Apache-2.0"
     },
     {
+      "name": "dunder-proto",
+      "version": "1.0.1",
+      "license": "MIT",
+      "integrity": "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/dunder-proto@1.0.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz"
+    },
+    {
       "name": "electron-updater",
       "version": "6.8.9",
       "license": "MIT",
@@ -563,6 +633,20 @@
         "licenses/npm/es-errors@1.3.0/LICENSE"
       ],
       "source": "https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz"
+    },
+    {
+      "name": "es-object-atoms",
+      "version": "1.1.2",
+      "license": "MIT",
+      "integrity": "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/es-object-atoms@1.1.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz"
     },
     {
       "name": "es6-error",
@@ -678,6 +762,48 @@
       "source": "https://registry.npmjs.org/fs-extra/-/fs-extra-10.1.0.tgz"
     },
     {
+      "name": "function-bind",
+      "version": "1.1.2",
+      "license": "MIT",
+      "integrity": "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/function-bind@1.1.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz"
+    },
+    {
+      "name": "get-intrinsic",
+      "version": "1.3.0",
+      "license": "MIT",
+      "integrity": "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/get-intrinsic@1.3.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz"
+    },
+    {
+      "name": "get-proto",
+      "version": "1.0.1",
+      "license": "MIT",
+      "integrity": "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/get-proto@1.0.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz"
+    },
+    {
       "name": "global-agent",
       "version": "3.0.0",
       "license": "BSD-3-Clause",
@@ -748,6 +874,34 @@
       "source": "https://registry.npmjs.org/has-property-descriptors/-/has-property-descriptors-1.0.2.tgz"
     },
     {
+      "name": "has-symbols",
+      "version": "1.1.0",
+      "license": "MIT",
+      "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/has-symbols@1.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz"
+    },
+    {
+      "name": "hasown",
+      "version": "2.0.4",
+      "license": "MIT",
+      "integrity": "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/hasown@2.0.4/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz"
+    },
+    {
       "name": "highlight.js",
       "version": "11.11.1",
       "license": "BSD-3-Clause",
@@ -788,6 +942,20 @@
         "licenses/npm/i18next@26.3.0/LICENSE"
       ],
       "source": "https://registry.npmjs.org/i18next/-/i18next-26.3.0.tgz"
+    },
+    {
+      "name": "inherits",
+      "version": "2.0.4",
+      "license": "ISC",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/inherits@2.0.4/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz"
     },
     {
       "name": "isexe",
@@ -1042,6 +1210,20 @@
       "source": "https://registry.npmjs.org/matcher/-/matcher-3.0.0.tgz"
     },
     {
+      "name": "math-intrinsics",
+      "version": "1.1.0",
+      "license": "MIT",
+      "integrity": "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/math-intrinsics@1.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz"
+    },
+    {
       "name": "mdurl",
       "version": "2.0.0",
       "license": "MIT",
@@ -1096,6 +1278,20 @@
         "licenses/npm/object-keys@1.1.1/LICENSE"
       ],
       "source": "https://registry.npmjs.org/object-keys/-/object-keys-1.1.1.tgz"
+    },
+    {
+      "name": "once",
+      "version": "1.4.0",
+      "license": "ISC",
+      "integrity": "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/once@1.4.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/once/-/once-1.4.0.tgz"
     },
     {
       "name": "onnxruntime-common",
@@ -1647,6 +1843,20 @@
         "licenses/npm/which@2.0.2/LICENSE"
       ],
       "source": "https://registry.npmjs.org/which/-/which-2.0.2.tgz"
+    },
+    {
+      "name": "wrappy",
+      "version": "1.0.2",
+      "license": "ISC",
+      "integrity": "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/wrappy@1.0.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/wrappy/-/wrappy-1.0.2.tgz"
     },
     {
       "name": "ws",

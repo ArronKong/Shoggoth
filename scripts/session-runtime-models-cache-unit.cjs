@@ -6,7 +6,9 @@ const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { requestService } = require("../app/agent-service/client");
-const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
+const { DEFAULT_RUNTIME_ACCOUNTS, NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID: CLAUDE,
+  SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
+const { isRuntimeAvailable } = require("../app/runtime-availability");
 const { createConfigStore, projectNativeRuntimeConfig } = require("../app/core/config-store");
 const { createRuntimeModelCacheStore } = require("../app/core/runtime-model-cache-store");
 
@@ -17,7 +19,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {
   const catalogs = { codex: ["fixture-model", "codex-only"], pi: ["fixture-model", "pi-only"],
-    opencode: ["fixture-model", "opencode-only"], "deepseek-harness": ["fixture-model", "dsh-only"] };
+    opencode: ["fixture-model", "opencode-only"], "deepseek-harness": ["fixture-model", "dsh-only"],
+    "claude-code": ["opus", "sonnet"] };
   const f = await openHandoffFixture({ builtinCliProfiles: true, catalogs });
   try {
     const configStore = createConfigStore(path.join(f.root, "ui-config.json"));
@@ -77,14 +80,16 @@ async function run() {
     const settle = () => delay(SLOW + 200);
 
     // 1. A cold menu loads every candidate together instead of three at a time.
-    for (const account of [HARNESS, "native-codex-default-v1", PI, "native-opencode-default-v1", "native-deepseek-harness-default-v1"]) {
+    const accounts = [HARNESS, "native-codex-default-v1", PI, "native-opencode-default-v1", "native-deepseek-harness-default-v1"];
+    if (isRuntimeAvailable("claude-code")) accounts.push(CLAUDE);
+    for (const account of accounts) {
       rules.set(account, { delayMs: SLOW });
     }
     let { result, ms } = await read();
-    assert.equal(result.runtimes.length, 5, JSON.stringify(result.runtimes));
+    assert.equal(result.runtimes.length, accounts.length, JSON.stringify(result.runtimes));
     assert.ok(result.runtimes.every(entry => entry.available), "cold catalogs all load");
     assert.ok(ms >= SLOW - 50, `cold read waits for real catalogs (${ms}ms)`);
-    assert.ok(ms < SLOW * 2 - 100, `five slow catalogs load concurrently (${ms}ms)`);
+    assert.ok(ms < SLOW * 2 - 100, `slow catalogs load concurrently (${ms}ms)`);
     rules.clear();
 
     // 2. A slow refresh no longer holds the menu: the previous catalog is shown.
@@ -167,6 +172,21 @@ async function run() {
     const own = (facade) => read(undefined, undefined, facade);
     let facade = await restarted();
     await own(facade); await settle();
+    if (isRuntimeAvailable("claude-code")) {
+      const stored = cache.read();
+      const saved = stored[`account:${CLAUDE}`];
+      saved.snapshot.models.unshift({ id: "default", displayName: "Default (recommended)", description: "", isDefault: true });
+      cache.write(stored);
+      const claudeSession = sessionFor("shoggoth-claude-code");
+      f.service.chatSessionStore.setModelOverride(claudeSession.sessionKey, "default");
+      facade = await restarted();
+      rules.set(CLAUDE, { delayMs: SLOW });
+      ({ result } = await read("shoggoth-claude-code", claudeSession.sessionKey, facade));
+      assert.deepEqual(group(result, CLAUDE).ids, ["opus", "sonnet"], "old cache never offers the retired alias");
+      assert.equal(result.selection.model, "opus", "saved default highlights the concrete model");
+      assert.equal(f.service.chatSessionStore.getSession(claudeSession.sessionKey).modelOverride, "default");
+      rules.clear();
+    }
     facade = await restarted();
     rules.set(PI, { delayMs: SLOW });
     ({ result, ms } = await own(facade));

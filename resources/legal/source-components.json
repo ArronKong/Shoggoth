@@ -367,6 +367,18 @@
         "licenses/overrides/QRCODE-GENERATOR-2.0.4.txt"
       ],
       "source": "https://github.com/kazuhikoarase/qrcode-generator/blob/83b7e8fe3fddd3b0368dbafd6ce56995bd25e3c8/LICENSE"
+    },
+    {
+      "names": [
+        "@anthropic-ai/claude-agent-sdk",
+        "@anthropic-ai/claude-agent-sdk-darwin-arm64",
+        "@anthropic-ai/claude-agent-sdk-darwin-x64"
+      ],
+      "version": "0.3.329",
+      "licenseFiles": [
+        "CLAUDE-AGENT-SDK-LICENSE.md"
+      ],
+      "source": "https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk/v/0.3.329"
     }
   ]
 }

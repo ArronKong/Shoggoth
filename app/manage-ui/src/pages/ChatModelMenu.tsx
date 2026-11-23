@@ -21,6 +21,7 @@ export interface ModelMenuChoice {
   modelProviderRef?: string;
   runtime?: string;
   runtimeName?: string;
+  isDefault?: boolean;
   disabled?: boolean;
   available?: boolean;
   reasoning?: boolean;

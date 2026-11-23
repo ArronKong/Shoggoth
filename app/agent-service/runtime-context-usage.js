@@ -40,6 +40,8 @@ const NATIVE_COMPACTION = Object.freeze({
   codex: Object.freeze({ mode: "command", automatic: true }),
   opencode: Object.freeze({ mode: "command", automatic: true }),
   "grok-build": Object.freeze({ mode: "turn", automatic: true }),
+  // Claude Code runs `/compact` as one turn and reports it with compact_boundary.
+  "claude-code": Object.freeze({ mode: "turn", automatic: true }),
   pi: Object.freeze({ mode: "turn", automatic: false }),
   "deepseek-harness": Object.freeze({ mode: "turn", automatic: false }),
 });
@@ -55,7 +57,7 @@ function runtimeContextCapabilities(runtime) {
     "context.compact.native": nativeCompaction(runtime) !== null,
     // Capability describes what the CLI supports, not a guarantee that the
     // user's CLI configuration currently enables automatic compaction.
-    "context.compact.auto": ["codex", "pi", "opencode", "grok-build", "antigravity"].includes(runtime),
+    "context.compact.auto": ["codex", "pi", "opencode", "grok-build", "antigravity", "claude-code"].includes(runtime),
   });
 }
 function unknownRuntimeContextUsage(runtimeSessionId, { contextWindow = null, observedAt = Date.now(), source = "runtime_event" } = {}) {

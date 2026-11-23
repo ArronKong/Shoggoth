@@ -390,7 +390,7 @@ for (const [runtime, module, Adapter] of [
   assert.equal(p.snapshot().recentTools[0].status, "completed");
 });
 
-test("release-disabled claude-code and unknown MCP host retain explicit unsupported capability", async () => {
+test("unregistered claude-code and unknown MCP host retain explicit unsupported capability", async () => {
   const registry = new RuntimeAdapterRegistry(); const rb = { runtime: "claude-code", runtimeProfileId: "rp", runtimeAccountId: "ra" };
   await assert.rejects(registry.acquire(rb), error => error.code === "RUNTIME_UNSUPPORTED");
   const caps = nativeCapabilities({ "session.start": true, "session.resume": true, "turn.start": true, events: true }, null);

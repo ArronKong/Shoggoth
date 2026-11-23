@@ -10,6 +10,7 @@ const { settingsForModelSwitch } = require("./chat-model-settings");
 const codexSessionProvider = require("./codex-session-provider");
 const { captureExecutionProviderRoute, assertExecutionProviderRouteCurrent } = require("./execution-provider-route");
 const { cronSessionHasModel } = require("./native-cron-model");
+const { isLegacyClaudeDefaultModel, matchesRuntimeModel } = require("./runtime-model-selection");
 
 const CATALOG_MODEL_REUSE_MS = 60_000;
 // Failures that say the queued pick itself cannot run; anything else may succeed on retry.
@@ -107,13 +108,13 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     }
     return mode;
   }
-  async function readCatalogModel(profileId, bindingId, selectedModel, selectedProvider) {
+  async function readCatalogModel(profileId, binding, selectedModel, selectedProvider) {
     if (selectedModel === undefined || !listBindingModels) return;
     let cursor = null;
     const cursors = new Set();
     for (let pageIndex = 0; pageIndex < 16; pageIndex++) {
-      const page = await listBindingModels({ profileId, bindingId, cursor, limit: 100 });
-      const model = page.models.find(entry => entry.id === selectedModel
+      const page = await listBindingModels({ profileId, bindingId: binding.id, cursor, limit: 100 });
+      const model = page.models.find(entry => matchesRuntimeModel(binding.runtime, selectedModel, entry)
         && (entry.modelProviderRef ?? null) === (selectedProvider ?? null));
       if (model) return model;
       if (!page.hasMore || !page.nextCursor || cursors.has(page.nextCursor)) break;
@@ -132,7 +133,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       selectedModel, selectedProvider ?? null]);
     const recent = catalogModels.get(key);
     if (recent && Date.now() - recent.at < CATALOG_MODEL_REUSE_MS) return recent.model;
-    const model = await readCatalogModel(profileId, binding.id, selectedModel, selectedProvider);
+    const model = await readCatalogModel(profileId, binding, selectedModel, selectedProvider);
     catalogModels.delete(key);
     catalogModels.set(key, { model, at: Date.now() });
     while (catalogModels.size > 256) catalogModels.delete(catalogModels.keys().next().value);
@@ -180,7 +181,9 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       if (observed.authenticated === false && providerRef) observed = { ...observed, authenticated: true };
     }
     const mode = permissionAdjustment(profile, session, binding);
-    const clearModelOverride = selectedModel === undefined && !!session.modelOverride && !observed.models?.includes(session.modelOverride);
+    const observedModel = isLegacyClaudeDefaultModel(binding.runtime, session.modelOverride)
+      ? observed.defaultModel : session.modelOverride;
+    const clearModelOverride = selectedModel === undefined && !!session.modelOverride && !observed.models?.includes(observedModel);
     const support = supports({ binding, facts: observed, requirements: {
       model: selectedModel === undefined ? (clearModelOverride ? null : session.modelOverride) ?? runtimeProfile.defaultModel
         : model ? null : selectedModel,
@@ -577,7 +580,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
             await readConfiguredModel(target, providerRef, selection.model);
           }
         } else {
-          await readCatalogModel(profileId, binding.id, selection.model, null);
+          await readCatalogModel(profileId, binding, selection.model, null);
         }
         const latest = productStore.getAgentRuntimeBinding(profileId, binding.id);
         if (!productStore.getAgentProfile(profileId)?.enabled || !latest?.enabled || latest.revision !== binding.revision) throw unavailable();

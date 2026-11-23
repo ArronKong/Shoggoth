@@ -38,7 +38,7 @@ async function run() {
     assert.ok(rows.every(row => row.backendId === "shoggoth"));
     assert.ok(rows.every(row => row.readiness === "unverified"), "installation without a proof is never Ready");
     assert.equal(rows.find(row => row.runtime === "pi").enabled, false);
-    assert.equal(rows.find(row => row.runtime === "claude-code").releaseEnabled, false);
+    assert.equal(rows.find(row => row.runtime === "claude-code").releaseEnabled, true);
     assert.equal(rows.find(row => row.runtime === "codex").installation, "available");
     assert.deepEqual(backend._bindingAvailability("shoggoth-codex", "codex", NATIVE_CODEX_RUNTIME_ACCOUNT_ID),
       { available: true, reason: null });

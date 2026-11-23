@@ -22,7 +22,11 @@ export function collectThirdPartyLicenses(root, { check = false } = {}) {
       // JavaScript, while its node_modules (including type declarations) are excluded.
       const developmentOnly = entry.dev || entry.devOptional
         || (scope === "frontend" && name.startsWith("@types/"));
-      const distributed = supportedPlatform && (!developmentOnly || name === "electron");
+      // npm installs undeclared peers (the Claude Agent SDK's type-level SDK/MCP/zod
+      // peers). electron-builder ships an explicit node_modules allowlist, so
+      // peer-only packages never reach the application package.
+      const peerOnly = scope === "desktop" && entry.peer === true;
+      const distributed = supportedPlatform && !peerOnly && (!developmentOnly || name === "electron");
       let component = components.get(key);
       if (!component) {
         component = { name, version: entry.version, license: entry.license, integrity: entry.integrity,

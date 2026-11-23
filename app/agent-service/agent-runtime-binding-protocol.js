@@ -4,6 +4,9 @@ const { serviceError } = require("./security");
 const { BINDING_FIELDS, BINDING_OPTIONAL_FIELDS, validBindingModel, validateAgentRuntimeBinding,
   MAX_AGENT_RUNTIME_BINDINGS } = require("./agent-runtime-binding");
 const { validProviderSelection } = require("./codex-session-provider");
+const { DEFAULT_RUNTIME_ACCOUNTS } = require("./runtime-account");
+
+const MAX_SYNC_RUNTIME_ACCOUNTS = DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").length;
 
 const AGENT_BINDING_METHODS = Object.freeze([
   "agent.binding.list", "agent.binding.sync", "agent.binding.add", "agent.binding.update", "agent.binding.remove",
@@ -69,7 +72,7 @@ function validateAgentBindingParams(method, value) {
       const values = data.runtimeAccountIds;
       if (!Array.isArray(values) || Object.getPrototypeOf(values) !== Array.prototype) throw invalid();
       const length = Object.getOwnPropertyDescriptor(values, "length").value;
-      if (length > 6 || Reflect.ownKeys(values).length !== length + 1) throw invalid();
+      if (length > MAX_SYNC_RUNTIME_ACCOUNTS || Reflect.ownKeys(values).length !== length + 1) throw invalid();
       const accounts = [];
       for (let index = 0; index < length; index++) {
         const field = Object.getOwnPropertyDescriptor(values, String(index));

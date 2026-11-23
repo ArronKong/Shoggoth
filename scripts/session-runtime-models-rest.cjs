@@ -102,7 +102,7 @@ async function run() {
     let catalog = await request();
     assert.equal(catalog.status, 200, JSON.stringify(catalog.body));
     assert.equal(catalog.body.selection.canSwitch, true, "fresh App must allow cross-Runtime selection");
-    assert.deepEqual(new Set(catalog.body.runtimes.map(runtime => runtime.runtime)), new Set(["codex", "pi", "opencode", "deepseek-harness"]));
+    assert.deepEqual(new Set(catalog.body.runtimes.map(runtime => runtime.runtime)), new Set(["codex", "pi", "opencode", "deepseek-harness", "claude-code"]));
     assert.deepEqual(catalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
       .map(runtime => runtime.name), ["Shoggoth", "Codex"]);
     assert.equal(catalog.body.models.length, 10, JSON.stringify(catalog.body));

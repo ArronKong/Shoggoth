@@ -8,6 +8,7 @@ const { publicCronTranscript } = require("./cron-output-policy");
 const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { agentWorkspaceRoot, ensureAgentWorkspace, managedChatWorkspace } = require("./chat-workspace");
 const { settingsForModelSwitch } = require("./chat-model-settings");
+const { matchesRuntimeModel } = require("./runtime-model-selection");
 const codexSessionProvider = require("./codex-session-provider");
 const {
   federationInputProvenanceForOperationId,
@@ -943,8 +944,9 @@ function createChatServiceController(options = {}) {
     }
     const session = chatSessionStore.getSession(params.sessionKey);
     if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
-    enabledProfile(session.profileId);
+    const profile = enabledProfile(session.profileId);
     const settingsBindingId = session.nextRuntimeSelection?.bindingId ?? session.runtimeBindingId;
+    const runtime = productStore.getAgentRuntimeBinding?.(profile.id, settingsBindingId)?.runtime ?? profile.runtime;
 
     let cursor = null;
     const cursors = new Set();
@@ -960,7 +962,7 @@ function createChatServiceController(options = {}) {
         });
         fence(generation);
         // This older endpoint selects from the Binding's default model source.
-        model = page.models.find(item => item.id === params.model && !item.modelProviderRef);
+        model = page.models.find(item => matchesRuntimeModel(runtime, params.model, item) && !item.modelProviderRef);
         if (model) break;
         if (!page.hasMore) break;
         if (page.nextCursor === null || page.nextCursor === cursor || cursors.has(page.nextCursor)) {
@@ -986,7 +988,7 @@ function createChatServiceController(options = {}) {
       throw controllerError("CHAT_SESSION_NOT_READY", "会话已变化，请重试");
     }
     const modelSettings = settingsForModelSwitch(current, model.capabilities);
-    return { session: chatSessionStore.setModelOverride(params.sessionKey, params.model, modelSettings) };
+    return { session: chatSessionStore.setModelOverride(params.sessionKey, model.id, modelSettings) };
   }
 
   async function setSessionSettings(params, generation) {
@@ -1013,7 +1015,8 @@ function createChatServiceController(options = {}) {
         ...(settingsBindingId && options.listBindingModels ? { bindingId: settingsBindingId } : {}) });
       fence(generation);
       model = page.models.find(item => (item.modelProviderRef ?? null) === catalogSource
-        && (selected ? item.id === selected : item.isDefault || catalogSource === codexSessionProvider.CHATGPT_SELECTION));
+        && (selected ? matchesRuntimeModel(route.runtime, selected, item)
+          : item.isDefault || catalogSource === codexSessionProvider.CHATGPT_SELECTION));
       if (model || !page.hasMore) break;
       if (!page.nextCursor || cursors.has(page.nextCursor)) throw controllerError("BACKEND_NOT_READY", "模型目录游标无效");
       cursors.add(page.nextCursor); cursor = page.nextCursor;
