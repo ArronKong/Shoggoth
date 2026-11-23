@@ -80,6 +80,10 @@ async function main() {
     tsconfigRaw: { compilerOptions: { experimentalDecorators: false } },
     outfile: "app/agent-service/shoggoth-memory/core.cjs",
     plugins: [{ name: "shoggoth-memory-host", setup(build) {
+      // The desktop dependency tree also supplies ipaddr.js. Use the copy pinned with the memory core.
+      build.onResolve({ filter: /^ipaddr\.js$/ }, () => ({
+        path: path.join(deps, "ipaddr.js", "lib", "ipaddr.js"),
+      }));
       build.onResolve({ filter: /^openclaw\/plugin-sdk\/ssrf-runtime$/ }, () => ({
         path: path.join(port, "embedding-ssrf-runtime.ts"),
       }));
