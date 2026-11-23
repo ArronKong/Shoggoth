@@ -6,9 +6,14 @@ import type { SessionRuntimeModel, SessionRuntimeModels } from "../types";
 import { sessionRuntimeSupportKey } from "./sessionRuntimeSupport";
 
 type RuntimeCatalog = Pick<SessionRuntimeModels, "models" | "runtimes">;
-type ReadState = { key: string; data?: SessionRuntimeModels; error?: boolean };
+type ReadState = { key: string; data?: SessionRuntimeModels; error?: boolean; needsRead?: boolean };
 type PickRequest = { model: string; bindingId: string; permissionMode: string | null; quiet: boolean;
   modelProviderRef?: string; activeTurn: boolean };
+type SettingPick = { kind: "thinking"; level: string } | { kind: "fast" };
+type WriteKind = "model" | SettingPick["kind"];
+type WriteResults = Partial<Record<WriteKind, boolean>>;
+type QueuedWrite = { kind: WriteKind; save: (isLast: () => boolean, results: WriteResults) => Promise<boolean> };
+type WriteChain = { queued: QueuedWrite[]; done: Promise<WriteResults> };
 
 // Opening the menu re-reads only a catalog older than this.
 const MENU_REFRESH_AFTER_MS = 30_000;
@@ -38,11 +43,10 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
   const generation = useRef(0);
   const mounted = useRef(false);
   const [pendingSelections, setPendingSelections] = useState(() => new Map<string, SessionRuntimeModel>());
+  const [pendingThinking, setPendingThinking] = useState(() => new Map<string, string>());
   const selecting = useRef(pendingSelections);
   const flight = useRef<{ key: string; request: number; promise: Promise<void>; controller: AbortController } | null>(null);
-  // One write chain per conversation. A pick made while a write runs replaces any pick
-  // not yet written; the chain resolves with the outcome of the last one.
-  const writes = useRef(new Map<string, { latest: PickRequest | null; done: Promise<boolean> }>());
+  const writes = useRef(new Map<string, WriteChain>());
   const [state, setState] = useState<ReadState>({ key: "" });
   // Mirrors `state` synchronously, so a write that waited for a read sees its result at once.
   const confirmed = useRef<ReadState>(state);
@@ -110,7 +114,8 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
   const refreshIfStale = useCallback(() => {
     const read = key ? sessionReads.get(key) : undefined;
     const current = confirmed.current;
-    if (current.key === key && current.data && !current.error && read && Date.now() - read.at < MENU_REFRESH_AFTER_MS) {
+    if (current.key === key && current.data && !current.error && !current.needsRead && read
+      && Date.now() - read.at < MENU_REFRESH_AFTER_MS) {
       return Promise.resolve();
     }
     return refresh();
@@ -125,9 +130,9 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
 
   // Writes one pick. `isLast` tells whether no newer pick is waiting: only the last one
   // clears the shown choice, reports a failure and re-reads after it.
-  const write = async (pick: PickRequest, isLast: () => boolean) => {
+  const writeModel = async (pick: PickRequest, isLast: () => boolean) => {
     // A catalog shown from an earlier read carries an old revision: write after this conversation's own read.
-    if (confirmed.current.key !== key || !confirmed.current.data) {
+    if (confirmed.current.key !== key || !confirmed.current.data || confirmed.current.needsRead) {
       await (flight.current?.key === key ? flight.current.promise : read(true));
     }
     const current = mounted.current && currentKey.current === key && confirmed.current.key === key && !confirmed.current.error
@@ -175,8 +180,34 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
     return false;
   };
 
-  // The choice shows at once and is written in the background, so the composer never
-  // waits for it; `settled` lets a send or a setting change wait for the write.
+  // Model and effort settings share a session revision. Keep them in click order
+  // and coalesce repeated picks that have no intervening change of a different kind.
+  const enqueueWrite = (job: QueuedWrite) => {
+    let chain = writes.current.get(key);
+    if (chain) {
+      if (chain.queued.at(-1)?.kind === job.kind) chain.queued.pop();
+      chain.queued.push(job);
+    } else {
+      const current: WriteChain = { queued: [job], done: Promise.resolve({}) };
+      writes.current.set(key, current);
+      current.done = (async () => {
+        const results: WriteResults = {};
+        try {
+          while (current.queued.length) {
+            const next = current.queued.shift()!;
+            results[next.kind] = await next.save(() => current.queued.every(item => item.kind !== next.kind), results);
+          }
+          return results;
+        } finally {
+          writes.current.delete(key);
+        }
+      })();
+      chain = current;
+    }
+    return chain.done.then(results => results[job.kind] === true);
+  };
+
+  // The composer shows choices immediately and waits for their writes only before sending.
   // `quiet`: an automatic choice fails silently; the menu still offers every model.
   const select = (model: string, bindingId: string, permissionMode: string | null,
     { quiet = false, modelProviderRef, activeTurn = false }: { quiet?: boolean; modelProviderRef?: string; activeTurn?: boolean } = {}) => {
@@ -186,28 +217,40 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
     if (!choice || (data && !data.selection.canSwitch && bindingId !== data.selection.bindingId)) return Promise.resolve(false);
     changePending(choice);
     const pick = { model, bindingId, permissionMode, quiet, modelProviderRef, activeTurn };
-    const running = writes.current.get(key);
-    if (running) { running.latest = pick; return running.done; }
-    const chain: { latest: PickRequest | null; done: Promise<boolean> } = { latest: pick, done: Promise.resolve(false) };
-    writes.current.set(key, chain);
-    chain.done = (async () => {
-      let saved = false;
-      try {
-        while (chain.latest) {
-          const next = chain.latest;
-          chain.latest = null;
-          saved = await write(next, () => chain.latest === null);
-        }
-      } finally {
-        if (writes.current.get(key) === chain) writes.current.delete(key);
-      }
-      return saved;
-    })();
-    return chain.done;
+    return enqueueWrite({ kind: "model", save: isLast => writeModel(pick, isLast) });
   };
-  // Resolves when this conversation's picks are written: true unless the last one failed.
-  const settled = useCallback(() => writes.current.get(key)?.done ?? Promise.resolve(true), [key]);
+
+  const changePendingThinking = (level?: string) => {
+    if (!mounted.current) return;
+    setPendingThinking(previous => {
+      const next = new Map(previous);
+      if (level === undefined) next.delete(key); else next.set(key, level);
+      return next;
+    });
+  };
+  const selectSetting = (pick: SettingPick, save: (reportError: () => boolean) => Promise<boolean>) => {
+    if (!sessionKey || currentKey.current !== key || !connected) return Promise.resolve(false);
+    if (pick.kind === "thinking") changePendingThinking(pick.level);
+    return enqueueWrite({ kind: pick.kind, save: async (isLast, results) => {
+      try {
+        // The user chose from the new model's options while its pick was pending.
+        if (pendingModel && results.model === false) return false;
+        const saved = await save(() => mounted.current && currentKey.current === key && isLast());
+        if (mounted.current && currentKey.current === key && confirmed.current.key === key) {
+          // The settings RPC may have changed the revision without returning it.
+          cancelRead();
+          confirmed.current = { ...confirmed.current, needsRead: true };
+          setLoading(false);
+        }
+        return saved;
+      } finally {
+        if (pick.kind === "thinking" && isLast()) changePendingThinking();
+      }
+    } });
+  };
+  const getPendingWrite = useCallback(() => writes.current.get(key)?.done, [key]);
   return { data, catalog, loading: !!key && connected && (loading || (!data && !error)), error,
     confirmed: state.key === key && !!state.data && !error,
-    pending: !!pendingModel, pendingModel, refresh, refreshIfStale, select, settled };
+    pending: !!pendingModel, pendingModel, pendingThinking: pendingThinking.get(key),
+    refresh, refreshIfStale, select, selectSetting, getPendingWrite };
 }

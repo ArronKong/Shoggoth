@@ -4822,12 +4822,13 @@ function ChatPageApp() {
   // Model / thinking changes go through sessions.patch (allowed for our
   // CONTROL_UI client id); refresh the list afterwards to reflect the new value.
   const patchSession = useCallback(
-    async (patch: Record<string, unknown>, label: string) => {
-      const key = activeKeyRef.current;
+    async (patch: Record<string, unknown>, label: string, {
+      key = activeKeyRef.current, quiet = false, reportError = () => true,
+    }: { key?: string | null; quiet?: boolean; reportError?: () => boolean } = {}) => {
       if (!key) return false;
       const changesModel = "model" in patch;
-      const quietModelSwitch = changesModel && backendOfSession(key) === "hermes";
-      if (!quietModelSwitch) setToast({ text: t("chat.switchingLabel", { label }), kind: "pending" });
+      const quietSave = quiet || (changesModel && backendOfSession(key) === "hermes");
+      if (!quietSave) setToast({ text: t("chat.switchingLabel", { label }), kind: "pending" });
       try {
         const res = await send("sessions.patch", { key, ...patch });
         // patch just the active row from the response (cheaper than re-paging 1000+ sessions)
@@ -4874,7 +4875,7 @@ function ChatPageApp() {
             /* leave stale until the next full refresh */
           }
         }
-        if (quietModelSwitch) return true;
+        if (quietSave) return true;
         // R279 缺口补齐（D3.5）：如实转述后端实际落点——scope "persist" 表示当时
         // 没有活会话、写进了全局配置；warning 是网关给的补充说明（如昂贵模型提示）。
         const scope = res?.payload?.scope;
@@ -4888,8 +4889,11 @@ function ChatPageApp() {
         // 切换失败的文案可能很长（后端会把网关的真实原因带进来，如「provider 已不在
         // config 里」+ 怎么修），2.6s 读不完 → 按长度给到 7s。
         const msg = e instanceof Error ? e.message : String(e);
-        setToast({ text: t("chat.switchFailed", { msg }), kind: "error" });
-        setTimeout(() => setToast(null), msg.length > 40 ? 7000 : 2600);
+        if (reportError()) {
+          const notice = { text: t("chat.switchFailed", { msg }), kind: "error" as const };
+          setToast(notice);
+          setTimeout(() => setToast(current => current === notice ? null : current), msg.length > 40 ? 7000 : 2600);
+        }
         return false;
       }
     },
@@ -7297,6 +7301,11 @@ function ChatPageApp() {
     if (!q?.length) return;
     const item = q[0]!;
     if (item.recovery && item.recovery.backendId !== backendOfSession(key)) return;
+    const pendingWrite = runtimeModels.getPendingWrite();
+    if (pendingWrite) {
+      void pendingWrite.then(() => flushQueueRef.current?.(key));
+      return;
+    }
     const payloadBudget = inspectChatSendPayload(key, item.text, item.atts, item.expectedModel);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.queuedPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
@@ -7893,20 +7902,22 @@ function ChatPageApp() {
     }
     const text = (overrideText ?? input).trim();
     if ((!text && !attachments.length) || !key) return;
-    // A model pick is written in the background. The message waits for it so it runs on
-    // the chosen model; when the pick fails, nothing is sent and the draft stays.
-    if (usesRuntimeModelPicker && runtimeModels.pending) {
+    // Confirmation of background settings precedes taking ownership of the draft.
+    const pendingWrite = runtimeModels.getPendingWrite();
+    if (pendingWrite) {
       if (awaitingPickRef.current.has(key)) return;
       awaitingPickRef.current.add(key);
-      let saved = false;
-      try { saved = await runtimeModels.settled(); } finally { awaitingPickRef.current.delete(key); }
-      if (activeKeyRef.current !== key) return;
-      if (!saved) {
+      const draft = inputRef.current;
+      const draftAttachments = attachmentsRef.current;
+      const saved = await pendingWrite.finally(() => awaitingPickRef.current.delete(key));
+      if (activeKeyRef.current !== key || inputRef.current !== draft || attachmentsRef.current !== draftAttachments) return;
+      if (saved.model === false) {
         const notice = { text: t("chat.modelSwitchFailedNotSent"), kind: "error" as const };
         setToast(notice);
         setTimeout(() => setToast(current => current === notice ? null : current), 3200);
         return;
       }
+      if (saved.thinking === false || saved.fast === false) return;
     }
     // 轮次控制命令与故障恢复用的 /new 必须能穿过 in-flight 守卫；
     // 其余 slash 仍在当前轮次结束前拦截。
@@ -10327,37 +10338,40 @@ function ChatPageApp() {
   const xhighSupported = xhighKey ? xhighOk[xhighKey] === true : false;
   const thinkingLevels = activeThinkingOptions ?? (activeIsOpenClaw && activeThinkingDefault
     ? ["off", "minimal", "low", "medium", "high", ...(xhighSupported ? ["xhigh"] : []), "adaptive"] : []);
+  const thinkingLevel = runtimeModels.pendingThinking ?? active?.thinkingLevel;
   const effortControl = active && (thinkingLevels.length > 0 || activeFastCapable) ? {
     levels: thinkingLevels,
-    value: active.thinkingLevel && thinkingLevels.includes(active.thinkingLevel) ? active.thinkingLevel : "",
+    value: thinkingLevel && thinkingLevels.includes(thinkingLevel) ? thinkingLevel : "",
     defaultValue: activeThinkingDefault,
     defaultLabel: t("chat.defaultLevel"),
     levelLabel: thinkLabel,
     fastCapable: !!activeFastCapable,
     fastOn: !!(active.fastMode ?? fastByKey[active.key]),
-    // A pick in progress is written first, so the new model's setting is not overwritten by it.
     disabled: !connected,
     onChangeThinking: (level: string) => {
-      void (async () => {
-        if (await runtimeModels.settled()) await patchSession({ thinkingLevel: level || null }, t("chat.labelThinking"));
-      })();
+      const key = active.key;
+      if (!usesRuntimeModelPicker) {
+        void patchSession({ thinkingLevel: level || null }, t("chat.labelThinking"), { key });
+        return;
+      }
+      void runtimeModels.selectSetting({ kind: "thinking", level }, reportError =>
+        patchSession({ thinkingLevel: level || null }, t("chat.labelThinking"), { key, quiet: true, reportError }));
     },
     onChangeFast: (next: boolean) => {
-      const key = activeKeyRef.current;
-      if (!key) return;
+      const key = active.key;
       const previous = sessionsRef.current.find((row) => row.key === key)?.fastMode ?? fastByKey[key] ?? false;
-      if (next !== previous) {
-        void (async () => {
-          if (!(await runtimeModels.settled())) return;
-          if (await patchSession({ fastMode: next }, "fast")) {
-            setFastByKey((values) => ({ ...values, [key]: next }));
-          }
-        })();
-      }
+      if (next === previous) return;
+      const save = async (reportError?: () => boolean) => {
+        const saved = await patchSession({ fastMode: next }, "fast", { key, reportError });
+        if (saved) setFastByKey(values => ({ ...values, [key]: next }));
+        return saved;
+      };
+      if (usesRuntimeModelPicker) void runtimeModels.selectSetting({ kind: "fast" }, save);
+      else void save();
     },
   } : null;
-  const effortControlKey = JSON.stringify([active?.key, runtimeModels.data?.selection.bindingId,
-    activeModelInfo?.id ?? active?.model, runtimeModels.data?.selection.modelProviderRef ?? active?.modelProvider,
+  const effortControlKey = JSON.stringify([active?.key, displayBindingId,
+    activeModelInfo?.id ?? active?.model, displayModelProviderRef ?? active?.modelProvider,
     thinkingLevels]);
 
   // Learn xhigh support for the active OpenClaw reasoning model once, then cache it.

@@ -132,10 +132,10 @@ await update({ session: "session-d" });
 await settle(() => requests.at(-1).resolve(result("session-d")));
 await update({ session: "session-c" });
 assert.equal(view.pendingModel, currentModel);
-const resumedSend = view.settled();
+const resumedSend = view.getPendingWrite();
 const beforeReturn = requests.length;
 await settle(() => writes.at(-1).resolve(currentSelection));
-assert.equal(await resumedSend, true, "a send waiting after returning honors the Service's successful write");
+assert.equal((await resumedSend).model, true, "a send waiting after returning honors the Service's successful write");
 assert.equal(requests.length, beforeReturn + 1, "the revisited session reads its current catalog after the write settles");
 assert.equal(requests.at(-1).args[2], "session-c");
 await settle(() => requests.at(-1).resolve(catalog));
@@ -216,7 +216,7 @@ await settle(() => { third = view.select(newModel.id, newModel.bindingId, null, 
 assert.equal(view.pendingModel, newModel);
 assert.equal(writes.length, writesBeforeRapid + 1, "a pick never starts a second concurrent write");
 let settledResult;
-const settling = view.settled().then(value => { settledResult = value; });
+const settling = view.getPendingWrite().then(value => { settledResult = value.model; });
 await settle(() => writes.at(-1).resolve({ ...currentSelection, bindingId: newModel.bindingId,
   modelProviderRef: newModel.modelProviderRef, revision: 11 }));
 assert.equal(writes.length, writesBeforeRapid + 2, "the middle pick is dropped");
@@ -228,16 +228,42 @@ await settling;
 assert.equal(settledResult, true);
 assert.deepEqual([await first, await second, await third], [true, true, true]);
 assert.equal(view.pendingModel, undefined);
-assert.equal(await view.settled(), true, "nothing left to wait for");
+assert.equal(view.getPendingWrite(), undefined, "nothing left to wait for");
 
 // A failed last pick tells a waiting send not to go, and the shown choice rolls back.
 let failedPick;
 await settle(() => { failedPick = view.select(currentModel.id, currentModel.bindingId, null); });
-const failedSettle = view.settled();
+const failedSettle = view.getPendingWrite();
 await settle(() => writes.at(-1).reject(new Error("pick failed")));
 assert.equal(view.pendingModel, undefined);
 await settle(() => requests.at(-1).resolve(catalog));
-assert.equal(await failedSettle, false);
+assert.equal((await failedSettle).model, false);
 assert.equal(await failedPick, false);
+
+// A model pick after a settings write uses the new revision. A settings pick after
+// a model write belongs to the just-selected model, even before its ACK arrives.
+let finishEffort;
+await settle(() => { void view.selectSetting({ kind: "thinking", level: "high" },
+  () => new Promise(resolve => { finishEffort = resolve; })); });
+assert.equal(view.pendingThinking, "high");
+const beforeMixed = { reads: requests.length, writes: writes.length };
+await settle(() => { void view.select(newModel.id, newModel.bindingId, null, { modelProviderRef: newModel.modelProviderRef }); });
+assert.equal(view.pendingModel, newModel, "model selection stays responsive during an effort write");
+assert.equal(writes.length, beforeMixed.writes);
+let appliedAfterModel = false;
+await settle(() => { void view.selectSetting({ kind: "thinking", level: "low" }, async () => { appliedAfterModel = true; return true; }); });
+assert.equal(view.pendingThinking, "low");
+const mixed = view.getPendingWrite();
+await settle(() => finishEffort(true));
+assert.equal(requests.length, beforeMixed.reads + 1, "re-read the catalog after the settings write changed its revision");
+assert.equal(appliedAfterModel, false);
+await settle(() => requests.at(-1).resolve({ ...catalog, selection: { ...currentSelection, revision: 13 } }));
+assert.equal(writes.length, beforeMixed.writes + 1);
+assert.equal(writes.at(-1).args[3].revision, 13);
+await settle(() => writes.at(-1).resolve({ ...savedSelection, revision: 14 }));
+assert.equal(appliedAfterModel, true);
+assert.equal((await mixed).model, true);
+assert.equal((await mixed).thinking, true);
+assert.equal(view.pendingThinking, undefined);
 await settle(() => renderer.unmount());
-console.log("PASS runtime model reconnect and selection: immediate choice, background writes, last pick wins, rollback, retry, session isolation and remembered catalogs");
+console.log("PASS runtime model reconnect and selection: immediate choice, ordered model and effort writes, last pick wins, rollback, retry, session isolation and remembered catalogs");

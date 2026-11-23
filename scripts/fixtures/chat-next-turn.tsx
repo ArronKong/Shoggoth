@@ -26,6 +26,8 @@ let selection = { sessionKey: key, revision: 1, bindingId, runtime, model: "curr
 const sessions: any[] = [{ key, agentId, backendId: backend, agentName: runtime, model: "current-model", modelProvider: runtime,
   permissionMode: "ask", thinkingLevel: null, fastMode: false, updatedAt: Date.now() }];
 const requests: any[] = [], sockets = new Set<FixtureSocket>();
+let holdThinkingWrite = false;
+let finishThinkingWrite: ((success: boolean) => void) | undefined;
 const history = [{ role: "user", content: "帮我整理这个项目的进展", timestamp: Date.now()-10000 },
   { role: "assistant", content: "我正在检查当前的项目进展。", timestamp: Date.now()-5000 }];
 localStorage.clear();
@@ -48,8 +50,22 @@ class FixtureSocket {
     if(frame.method === "models.list") payload={models};
     if(frame.method === "chat.history") payload={messages:history};
     if(frame.method === "sessions.patch") {
-      Object.assign(sessions[0],frame.params);selection={...selection,revision:selection.revision+1};
-      payload={entry:frame.params,resolved:{model:frame.params.model || sessions[0].model},scope:"session"};
+      const applyPatch = () => {
+        Object.assign(sessions[0], frame.params);
+        selection = { ...selection, revision: selection.revision + 1 };
+        return { entry: frame.params, resolved: { model: frame.params.model || sessions[0].model }, scope: "session" };
+      };
+      if (holdThinkingWrite && "thinkingLevel" in frame.params) {
+        if (finishThinkingWrite) throw new Error("Overlapping effort writes");
+        finishThinkingWrite = success => {
+          finishThinkingWrite = undefined;
+          this.emit(success
+            ? { type: "res", id: frame.id, ok: true, payload: applyPatch() }
+            : { type: "res", id: frame.id, ok: false, error: { message: "Effort save fixture rejected" } });
+        };
+        return;
+      }
+      payload = applyPatch();
     }
     if(frame.method === "chat.steer") payload={accepted:true};
     if(frame.method === "chat.send") payload={status:"started",runId:frame.params.idempotencyKey};
@@ -122,11 +138,64 @@ Object.assign(window,{ nextTurnFixture:{runtime,backend,immersive,requests,runni
     check(thinking.textContent===i18n.t("chat.thinkLevel.low") && effort.getAttribute("aria-valuetext")===i18n.t("chat.thinkLevel.low"),"inherited mode must show its actual label");
     check(effort.getAttribute("aria-valuenow")==="0" && effort.querySelectorAll('.think-fast-menu__dots i').length===2,"inherited mode must select its existing stop without an extra option");
     check(!requests.some(r=>r.method==="sessions.patch"&&"thinkingLevel" in r.params),"rendering inherited mode must not change stored settings");
+    if (backend === "shoggoth") {
+      await wait(() => !document.querySelector(".chat-toast"), "previous settings feedback cleared");
+      holdThinkingWrite = true;
+    }
     effort.dispatchEvent(new KeyboardEvent("keydown",{key:"End",bubbles:true}));
-    await wait(()=>requests.some(r=>r.method==="sessions.patch"&&r.params.thinkingLevel==="high"),"effort saved");
+    await wait(() => requests.some(r => r.method === "sessions.patch" && r.params.thinkingLevel === "high"), "effort write started");
+    if (backend === "shoggoth") {
+      const effortWrites = () => requests.filter(r => r.method === "sessions.patch" && "thinkingLevel" in r.params);
+      const setEffort = async (key: "Home" | "End", level: "low" | "high") => {
+        effort.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+        const label = i18n.t(`chat.thinkLevel.${level}`);
+        await wait(() => thinking.textContent === label && effort.getAttribute("aria-valuetext") === label,
+          `optimistic ${level} label and slider`);
+      };
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const high = i18n.t("chat.thinkLevel.high");
+      const low = i18n.t("chat.thinkLevel.low");
+      check(!!finishThinkingWrite && sessions[0].thinkingLevel === null, "effort acknowledgement is still held");
+      check(thinking.textContent === high && effort.getAttribute("aria-valuetext") === high, "effort label and slider must update before acknowledgement");
+      check(!document.querySelector(".chat-toast"), "pending effort save shows a toast");
+
+      await setEffort("Home", "low");
+      await setEffort("End", "high");
+      await setEffort("Home", "low");
+      check(effortWrites().length === 1, "rapid effort picks started overlapping saves");
+      finishThinkingWrite?.(true);
+      await wait(() => effortWrites().length === 2 && finishThinkingWrite, "last effort written after the first acknowledgement");
+      check(effortWrites().at(-1).params.thinkingLevel === "low" && thinking.textContent === low,
+        "an earlier acknowledgement replaced the latest visible choice");
+      finishThinkingWrite?.(true);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      check(thinking.textContent === low && sessions[0].thinkingLevel === "low", "latest effort was not saved");
+      check(!document.querySelector(".chat-toast"), "successful effort save shows a toast");
+
+      await setEffort("End", "high");
+      await wait(() => effortWrites().length === 3 && finishThinkingWrite, "effort write awaiting rejection");
+      thinking.click();
+      const draft = "保留这条草稿";
+      await wait(() => visible("textarea"), "composer visible after closing the effort menu");
+      const input = visible<HTMLTextAreaElement>("textarea")!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, draft);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const dispatched = () => requests.some(r => r.method === "chat.send" || r.method === "chat.steer");
+      check(input.value === draft && !dispatched(), "sending must wait for the selected effort before consuming the draft");
+      finishThinkingWrite?.(false);
+      holdThinkingWrite = false;
+      await wait(() => thinking.textContent === low && document.querySelector(".chat-toast--error")?.textContent?.includes("Effort save fixture rejected"),
+        "failed effort switches back and reports the error");
+      check(input.value === draft && !dispatched(), "rejecting an effort change must leave the unsent draft in place");
+      thinking.click();
+      await wait(() => visible(".think-fast-menu__fast-btn"), "reopened effort menu");
+    }
     visible<HTMLButtonElement>('.think-fast-menu__fast-btn')!.click();
     await wait(()=>requests.some(r=>r.method==="sessions.patch"&&r.params.fastMode===true),"Fast saved");
-    document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
+    thinking.click();
   }
   check(!!visible('button[title="'+i18n.t("chat.stopGenerating")+'"]'),"settings stopped current turn");
   await wait(()=>visible("textarea"),"composer available after menus close");
@@ -136,11 +205,13 @@ Object.assign(window,{ nextTurnFixture:{runtime,backend,immersive,requests,runni
   check(!visible(`[data-send-entry="${immersive?"immersiveButton":"composerButton"}"]`),"send and stop actions must not appear together");
   if(!immersive) checkComposerLayout(input);
   input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
-  if(steer) await wait(()=>requests.some(r=>r.method==="chat.steer"),"native steering request");
+  // The Codex composer has switched models, so this message belongs to the next turn.
+  const steerAfterModelChange = steer && runtime !== "codex";
+  if(steerAfterModelChange) await wait(()=>requests.some(r=>r.method==="chat.steer"),"native steering request");
   else { await new Promise(r=>setTimeout(r,100));check(!requests.some(r=>r.method==="chat.send"||r.method==="chat.steer"),"queue interrupts original");
     emit({state:"final",message:{role:"assistant",content:[{type:"text",text:"当前回复已完成。"}]}});await wait(()=>requests.some(r=>r.method==="chat.send"),"queue sends next turn"); }
   check(!requests.some(r=>r.method==="chat.abort"),"guidance stops original run");
-  return {runtime,backend,immersive,settingsEnabled:true,settingsSaved:true,permissionSwitchWithoutDialog:true,controlsVisible:true,sendHiddenWhileRunning:true,enterSends:true,behavior:steer?"native-steering":"next-turn-queue",abort:false};
+  return {runtime,backend,immersive,settingsEnabled:true,settingsSaved:true,permissionSwitchWithoutDialog:true,controlsVisible:true,sendHiddenWhileRunning:true,enterSends:true,behavior:steerAfterModelChange?"native-steering":"next-turn-queue",abort:false};
 }});
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider/><ChatPage/></UiProvider></HashRouter>);
 if(query.has("preview")) void running();
