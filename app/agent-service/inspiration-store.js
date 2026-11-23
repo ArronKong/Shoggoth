@@ -1,5 +1,7 @@
 "use strict";
 
+const { validRuntimeModelSelection } = require("./runtime-model-selection");
+
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -115,10 +117,13 @@ function validExecution(value) {
   const fields = [...attachmentFields(value, EXECUTION_FIELDS)];
   if (own(value, "turnAttachments")) fields.push("turnAttachments");
   if (own(value, "inputSource")) fields.push("inputSource");
+  if (own(value, "expectedModel")) fields.push("expectedModel");
   if (own(value, "handoffContext")) fields.push("handoffContext");
   if (own(value, "modelSelection")) fields.push("modelSelection");
   return exact(value, fields) && UUID.test(value.id) && UUID.test(value.ideaId)
     && (!own(value, "inputSource") || (value.inputSource === "chat" && value.sessionKey !== null))
+    && (!own(value, "expectedModel") || (!external && value.inputSource === "chat"
+      && validRuntimeModelSelection(value.expectedModel)))
     && (!own(value, "handoffContext") || (!own(value, "inputSource") && textValue(value.handoffContext, MAX_HANDOFF_BYTES)))
     && (!own(value, "modelSelection") || (!own(value, "inputSource") && validInspirationModelSelection(value.modelSelection, external)))
     && (!own(value, "attachments") || validAttachments(value.attachments))
@@ -811,9 +816,12 @@ class InspirationStore extends EventEmitter {
     const fields = ["operationId", "id", "expectedRevision", "instruction", "agentId", "backendId", "profileId", "workspace"];
     if (own(input, "turnAttachments")) fields.push("turnAttachments");
     if (own(input, "inputSource")) fields.push("inputSource");
+    if (own(input, "expectedModel")) fields.push("expectedModel");
     if (own(input, "modelSelection")) fields.push("modelSelection");
     if (!exact(input, fields)
       || (own(input, "inputSource") && (input.inputSource !== "chat" || sessionKey === null))
+      || (own(input, "expectedModel") && (input.inputSource !== "chat"
+        || !validRuntimeModelSelection(input.expectedModel)))
       || (own(input, "modelSelection") && (sessionKey !== null || !validInspirationModelSelection(input.modelSelection, false)))
       || (own(input, "turnAttachments") && !validAttachments(input.turnAttachments))
       || !UUID.test(input.id) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
@@ -842,6 +850,7 @@ class InspirationStore extends EventEmitter {
       candidate.executions[id] = { id, ideaId: idea.id, operationId: input.operationId,
         ideaRevision: idea.revision, body: idea.body, title: idea.title, instruction: input.instruction,
         ...(input.inputSource ? { inputSource: input.inputSource } : {}),
+        ...(input.expectedModel ? { expectedModel: clone(input.expectedModel) } : {}),
         ...(input.modelSelection ? { modelSelection: clone(input.modelSelection) } : {}),
         ...(handoffContext ? { handoffContext } : {}),
         ...(idea.attachments ? { attachments: clone(idea.attachments) } : {}),

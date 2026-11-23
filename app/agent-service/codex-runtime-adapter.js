@@ -111,7 +111,7 @@ function permissionParams(policy, mode, fixedReviewer) {
 
 function needsWorkspaceGrant(input) {
   return input.agentWorkspace && input.agentWorkspace !== input.cwd && input.permissionPolicy?.sandbox === "workspace-write"
-    && !input.proactiveReview && !input.isolatedGeneration;
+    && !input.isolatedGeneration;
 }
 
 async function workspacePolicy(host, input) {
@@ -266,7 +266,7 @@ class CodexRuntimeHandle {
   }
 
   async sessionStart(input) {
-    if (input.isolatedGeneration && (input.persistent !== false || input.proactiveReview)) {
+    if (input.isolatedGeneration && input.persistent !== false) {
       throw adapterError("MODEL_ONLY_SESSION_INVALID", "Isolated generation requires a dedicated ephemeral thread");
     }
     // Codex 0.159.2 advertises its native request_user_input tool even when
@@ -274,8 +274,7 @@ class CodexRuntimeHandle {
     if (input.isolatedGeneration && this.host.runtimeVersion === "0.159.2") {
       throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "This Codex version exposes a native tool during isolated generation");
     }
-    const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig()
-      : input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
+    const isolationConfig = input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
     const workspace = await workspacePolicy(this.host, input);
@@ -288,8 +287,8 @@ class CodexRuntimeHandle {
       developerInstructions: input.developerInstructions,
       model: input.model,
       cwd: input.cwd,
-      ...(reviewConfig || secretConfig || providerConfig || workspace
-        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig,
+      ...(isolationConfig || secretConfig || providerConfig || workspace
+        ? { config: { ...isolationConfig, ...providerConfig, ...secretConfig,
           ...(workspace ? { "sandbox_workspace_write.writable_roots": workspace.writableRoots } : {}) } } : {}),
       ...permission,
     })));
@@ -301,7 +300,6 @@ class CodexRuntimeHandle {
         current: input.developerInstructions, applied: input.developerInstructions,
       });
     }
-    if (input.proactiveReview) await this.assertProactiveReviewIsolation(response, { requireResponseTool: input.proactiveResponseRequired !== false });
     if (input.isolatedGeneration) {
       this.modelOnlySessions.add(response.thread.id);
       try { await this.assertIsolatedGeneration(response); }
@@ -327,7 +325,6 @@ class CodexRuntimeHandle {
     if (input.isolatedGeneration) {
       throw adapterError("MODEL_ONLY_SESSION_INVALID", "Isolated generation cannot resume an existing thread");
     }
-    const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
     const workspace = await workspacePolicy(this.host, input);
@@ -340,8 +337,8 @@ class CodexRuntimeHandle {
       developerInstructions: input.developerInstructions,
       model: input.model,
       cwd: input.cwd,
-      ...(reviewConfig || secretConfig || providerConfig || workspace
-        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig,
+      ...(secretConfig || providerConfig || workspace
+        ? { config: { ...providerConfig, ...secretConfig,
           ...(workspace ? { "sandbox_workspace_write.writable_roots": workspace.writableRoots } : {}) } } : {}),
       ...permission,
     })));
@@ -354,7 +351,6 @@ class CodexRuntimeHandle {
         current: input.developerInstructions, applied: previous?.applied,
       });
     }
-    if (input.proactiveReview) await this.assertProactiveReviewIsolation(response, { requireResponseTool: input.proactiveResponseRequired !== false });
     return mapThreadEnvelope(response);
   }
 
@@ -455,61 +451,37 @@ class CodexRuntimeHandle {
     }
   }
 
-  // isolatedGeneration also disables Shoggoth's own MCP server and project
-  // instruction files; its thread has no tool at all.
-  async _proactiveReviewConfig({ isolatedGeneration = false } = {}) {
+  // A text-only turn for importing memories: every tool feature, every MCP
+  // server (Shoggoth's included) and project instruction files are disabled.
+  async _isolatedGenerationConfig() {
+    const unverified = () => adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime isolation cannot be configured");
     const config = { "web_search": "disabled" };
-    const features = await this._proactiveFeatures(null, { allowDottedNames: true });
-    // Disable every feature for this ephemeral review. The built-in product
-    // MCP server supplies its one permitted response tool; no shell, browser,
-    // plugins, apps, hooks, subagents or image tools are needed. A dotted name
-    // cannot be addressed by a config override; the thread check proves it is off.
+    let features;
+    try { features = await this._proactiveFeatures(null, { allowDottedNames: true }); }
+    catch (error) { if (error?.code === "PROACTIVE_RUNTIME_UNVERIFIED") throw unverified(); throw error; }
+    // A dotted name cannot be addressed by a config override; the thread check proves it is off.
     for (const feature of features) if (!feature.name.includes(".")) config[`features.${feature.name}`] = false;
     config.project_doc_max_bytes = 0;
-    if (typeof this.host.configRead !== "function") {
-      throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Cannot inspect Runtime MCP transport configuration");
-    }
+    if (typeof this.host.configRead !== "function") throw unverified();
     const nativeConfig = await this.host.configRead({ includeLayers: false });
     const transports = nativeConfig?.config?.mcp_servers ?? {};
     if (!nativeConfig?.config || typeof nativeConfig.config !== "object" || Array.isArray(nativeConfig.config)
       || !transports || typeof transports !== "object" || Array.isArray(transports)
       || Object.keys(transports).length > 1600) {
-      throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Invalid Runtime MCP transport configuration");
+      throw unverified();
     }
     // Runtime inventories also contain plugin and synthesized servers with no
     // user transport table. Creating enabled-only tables for those names makes
     // Codex reject thread/start. Override only actual configuration entries;
     // feature switches and the post-start inventory still prove isolation.
     for (const name of Object.keys(transports)) {
-      if (!/^[A-Za-z0-9_-]{1,128}$/u.test(name)) {
-        throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Invalid Runtime MCP identity");
-      }
-      if (name !== "shoggoth" || isolatedGeneration) config[`mcp_servers.${name}.enabled`] = false;
-      else config["mcp_servers.shoggoth.enabled_tools"] = ["proactive_respond"];
+      if (!/^[A-Za-z0-9_-]{1,128}$/u.test(name)) throw unverified();
+      config[`mcp_servers.${name}.enabled`] = false;
     }
-    if (isolatedGeneration) {
-      // All configured transports and tool features are disabled above. The
-      // thread-specific post-start inventory is the execution authority; a
-      // global inventory would wait for unrelated user MCP startup/auth.
-      config["features.apps"] = false;
-      return config;
-    }
-    let cursor = null; const seen = new Set();
-    for (let page = 0; page < 16; page++) {
-      const result = await this.host.mcpServerStatusList({ cursor, limit: 100, detail: "toolsAndAuthOnly", threadId: null });
-      if (!result || !Array.isArray(result.data)) throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Cannot verify Runtime MCP isolation");
-      for (const server of result.data) {
-        if (typeof server.name !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(server.name)) {
-          throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Invalid Runtime MCP identity");
-        }
-        // Keep the Apps switch explicit for older Runtime feature inventories.
-        if (server.name === "codex_apps") { config["features.apps"] = false; continue; }
-      }
-      if (!result.nextCursor) return config;
-      if (seen.has(result.nextCursor)) break;
-      seen.add(result.nextCursor); cursor = result.nextCursor;
-    }
-    throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime MCP inventory is incomplete");
+    // The thread-specific post-start inventory is the execution authority; a
+    // global inventory would wait for unrelated user MCP startup/auth.
+    config["features.apps"] = false;
+    return config;
   }
   // Codex 0.159 lists namespaced feature names such as "guardianv2.thread_context".
   async _proactiveFeatures(threadId, { allowDottedNames = false } = {}) {
@@ -526,42 +498,6 @@ class CodexRuntimeHandle {
       if (seen.has(result.nextCursor)) break; seen.add(result.nextCursor); cursor = result.nextCursor;
     }
     throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime feature inventory is incomplete");
-  }
-  async assertProactiveReviewIsolation(response, { requireResponseTool = true } = {}) {
-    if (response?.sandbox?.type !== "readOnly" || response.sandbox.networkAccess !== false || response.approvalPolicy !== "on-request") {
-      throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime did not confirm restricted sandbox and MCP binding policy");
-    }
-    const threadId = response.thread.id, features = await this._proactiveFeatures(threadId, { allowDottedNames: true });
-    this.host.assertRuntimeIdentityCurrent?.();
-    if (!hasIsolatedFeatures(features, this.host.runtimeVersion)) {
-      throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime has an enabled feature outside the review scope");
-    }
-    const result = await this.host.mcpServerStatusList({ threadId, cursor: null, limit: 100, detail: "toolsAndAuthOnly" });
-    if (!result || !Array.isArray(result.data) || result.nextCursor) {
-      throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime MCP inventory is incomplete");
-    }
-    const active = result.data.filter(server => !(server.runtimeStatus === "disabled"
-      && (!server.tools || typeof server.tools === "object" && !Array.isArray(server.tools) && Object.keys(server.tools).length === 0)));
-    if (active.some(server => server.name !== "shoggoth")) {
-      throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime has an MCP server outside the review scope");
-    }
-    if (requireResponseTool) {
-      const server = active[0], tools = server?.tools;
-      if (active.length !== 1 || !tools || typeof tools !== "object" || Array.isArray(tools)
-        || Object.keys(tools).length !== 1 || Object.values(tools)[0]?.name !== "proactive_respond") {
-        throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime did not expose its sole structured response tool");
-      }
-    }
-    return { sandbox: "read-only", network: false, features: features.length, servers: result.data.length };
-  }
-  // A text-only turn for importing memories: the review restrictions, plus no
-  // MCP server at all (not even Shoggoth's) and no project instruction files.
-  async _isolatedGenerationConfig() {
-    try { return await this._proactiveReviewConfig({ isolatedGeneration: true }); }
-    catch (error) {
-      if (error?.code !== "PROACTIVE_RUNTIME_UNVERIFIED") throw error;
-      throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime isolation cannot be configured");
-    }
   }
   async assertIsolatedGeneration(response) {
     if (response?.sandbox?.type !== "readOnly" || response.sandbox.networkAccess !== false
@@ -583,14 +519,6 @@ class CodexRuntimeHandle {
       throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime has an MCP server enabled");
     }
   }
-  async verifyProactiveReview({ requireResponseTool = true } = {}) {
-    const response = await this.sessionStart({ persistent: false, proactiveReview: true,
-      proactiveResponseRequired: requireResponseTool,
-      permissionPolicy: { approvalPolicy: "on-request", sandbox: "read-only" },
-      developerInstructions: "Inspect restricted runtime configuration only. No model turn, user data or task execution is authorized." });
-    return { verified: true, responseToolRequired: requireResponseTool, runtime: this.runtime, runtimeAccountId: this.runtimeAccountId, sessionId: response.session.id };
-  }
-
   async sessionRead(input) {
     if (input.includeTurns === true && (input.includeItems === false || input.operationId)
       && typeof this.host.threadTurnsList === "function" && typeof this.host.threadItemsList === "function") {

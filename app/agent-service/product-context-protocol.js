@@ -14,9 +14,22 @@ function compactionErrorCode(error) {
   if (typeof code === "string" && Object.hasOwn(MESSAGES, code) && code.startsWith("PRODUCT_COMPACTION_")) return code;
   if (["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(code)) return "PRODUCT_COMPACTION_AUTH_REQUIRED";
   if (["RUNTIME_MODEL_UNAVAILABLE", "RUNTIME_MODEL_SETTINGS_INVALID"].includes(code)) return "PRODUCT_COMPACTION_MODEL_UNAVAILABLE";
+  if (code === "RUNTIME_MODEL_CATALOG_TOO_LARGE") return "PRODUCT_COMPACTION_MODEL_CATALOG_TOO_LARGE";
+  if (code === "RUNTIME_QUOTA_EXHAUSTED") return "PRODUCT_COMPACTION_QUOTA_EXHAUSTED";
+  if (code === "RUNTIME_RATE_LIMITED") return "PRODUCT_COMPACTION_RATE_LIMITED";
+  if (code === "RUNTIME_UPSTREAM_UNAVAILABLE") return "PRODUCT_COMPACTION_UPSTREAM_UNAVAILABLE";
+  if (code === "RUNTIME_CONNECTION_LOST") return "PRODUCT_COMPACTION_CONNECTION_LOST";
+  if (["OPENCODE_TURN_TIMEOUT", "MODEL_ONLY_TIMEOUT", "RPC_TIMEOUT"].includes(code)) return "PRODUCT_COMPACTION_TIMEOUT";
   if (["MODEL_ONLY_OUTPUT_INVALID", "CHECKPOINT_INVALID", "CHECKPOINT_SUMMARY_TOO_LARGE"].includes(code)) return "PRODUCT_COMPACTION_OUTPUT_INVALID";
   if (["MODEL_ONLY_ACCEPTANCE_UNKNOWN", "COMPACTION_RECOVERY_UNAVAILABLE"].includes(code)) return "PRODUCT_COMPACTION_OUTCOME_UNKNOWN";
   return "PRODUCT_COMPACTION_FAILED";
+}
+// Retry a known model failure. Cancellation, changed source data and an
+// unconfirmed provider outcome never authorize a second generation.
+function retryableSummaryFailure(code) {
+  if (["PRODUCT_COMPACTION_FAILED", "OPENCODE_TURN_FAILED", "MODEL_ONLY_FAILED"].includes(code)) return true;
+  const reason = compactionErrorCode({ code });
+  return reason !== "PRODUCT_COMPACTION_FAILED" && reason !== "PRODUCT_COMPACTION_OUTCOME_UNKNOWN";
 }
 function invalid() { throw serviceError("PRODUCT_CONTEXT_INVALID", MESSAGES.PRODUCT_CONTEXT_INVALID); }
 function validateProductContext(value) {
@@ -76,5 +89,5 @@ function validateBreakdown(value) {
 function validateMethodResult(method, value) {
   return method === BREAKDOWN_METHOD ? validateBreakdown(value) : validateResult(value);
 }
-module.exports = { METHODS, BREAKDOWN_METHOD, MESSAGES, COMPOSITION_FIELDS, compactionErrorCode, validateProductContext,
+module.exports = { METHODS, BREAKDOWN_METHOD, MESSAGES, COMPOSITION_FIELDS, compactionErrorCode, retryableSummaryFailure, validateProductContext,
   validateParams, validateResult, validComposition, validateBreakdown, validateMethodResult };

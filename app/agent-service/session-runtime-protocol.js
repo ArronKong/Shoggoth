@@ -22,7 +22,7 @@ const SESSION_RUNTIME_PUBLIC_MESSAGES = Object.freeze({
   CONTEXT_TRANSPORT_EXCEEDED: "目标 Runtime 的输入传输容量不足，请先压缩历史",
   CONTEXT_CONTENT_UNAVAILABLE: "部分原文无法读取，未进行不完整迁移",
   CONTEXT_CONTENT_CORRUPT: "原文校验未通过，未进行不完整迁移",
-  PRODUCT_COMPACTION_FAILED: "上下文摘要未完成，原会话已保留",
+  ...Object.fromEntries(Object.entries(require("./product-context-protocol").MESSAGES).filter(([code]) => code.startsWith("PRODUCT_COMPACTION_"))),
   ...Object.fromEntries(RUNTIME_SUPPORT_CODES.map(code => [code, code])),
 });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;

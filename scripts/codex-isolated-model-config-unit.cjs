@@ -86,16 +86,6 @@ test("missing, malformed or unreadable transport metadata prevents any thread st
   assert.equal(unavailable.starts.length, 0);
 });
 
-test("proactive review retains only its structured response tool in configured Shoggoth MCP", async () => {
-  const f = await fixture();
-  const config = await f.handle._proactiveReviewConfig();
-  assert.deepEqual(config["mcp_servers.shoggoth.enabled_tools"], ["proactive_respond"]);
-  assert.equal(Object.hasOwn(config, "mcp_servers.shoggoth.enabled"), false);
-  assert.equal(config["mcp_servers.configured.enabled"], false);
-  assert.equal(Object.hasOwn(config, "mcp_servers.code-review.enabled"), false);
-});
-
-
 test("isolated model discovery never waits on global MCP startup and still verifies its own thread", async () => {
   const f = await fixture(), original = f.host.mcpServerStatusList, checked = [];
   f.host.mcpServerStatusList = async params => {
@@ -154,8 +144,6 @@ test("Codex 0.159.2 rejects isolated generation before starting a native thread"
 test("isolated generation releases only its owned ephemeral thread and confirms the native acknowledgement", async () => {
   const f = await fixture();
   await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: true }), { code: "MODEL_ONLY_SESSION_INVALID" });
-  await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: false, proactiveReview: true }),
-    { code: "MODEL_ONLY_SESSION_INVALID" });
   await assert.rejects(f.handle.sessionResume({ isolatedGeneration: true, sessionId: "ordinary-thread" }),
     { code: "MODEL_ONLY_SESSION_INVALID" });
   await assert.rejects(f.handle.releaseModelOnlySession({ sessionId: "ordinary-thread" }), { code: "MODEL_ONLY_SESSION_UNAVAILABLE" });

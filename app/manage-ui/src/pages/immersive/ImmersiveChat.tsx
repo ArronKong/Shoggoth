@@ -41,7 +41,6 @@ export interface ImmersiveSessionRow extends SessionCategoryRow {
   sub: string;
   /** 已格式化的相对时间（"3m"），空串 = 不显示。 */
   time?: string;
-  ts?: number;
   active: boolean;
 }
 
@@ -371,8 +370,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   }, [sessions]);
   const pickerSessions = useMemo(
     () => sessions.filter(s => (!pickerKind || sessionCategoryOf(s) === pickerKind)
-      && `${s.title} ${s.sub ?? ""} ${t(`chat.sessionFilter.${sessionCategoryOf(s)}`)}`.toLowerCase().includes(pickerQuery.trim().toLowerCase()))
-      .slice().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)),
+      && `${s.title} ${s.sub ?? ""} ${t(`chat.sessionFilter.${sessionCategoryOf(s)}`)}`.toLowerCase().includes(pickerQuery.trim().toLowerCase())),
     [sessions, pickerKind, pickerQuery, t],
   );
   // 关掉浮层就把筛选清回「全部」（下次打开是干净的，与模型菜单同一收尾）。

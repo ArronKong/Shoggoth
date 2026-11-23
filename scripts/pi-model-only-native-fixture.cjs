@@ -5,7 +5,7 @@ const { PiRuntimePool } = require("../app/agent-service/pi-runtime-pool");
 const { PiRuntimeAdapter } = require("../app/agent-service/pi-runtime-adapter");
 const root = fs.mkdtempSync("/private/tmp/sg-pi-heartbeat-"), home = path.join(root, ".pi", "agent");
 fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-const requests = [], sockets = new Set(); let pending, error, adapter, response;
+const requests = [], sockets = new Set(); let pending, error, adapter;
 const provider = http.createServer(async (req, res) => {
   try {
     assert.equal(req.url, "/v1/chat/completions");
@@ -13,7 +13,7 @@ const provider = http.createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
     assert.equal(body.model, "controlled"); assert.deepEqual(body.tools || [], []);
     if (pending) { pending(); return; }
-    const text = response ? response(body) : JSON.stringify({ outcome: "silent", scratch: "Native Pi checked" });
+    const text = JSON.stringify({ outcome: "silent", scratch: "Native Pi checked" });
     const chunk = (delta, finish_reason = null) => ({ id: `fixture-${requests.length}`, object: "chat.completion.chunk",
       created: 1, model: "controlled", choices: [{ index: 0, delta, finish_reason }] });
     res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -57,14 +57,15 @@ provider.on("connection", socket => { sockets.add(socket); socket.once("close", 
   if (error) throw error;
   assert.equal(requests.length, 3);
   pending = null;
-  const closure = await require("./helpers/proactive-native-closure.cjs").verifyProactiveNativeClosure({
-    root, adapter, runtime: "pi", model: "fixture/controlled", setResponse: value => { response = value; } });
+  const readiness = await require("./helpers/proactive-native-closure.cjs").verifyProactiveRuntimeReadiness({
+    root, adapter, runtime: "pi", model: "fixture/controlled" });
   if (error) throw error;
+  assert.equal(requests.length, 3, "the proactive readiness check sends no model request");
   assert.equal(fs.readFileSync(path.join(home, "models.json"), "utf8"), models);
   assert.equal(fs.readFileSync(path.join(home, "settings.json"), "utf8"), settings);
   console.log(JSON.stringify({ verified: true, runtime: "Pi", runtimeVersion: handle.host.cliVersion,
     provider: "synthetic-loopback", actualProviderCalls: 0, nativeTools: 0, modelRequests: requests.length,
-    defaultModel: "fixture/controlled", explicitModel: true, totalTokens: 20, cancellation: true, accountUnchanged: true, closure }));
+    defaultModel: "fixture/controlled", explicitModel: true, totalTokens: 20, cancellation: true, accountUnchanged: true, readiness }));
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   await adapter?.stopAll(); for (const socket of sockets) socket.destroy();
   await new Promise(resolve => provider.close(resolve)); fs.rmSync(root, { recursive: true, force: true });

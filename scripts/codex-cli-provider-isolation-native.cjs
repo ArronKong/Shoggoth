@@ -123,7 +123,7 @@ stream_max_retries = 0
     const handle = await adapter.acquire(binding);
     return { host, handle };
   }
-  async function turn(handle, sessionId, operationId, rawHost = null) {
+  async function turn(handle, sessionId, operationId, { rawHost, model } = {}) {
     const done = new Promise((resolve, reject) => {
       const timer = setTimeout(() => { unsubscribe(); reject(new Error("native fixture turn timed out")); }, 20_000);
       const unsubscribe = handle.subscribe(event => {
@@ -134,7 +134,7 @@ stream_max_retries = 0
     });
     if (rawHost) await rawHost.turnStart({ threadId: sessionId,
       input: [{ type: "text", text: "legacy fixture request", text_elements: [] }] });
-    else await handle.turnStart({ sessionId, operationId, prompt: "fixture request", context: "", cwd: workspace,
+    else await handle.turnStart({ sessionId, operationId, prompt: "fixture request", context: "", cwd: workspace, ...(model ? { model } : {}),
       permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
     assert.equal(await done, "completed");
     if (failure) throw failure;
@@ -164,7 +164,7 @@ stream_max_retries = 0
       config: { model_provider: codexModelProvider(store, "harness-endpoint").configId, web_search: "cached" },
       approvalPolicy: "never", sandbox: "read-only" });
     // Codex persists a thread only after its first accepted turn.
-    await turn(harness.handle, oldHarnessThread.thread.id, "legacy-fixture", harness.host);
+    await turn(harness.handle, oldHarnessThread.thread.id, "legacy-fixture", { rawHost: harness.host });
     assert.equal(hostedSearch.at(-1).enabled, true, "the legacy fixture reproduces the unwanted hosted tool");
     // A loaded Codex thread retains its active config. An upgraded Service
     // starts a new Runtime process, which applies resume overrides from disk.
@@ -214,6 +214,13 @@ stream_max_retries = 0
       { route: "/native/v1/responses", model: "cli-new-model", auth: "Bearer fixture-native-key" },
       { route: "/harness/v1/responses", model: "harness-new", auth: undefined },
     ]);
+    // Use the existing process and thread whose CLI default is cli-new-model.
+    // The local Responses server records the actual JSON sent by the Codex binary.
+    const { runtimeComposerChoice } = require("./fixtures/load-ui-typescript.cjs").load("lib/chatRuntime.ts");
+    const shown = runtimeComposerChoice({ selection: { runtime: "codex", bindingId: native.id, model: null },
+      models: [{ runtime: "codex", bindingId: native.id, id: "gpt-6.1-terra", isDefault: true }] });
+    await turn(updatedCli.handle, updatedCliSession.session.id, "composer-model", { model: shown.expectedModel.model });
+    assert.deepEqual(seen.at(-1), { route: "/native/v1/responses", model: "gpt-6.1-terra", auth: "Bearer fixture-native-key" });
     assert.equal(fs.readFileSync(cliPath, "utf8"), updatedCliConfig, "neither route rewrites the native config");
     assert.equal(store.getAgentProfile(profile.id).providerRef, "harness-endpoint");
   } finally {

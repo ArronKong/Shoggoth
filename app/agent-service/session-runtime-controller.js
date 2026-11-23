@@ -444,7 +444,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
           if (!preflight.support.supported) throw serviceError(preflight.support.code, preflight.support.code);
           await ensureTranscript(session);
           input.assertCurrent?.();
-          await currentCoordinator().prepareRuntimeHandoff?.(session, target, { model: next.model,
+          await currentCoordinator().prepareRuntimeHandoff?.(session, target, { model: next.model, modelProviderRef: next.modelProviderRef,
             permissionMode: next.permissionMode, excludingRunId: input.excludingRunId ?? input.queuedRunId ?? null, beforeSend: true,
             pendingOperationId: input.queuedRunId ? input.operationId : null, signal: input.signal });
           input.assertCurrent?.();

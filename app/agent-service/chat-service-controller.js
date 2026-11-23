@@ -202,9 +202,10 @@ function transcriptHistoryItem(event, runSource) {
     const groupContinuation = groupContinuationFromAnswer(event);
     if (groupContinuation) message.shoggoth.groupContinuation = groupContinuation;
   } else if (event.kind === "error") {
-    // Stale summaries are recorded on the compaction Run. A blocked chat turn reports its own failure.
-    if (runSource === "compaction" && transcriptType === "terminal"
-      && event.content.errorCode === "CHECKPOINT_STALE") return null;
+    // A dependent summary has its own durable terminal, but the waiting turn
+    // publishes the failure. The saved exclusion still works after run eviction.
+    if (transcriptType === "terminal" && ((event.contextExcluded && /^compaction-[0-9a-f]{64}$/u.test(event.runId))
+      || (runSource === "compaction" && event.content.errorCode === "CHECKPOINT_STALE"))) return null;
     const text = transcriptMessageText(event);
     if (!text) return null;
     role = "system";
@@ -1334,6 +1335,7 @@ function createChatServiceController(options = {}) {
         operationId: params.operationId,
         sessionKey: params.sessionKey,
         prompt: params.prompt,
+        ...(params.expectedModel ? { expectedModel: params.expectedModel } : {}),
         ...(params.attachments?.length ? { attachments: params.attachments } : {}),
         ...(params.connectorSelection !== undefined ? { connectorSelection: params.connectorSelection } : {}),
       };

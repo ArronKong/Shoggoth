@@ -1,5 +1,7 @@
 "use strict";
 
+const { sameRuntimeModel } = require("./runtime-model-selection");
+
 const { serviceError } = require("./security");
 const { canonicalWorkspace } = require("./work-run");
 const { resolveProfileWorkspace } = require("./chat-service-controller");
@@ -504,6 +506,7 @@ class InspirationService {
     const existing = this.store.executionForOperation(input.operationId);
     if (existing) {
       if (existing.sessionKey !== input.sessionKey || existing.instruction !== input.prompt
+        || !sameRuntimeModel(existing.expectedModel, input.expectedModel)
         || JSON.stringify(existing.turnAttachments || []) !== JSON.stringify(input.attachments || [])) {
         fail("INSPIRATION_OPERATION_CONFLICT", "同一次会话操作不能更换内容");
       }
@@ -519,6 +522,7 @@ class InspirationService {
       const idea = this.store.get(previous.ideaId);
       if (!idea) fail("INSPIRATION_NOT_FOUND", "灵感已删除，仍可查看会话历史");
       view = this.start({ id: idea.id, operationId: input.operationId, expectedRevision: idea.revision,
+        ...(input.expectedModel ? { expectedModel: input.expectedModel } : {}),
         ...(input.attachments?.length ? { turnAttachments: input.attachments } : {}),
         instruction: input.prompt, agentId: previous.agentId, backendId: previous.backendId, workspace: previous.workspace }, input.sessionKey, "chat");
     } catch (error) {

@@ -14,13 +14,10 @@ export interface SessionMenuRow extends SessionCategoryRow {
   sub: string;
   /** 已格式化的相对时间（"3m" / "2026/7/20"），空串 = 不显示。 */
   time: string;
-  /** `time` 对应的时间戳——列表排序用它，做到「显示什么时间就按什么排」。 */
-  ts: number;
   unread?: boolean;
 }
 
-// 会话切换器：把 header 里那个原生 <select> 换成模型菜单同款弹层——
-// 头部 = 搜索框 + 按会话类型分的 FilterTabs，列表按时间倒序、单行显示。
+// 会话切换器：头部包含搜索框和会话类型筛选，列表沿用 ChatPage 排好的顺序。
 //
 // 可见性由 isVisibleSession 统一决定；子代理过程归父对话，底层会话记录保留。
 //
@@ -28,10 +25,12 @@ export interface SessionMenuRow extends SessionCategoryRow {
 export default function ChatSessionMenu({
   sessions: allSessions,
   activeKey,
+  mainSessionKey,
   onSelect,
 }: {
   sessions: SessionMenuRow[];
   activeKey: string;
+  mainSessionKey?: string;
   onSelect: (key: string) => void;
 }) {
   const sessions = useMemo(() => allSessions.filter(isVisibleSession), [allSessions]);
@@ -87,10 +86,9 @@ export default function ChatSessionMenu({
     };
   }, [open]);
 
-  // 打开时把当前会话滚到列表中间（会话多时选中项多半在视口外）。手动算滚动量而非
-  // scrollIntoView（后者会连带滚动页面级祖先），不做 smooth。
+  // 有主会话时从列表顶部打开。其他列表打开时将当前会话滚到列表中间。
   useEffect(() => {
-    if (!open) return;
+    if (!open || mainSessionKey) return;
     const raf = requestAnimationFrame(() => {
       const list = listRef.current;
       const item = list?.querySelector<HTMLElement>(".model-menu__item.is-active");
@@ -100,7 +98,7 @@ export default function ChatSessionMenu({
       }
     });
     return () => cancelAnimationFrame(raf);
-  }, [open, sessions.length]);
+  }, [open, mainSessionKey, sessions.length]);
 
   const active = sessions.find((s) => s.key === activeKey);
   const kindOf = useMemo(() => {
@@ -120,17 +118,12 @@ export default function ChatSessionMenu({
     return SESSION_CATEGORY_ORDER.filter((k) => count.has(k)).map((k) => ({ kind: k, count: count.get(k) ?? 0 }));
   }, [sessions, kindOf]);
 
-  // 搜索 + Tab 筛选后的行。**不分组**：「全部」就是一条按时间倒序的流水（分类交给
-  // Tab，列表里再切一次分组标题反而把最近的会话推到看不见的地方）；选中某个 Tab 时
-  // 列表本来就只剩那一类，标题=Tab 名纯属重复，同样不显示。
-  // 排序用 ts（= 行上显示的那个时间），显示什么时间就按什么排，不会出现视觉乱序。
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const rows = sessions.filter((s) => {
+    return sessions.filter((s) => {
       if (q && !`${s.title} ${s.sub} ${s.key} ${t(`chat.sessionFilter.${kindOf.get(s.key) ?? "other"}`)}`.toLowerCase().includes(q)) return false;
       return !kindFilter || (kindOf.get(s.key) ?? "other") === kindFilter;
     });
-    return rows.slice().sort((a, b) => b.ts - a.ts);
   }, [sessions, query, kindFilter, kindOf, t]);
 
   return (

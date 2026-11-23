@@ -1,5 +1,7 @@
 "use strict";
 
+const { validRuntimeModelSelection } = require("./runtime-model-selection");
+
 const crypto = require("node:crypto");
 const { setImmediate: yieldToService } = require("node:timers/promises");
 const fs = require("node:fs");
@@ -95,6 +97,8 @@ function fingerprintCommand(input) {
     input.prompt,
     input.createdAt,
     ...(input.attachments?.length ? [input.attachments] : []),
+    ...(input.expectedModel ? ["composer-model-v1", input.expectedModel.bindingId, input.expectedModel.model,
+      input.expectedModel.modelProviderRef ?? null] : []),
     ...(input.pluginSelection?.length ? [normalizePluginSelection(input.pluginSelection)] : []),
     ...(input.connectorSelection !== undefined ? ["connector-selection-v1", normalizeLegacyConnectorSelection(input.connectorSelection)] : []),
   ])).digest("hex");
@@ -111,6 +115,7 @@ function rejectionFingerprint(operationId, sessionKey, createdAt) {
 
 function commandFields(input, base) {
   const fields = [...attachmentFields(input, base)];
+  if (Object.hasOwn(input || {}, "expectedModel")) fields.push("expectedModel");
   if (input?.pluginSelection !== undefined) fields.push("pluginSelection");
   if (input?.connectorSelection !== undefined) fields.push("connectorSelection");
   if (Object.hasOwn(input || {}, "acceptance")) fields.push("acceptance");
@@ -140,6 +145,7 @@ function normalizeCommand(input, corrupt = false) {
     || !UUID_PATTERN.test(input.sessionKey)
     || typeof input.prompt !== "string" || (!input.prompt.length && !input.attachments?.length) || input.prompt.includes("\0")
     || (input.attachments !== undefined && !validAttachments(input.attachments))
+    || (Object.hasOwn(input, "expectedModel") && !validRuntimeModelSelection(input.expectedModel))
     || (input.pluginSelection !== undefined && !validPluginSelection(input.pluginSelection))
     || (input.pluginSelection !== undefined && input.connectorSelection !== undefined)
     || Buffer.byteLength(input.prompt, "utf8") > MAX_PROMPT_BYTES

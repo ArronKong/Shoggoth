@@ -24,10 +24,11 @@ const cronResults = scenario.startsWith("cron-results-");
 const alphaBackend = cronResults ? scenario.split("-")[2] : "openclaw";
 const queued = scenario.startsWith("queued-");
 const steering = scenario.startsWith("steering-");
-const nativeMain = scenario.startsWith("sending-shoggoth-main");
+const nativeSessionMenu = scenario.startsWith("native-session-menu");
+const nativeMain = nativeSessionMenu || scenario.startsWith("sending-shoggoth-main");
 const sending = scenario.startsWith("sending-") || steering;
 const backgroundApprovalFixture = scenario === "background-approval";
-const betaBackend = steering || queued || backgroundApprovalFixture ? "shoggoth" : sending ? scenario.split("-")[1] : "hermes";
+const betaBackend = steering || queued || nativeMain || backgroundApprovalFixture ? "shoggoth" : sending ? scenario.split("-")[1] : "hermes";
 const immersive = scenario.endsWith("-immersive");
 const now = Date.now();
 const minute = 60_000;
@@ -52,7 +53,7 @@ const sessions = [
   session(internalKey, "order-internal", "Internal member", 0),
 ];
 if (queued) sessions.push(session(betaKey + "-other", beta, "Beta", 25));
-if (nativeMain || backgroundApprovalFixture) sessions.push(session(betaAppKey, beta, "Beta", 10));
+if ((nativeMain && !nativeSessionMenu) || backgroundApprovalFixture) sessions.push(session(betaAppKey, beta, "Beta", 10));
 const agents = [alpha, beta, "order-internal"].map(id => ({
   id, name: id === alpha ? "Alpha" : id === beta ? "Beta" : "Internal member",
   backendId: id === beta ? betaBackend : alphaBackend,
@@ -213,7 +214,7 @@ if (scenario === "unread-baseline") {
 }
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.activity.v2", JSON.stringify(Object.fromEntries(sessions.map(s => [s.key, s.updatedAt]))));
-const initialKey = scenario === "restored" || cronResults ? betaKey : mainKey;
+const initialKey = scenario === "restored" || cronResults || nativeSessionMenu ? betaKey : mainKey;
 if (cronResults) localStorage.setItem("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: now - minute,
   read: {}, replies: { [oldKey]: now - 40 * minute } }));
 localStorage.setItem("shoggoth.chat.lastActive.v1", initialKey);
@@ -284,6 +285,7 @@ state.runSidebarOrderFixture = async () => {
     check(otherAgentSelected() && !dialog() && writes === 0, "the indicator must not switch chats or write by itself");
     return { scenario, language, order: names() };
   }
+  if (nativeSessionMenu) return runNativeSessionMenuFixture();
   if (queued) return runQueuedFixture();
   if (sending) return runSendingFixture();
   if (scenario.startsWith("events-")) return runActivityEventFixture();
@@ -389,6 +391,47 @@ state.runSidebarOrderFixture = async () => {
   check(writes === 0, "sorting required a remote write");
   return { scenario, language, order: names(), selections, writes, passed: true };
 };
+
+async function runNativeSessionMenuFixture() {
+  const thread = () => document.querySelector(immersive ? '[data-testid="immersive-chat"]' : ".chat-thread");
+  const showing = (key: string) => thread()?.textContent?.includes("History for " + key);
+  const trigger = () => document.querySelector<HTMLButtonElement>(immersive
+    ? '[data-testid="immersive-chat"] button[class*="identity"]' : ".chat-session-select");
+  const list = () => document.querySelector<HTMLElement>(immersive
+    ? '[data-testid="immersive-chat"] [class*="pickerList"]' : ".session-menu .model-menu__list");
+  const items = () => Array.from(list()?.querySelectorAll<HTMLButtonElement>("button[title]") ?? []);
+
+  await wait(() => showing(betaKey), "Main session history missing");
+  check(trigger() && !trigger()!.disabled, "a single Main session must have an enabled trigger");
+  trigger()!.click();
+  await wait(() => items().length === 1 && items()[0].title === betaKey, "single Main session must appear in its picker");
+  items()[0].click();
+  await wait(() => !list(), "selecting the only session must close its picker");
+
+  const topics = Array.from({ length: 18 }, (_, index) => {
+    const topic = session(`agent:${beta}:dashboard:topic-${index}`, beta, "Beta", index + 1, "direct");
+    histories.set(topic.key, [{ id: topic.key + ":reply", role: "assistant", content: "History for " + topic.key, timestamp: topic.updatedAt }]);
+    return topic;
+  });
+  sessions.push(...topics.slice().reverse());
+  state.socket.emit({ type: "event", event: "sessions.changed", payload: {} });
+  trigger()!.click();
+  await wait(() => items().length === topics.length + 1, "session picker did not update");
+  check(JSON.stringify(items().map(item => item.title)) === JSON.stringify([betaKey, ...topics.map(topic => topic.key)]),
+    "Main must precede all topics, which remain ordered newest first");
+  const oldestTopic = topics.at(-1)!;
+  items().at(-1)!.click();
+  await wait(() => showing(oldestTopic.key), "topic history did not load after switching");
+  trigger()!.click();
+  await wait(() => items().length > 0, "session picker did not reopen");
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  check(list()!.scrollHeight > list()!.clientHeight && list()!.scrollTop === 0 && items()[0].title === betaKey,
+    "the Main session must be visible at the top when reopening from an older topic");
+  items()[0].click();
+  await wait(() => showing(betaKey), "Main history did not load after switching back");
+  check(writes === 0, "opening conversations must not make Agent writes");
+  return { scenario, language, passed: true, writes };
+}
 
 async function runSendingFixture() {
   await wait(() => rows().length === 2 && document.querySelector(".chat-thread")?.textContent?.includes("History for " + mainKey), "sidebar did not load");

@@ -67,6 +67,28 @@ test("HTTP client refuses route escape and sends credentials only to fixed loopb
   assert.equal(calls, 1);
 });
 
+test("OpenCode provider metadata has its own bounded HTTP budget; chat still stops at 8 MiB", async () => {
+  const mib = 1024 * 1024;
+  let bytes = 9 * mib, status = 200;
+  const padding = Buffer.alloc(mib, 0x20);
+  const client = new OpenCodeHttpClient({ url: "http://127.0.0.1:41234", password: "x".repeat(32),
+    fetch: async () => {
+      let remaining = bytes;
+      return new Response(new ReadableStream({ pull(controller) {
+        if (remaining === 0) { controller.enqueue(Buffer.from("{}")); controller.close(); return; }
+        const size = Math.min(remaining, padding.length);
+        controller.enqueue(padding.subarray(0, size)); remaining -= size;
+      } }), { status });
+    } });
+  for (const route of ["/config/providers", "/provider"]) assert.deepEqual((await client.request("GET", route)).data, {});
+  await assert.rejects(client.request("GET", "/session/ses_fixture/message"), { code: "OPENCODE_HTTP_RESPONSE_TOO_LARGE" });
+  status = 500;
+  await assert.rejects(client.request("GET", "/provider"), { code: "OPENCODE_HTTP_RESPONSE_TOO_LARGE" });
+  status = 200;
+  bytes = 33 * mib;
+  await assert.rejects(client.request("GET", "/config/providers"), { code: "RUNTIME_MODEL_CATALOG_TOO_LARGE" });
+});
+
 test("corrupt or foreign operation ledger fails closed instead of resetting", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-opencode-ledger-"));
   try {
@@ -248,6 +270,30 @@ test("OpenCode status distinguishes signed out, protocol incompatibility and tra
     const disconnected = fixture.host(null, async () => { throw Object.assign(new Error("private"), { code: "RUNTIME_CONNECTION_LOST" }); });
     await assert.rejects(disconnected.authenticationState(), { code: "RUNTIME_CONNECTION_LOST" });
   } finally { fixture.cleanup(); }
+});
+
+test("configured providers alone supply sign-in, menu defaults and available models on modern OpenCode", async t => {
+  const f = openCodeFixture("opencode-configured-providers-");
+  t.after(() => f.cleanup());
+  let providers = [];
+  const model = "fixture/nested/model";
+  const host = f.host(null, async (method, route) => {
+    assert.equal(method, "GET");
+    if (route === "/config/providers") return { data: { providers, default: { fixture: "nested/model" } } };
+    if (route === "/config") return { data: {} };
+    assert.fail(`ordinary chat requested the global catalog: ${route}`);
+  });
+  host.protocolFeatures = { configuredProviders: true };
+  assert.deepEqual(await host.authenticationState(), { authenticated: false, credentialPresent: false });
+  providers = [{ id: "fixture", name: "Fixture", models: { "nested/model": { name: "Selected model" } } }];
+  assert.deepEqual(await host.authenticationState(), { authenticated: true, credentialPresent: true });
+  const catalog = await host.modelsList();
+  assert.deepEqual(catalog.data.map(row => [row.model, row.isDefault]), [[model, true]]);
+  providers.push({ id: "x".repeat(129), models: { hidden: {} } });
+  assert.deepEqual((await host.modelsList()).data.map(row => row.model), [model],
+    "an unrepresentable provider ID must not hide other connected models");
+  providers = [{}];
+  await assert.rejects(host.authenticationState(), { code: "RUNTIME_MODEL_CATALOG_INVALID" });
 });
 
 test("pending tool arguments are published when filled and retained on completion", async (t) => {

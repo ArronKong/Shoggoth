@@ -38,7 +38,8 @@ function modelOnly(f, fail = false, manager = f.service.workRunCoordinator.runti
         calls++;
         assert.ok(Buffer.byteLength(input.prompt) < 128 * 1024);
         assert.ok(estimateContextTokens(input.prompt) < 217600);
-        if (fail) throw Object.assign(new Error("fixture summary failed"), { code: "MODEL_ONLY_OUTPUT_INVALID" });
+        const failure = typeof fail === "function" ? await fail(input) : fail ? "MODEL_ONLY_OUTPUT_INVALID" : null;
+        if (failure) throw Object.assign(new Error("fixture summary failed"), { code: failure });
         const summary = Object.fromEntries(SUMMARY_FIELDS.map(field => [field, []]));
         summary.constraints = ["Preserve SOURCE_0 and the original project files"];
         return { text: JSON.stringify(summary), model: input.model || "fixture-model" };
@@ -1018,6 +1019,175 @@ test("a queued input whose next-turn model needs a failed summary fails alone, a
     assert.match(coordinator.getRun(waiting.run.id).errorCode, /^PRODUCT_COMPACTION_/u);
     assert.equal(summaries(), 0, "the restored input reuses its failed summary Run");
     assert.equal(transport.hosts.get("pi").turnStartCalls, startedTurns);
+  } finally { await f.close(); }
+});
+
+test("OpenCode silently retries the summary once, then continues the same input or publishes only the final reason", async () => {
+  const original = "magpie/workbuddy/deepseek-v4-pro", target = "opencode/deepseek-v4.1-flash-free";
+  const facts = async () => ({ installed: true, releaseEnabled: true, authenticated: true,
+    models: [original, target], attachmentKinds: [], permissionEnforcementProven: true });
+  const f = await openHandoffFixture({ catalogs: { opencode: [original, target] },
+    serviceOptions: { durableChatAcceptance: true, runtimeSupportDiscover: facts } });
+  try {
+    enable(f);
+    f.facts.read = facts;
+    const { productStore, chatSessionStore, workRunCoordinator: coordinator, transcriptStore } = f.service;
+    const { binding } = productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "opencode",
+      runtimeAccountId: require("../app/agent-service/runtime-account").NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID }, { operationId: "opencode-test" });
+    coordinator.getRuntimeModelContextWindow = session => session.modelOverride === target ? SMALL_WINDOW : 1_000_000;
+    const quota = require("../app/agent-service/opencode-runtime-host")
+      .openCodeRetryLimit({ type: "retry", message: "Free usage limit reached" }, Date.now(), Infinity).code;
+    let respond;
+    modelOnly(f, input => respond(input));
+    for (const [outcome, retryError, finalReason] of [
+      ["success", null, null],
+      ["failure", "RUNTIME_RATE_LIMITED", "PRODUCT_COMPACTION_RATE_LIMITED"],
+      ["catalog", "RUNTIME_MODEL_CATALOG_TOO_LARGE", "PRODUCT_COMPACTION_MODEL_CATALOG_TOO_LARGE"],
+      ["unknown", null, "PRODUCT_COMPACTION_OUTCOME_UNKNOWN"],
+    ]) {
+      const session = chatSessionStore.createSession({ operationId: `create-opencode-${outcome}`, profileId: f.profile.id,
+        defaultBindingId: binding.id, workspace: f.workspace, permissionMode: "full-access", createdAt: Date.now() });
+      const read = () => chatSessionStore.getSession(session.sessionKey);
+      const context = () => coordinator.getRuntimeContext(read()).productContext;
+      const pick = model => f.controller.handle("chat.session.runtime.model.set", { profileId: session.profileId, sessionKey: session.sessionKey,
+        bindingId: binding.id, revision: read().revision, model, acceptAdjustments: true });
+      const send = operationId => coordinator.send({ sessionKey: session.sessionKey, operationId, prompt: operationId });
+      const settled = async run => {
+        await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(run.id)?.status), 20000, run.id);
+        return coordinator.getRun(run.id);
+      };
+      await pick(original);
+      await f.complete(await settled((await send(`before-${outcome}`)).run));
+      const nativeId = read().runtimeSessionId;
+      appendHistory(f, session, 8);
+      await pick(target);
+      const host = f.transport.hosts.get("opencode"), turns = host.turnStartCalls;
+      const attempts = [];
+      let releaseRetry, firstPlan;
+      respond = async input => {
+        assert.equal(input.model, target);
+        attempts.push(input.operationId);
+        if (attempts.length === 1) {
+          firstPlan = coordinator.domainCommands.get(input.operationId).plan;
+          if (outcome === "unknown") return "MODEL_ONLY_ACCEPTANCE_UNKNOWN";
+          return outcome === "catalog" ? retryError : quota;
+        }
+        if (attempts.length === 2) {
+          await new Promise(resolve => { releaseRetry = resolve; });
+          return retryError;
+        }
+        return null; // Later successful segments can have independent coverage.
+      };
+      const operationId = `business-${outcome}`;
+      const { run } = await send(operationId);
+      const events = () => transcriptStore.listEvents(session.profileId, session.id);
+      if (outcome !== "unknown") {
+        await waitUntil(() => releaseRetry, 10000, "backend started the second summary without UI input");
+        try {
+          assert.equal(attempts[1], attempts[0] + "-retry");
+          assert.equal(coordinator.getRun(run.id).status, "queued");
+          assert.equal(context().lastError, null);
+          assert.equal(context().transfer.state, "preparing");
+          assert.equal(context().transfer.errorCode, null);
+          assert.equal(events().filter(e => e.kind === "error").length, 0);
+          assert.equal(host.turnStartCalls, turns);
+          assert.equal(coordinator.getChatRunByOperation(operationId, session.sessionKey).id, run.id);
+        } finally { releaseRetry(); }
+      }
+      const result = await settled(run);
+      if (outcome === "success") {
+        assert.equal(result.status, "running", result.errorCode);
+        assert.equal(host.turnStartCalls, turns + 1);
+        assert.equal(host.lastTurnStartParams.model, target);
+        assert.equal(read().modelOverride, target);
+        assert.ok(context().checkpointId);
+        assert.equal(new Set(attempts).size, attempts.length);
+        assert.equal(attempts.filter(id => id.endsWith("-retry")).length, 1);
+        await f.complete(result);
+        assert.equal(events().filter(e => e.kind === "error").length, 0);
+      } else {
+        assert.equal(result.status, "failed");
+        assert.equal(result.errorCode, finalReason);
+        assert.equal(host.turnStartCalls, turns);
+        assert.equal(read().runtimeSessionId, nativeId);
+        assert.equal(read().modelOverride, original);
+        assert.equal(context().checkpointId, null);
+        assert.equal(attempts.length, outcome === "unknown" ? 1 : 2);
+        assert.equal((await send(operationId)).run.id, run.id);
+        const history = await requestService(f.paths, { id: require("node:crypto").randomUUID(), token: readClientToken(f.paths),
+          version: PROTOCOL_VERSION, method: "chat.history", params: { sessionKey: session.sessionKey, cursor: null, limit: 40 } });
+        assert.deepEqual(history.messages.filter(item => item.type === "error").map(item => item.payload.message.content[0].text), [finalReason]);
+        if (outcome === "failure") {
+          // Seed the single failed receipt an older Service stored for this prefix and destination.
+          const profile = productStore.resolveAgentRuntimeProfile(session.profileId, binding.id);
+          const route = [binding.id, profile.runtime, profile.runtimeProfileId, profile.runtimeAccountId, target];
+          const identity = [profile.id, session.id, firstPlan.previousId, firstPlan.throughSeq, firstPlan.coveredHash, null, route];
+          const oldId = "compaction-" + require("node:crypto").createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+          coordinator.dispatcher.enqueue({ id: oldId, idempotencyKey: oldId, source: "compaction",
+            sourceId: session.sessionKey, profileId: profile.id, workspace: session.workspace });
+          coordinator.dispatcher.transition(oldId, "failed", { errorCode: "PRODUCT_COMPACTION_FAILED" });
+          let retried = 0;
+          respond = () => { retried++; return quota; };
+          const upgraded = await settled((await send("business-after-upgrade")).run);
+          assert.equal(upgraded.errorCode, "PRODUCT_COMPACTION_QUOTA_EXHAUSTED");
+          assert.equal(retried, 1, "the previous failed attempt has one automatic retry remaining");
+          assert.equal(host.turnStartCalls, turns);
+        }
+      }
+      assert.equal(events().filter(e => e.id.startsWith("large-")).length, 8);
+    }
+  } finally { await f.close(); }
+});
+
+test("Codex composer catalog default reaches native thread and turn, and stale selections never run", async () => {
+  const terra = "gpt-6.1-terra", sol = "gpt-6.2-sol", explicit = "explicit-model";
+  const f = await openHandoffFixture({ catalogs: { codex: [terra, explicit] } });
+  try {
+    const { productStore, chatSessionStore, workRunCoordinator: coordinator } = f.service;
+    const { binding } = productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "codex",
+      runtimeAccountId: require("../app/agent-service/runtime-account").NATIVE_CODEX_RUNTIME_ACCOUNT_ID }, { operationId: "native-codex-test" });
+    const session = chatSessionStore.createSession({ operationId: "create-native-chat", profileId: f.profile.id,
+      defaultBindingId: binding.id, workspace: f.workspace, createdAt: Date.now() });
+    const scope = { profileId: session.profileId, sessionKey: session.sessionKey };
+    const ipc = (method, params) => requestService(f.paths, { id: require("node:crypto").randomUUID(), token: readClientToken(f.paths),
+      version: PROTOCOL_VERSION, method, params });
+    const { runtimeComposerChoice, buildChatSendParams } = require("./fixtures/load-ui-typescript.cjs").load("lib/chatRuntime.ts");
+    const selection = await ipc("chat.session.runtime.state", scope);
+    assert.equal(selection.model, null);
+    const catalog = await ipc("profile.binding.models.list", { profileId: session.profileId, bindingId: binding.id, cursor: null, limit: 30 });
+    const models = catalog.models.map(model => ({ ...model, bindingId: binding.id, runtime: "codex" }));
+    const shown = runtimeComposerChoice({ selection, models });
+    assert.equal(shown.model, terra);
+    const send = async (id, choice) => {
+      const wire = buildChatSendParams(session.sessionKey, "test", id, [], choice.expectedModel);
+      const { run } = await ipc("chat.send", { operationId: id, sessionKey: wire.sessionKey, prompt: wire.message,
+        expectedModel: wire.expectedModel, createdAt: Date.now() });
+      await coordinator.waitForIdle(run.id);
+      return coordinator.getRun(run.id);
+    };
+    const first = await send("shown-default", shown);
+    assert.equal(first.status, "running", first.errorCode);
+    const host = f.transport.hosts.get("codex");
+    assert.equal(host.lastThreadStartParams.model ?? sol, terra);
+    assert.equal(host.lastTurnStartParams.model ?? sol, terra);
+    await f.complete(first);
+    assert.equal(chatSessionStore.getSession(session.sessionKey).modelOverride, null);
+    const resumed = await send("resume-shown-default", shown);
+    assert.equal(resumed.status, "running", resumed.errorCode);
+    assert.equal(host.lastResumeParams.model, terra);
+    assert.equal(host.lastTurnStartParams.model, terra);
+    await f.complete(resumed);
+    const current = chatSessionStore.getSession(session.sessionKey);
+    chatSessionStore.switchRuntime(session.sessionKey, { revision: current.revision, bindingId: binding.id, model: explicit });
+    const turns = host.turnStartCalls;
+    assert.equal((await send("outdated-model", shown)).errorCode, "EXECUTION_CONTRACT_STALE");
+    assert.equal(host.turnStartCalls, turns);
+    const confirmed = runtimeComposerChoice({ selection: await ipc("chat.session.runtime.state", scope), models });
+    assert.equal(confirmed.model, explicit);
+    const second = await send("chosen-model", confirmed);
+    assert.equal(second.status, "running", second.errorCode);
+    assert.equal(host.lastTurnStartParams.model, explicit);
+    await f.complete(second);
   } finally { await f.close(); }
 });
 

@@ -3,6 +3,7 @@
 const { serviceError } = require("./security");
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_PROVIDER_CATALOG_BYTES = 32 * 1024 * 1024;
 const EVENT_CONNECT_TIMEOUT_MS = 1_000;
 const error = (code, message) => serviceError(code, message);
 
@@ -93,18 +94,28 @@ class OpenCodeHttpClient {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       if (response.status === 204) return { status: 204, data: null };
+      // The native catalog includes models from hundreds of providers. Its
+      // metadata has a separate budget from session messages and tool output.
+      const isCatalog = response.ok && method === "GET" && ["/provider", "/config/providers"].includes(target.pathname);
+      const byteLimit = isCatalog ? MAX_PROVIDER_CATALOG_BYTES : MAX_RESPONSE_BYTES;
       const reader = response.body?.getReader();
       const chunks = [];
       let size = 0;
-      if (reader) for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > MAX_RESPONSE_BYTES) throw error("OPENCODE_HTTP_RESPONSE_TOO_LARGE", "OpenCode response exceeds limit");
-        chunks.push(Buffer.from(value));
-      }
+      try {
+        if (reader) for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > byteLimit) {
+            controller.abort();
+            if (isCatalog) throw error("RUNTIME_MODEL_CATALOG_TOO_LARGE", "OpenCode provider catalog exceeds its size limit");
+            throw error("OPENCODE_HTTP_RESPONSE_TOO_LARGE", "OpenCode response exceeds limit");
+          }
+          chunks.push(value);
+        }
+      } finally { reader?.releaseLock(); }
       let data;
-      try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+      try { data = JSON.parse(Buffer.concat(chunks, size).toString("utf8")); }
       catch { throw error("OPENCODE_HTTP_PROTOCOL_INVALID", "OpenCode returned invalid JSON"); }
       if (!response.ok && !options.accept?.includes(response.status)) {
         throw error(response.status === 401 ? "RUNTIME_AUTH_REQUIRED"
@@ -114,7 +125,7 @@ class OpenCodeHttpClient {
       }
       return { status: response.status, data };
     } catch (cause) {
-      if (cause?.code?.startsWith?.("OPENCODE_") || cause?.code === "RUNTIME_AUTH_REQUIRED"
+      if (cause?.code?.startsWith?.("OPENCODE_") || cause?.code === "RUNTIME_MODEL_CATALOG_TOO_LARGE" || cause?.code === "RUNTIME_AUTH_REQUIRED"
         || cause?.code === "RUNTIME_CONNECTION_LOST") throw cause;
       throw error("RUNTIME_CONNECTION_LOST", "OpenCode HTTP connection failed");
     } finally {

@@ -91,37 +91,6 @@ async function runFixture(root) {
         return value;
       } catch (error) { result.runtimeEvidence.errorCodes = errorCodes(error); throw error; }
     };
-    const verify = handle.verifyProactiveReview.bind(observed);
-    const features = handle._proactiveFeatures.bind(observed);
-    observed._proactiveFeatures = async threadId => {
-      const values = await features(threadId);
-      result.runtimeEvidence.enabledFeatures = values.filter(value => value.enabled).map(value => value.name);
-      return values;
-    };
-    const config = handle._proactiveReviewConfig.bind(observed);
-    observed._proactiveReviewConfig = async () => {
-      result.runtimeEvidence.phase = "review_config";
-      const value = await config(); result.runtimeEvidence.phase = "thread_start"; return value;
-    };
-    const isolation = handle.assertProactiveReviewIsolation.bind(observed);
-    observed.assertProactiveReviewIsolation = async (response, options) => {
-      result.runtimeEvidence.phase = "isolation";
-      result.runtimeEvidence.readOnly = response?.sandbox?.type === "readOnly";
-      result.runtimeEvidence.networkDisabled = response?.sandbox?.networkAccess === false;
-      result.runtimeEvidence.bindingElicitationEnabled = response?.approvalPolicy === "on-request";
-      const inventory = await handle.host.mcpServerStatusList({ threadId: response?.thread?.id, cursor: null, limit: 100, detail: "toolsAndAuthOnly" });
-      result.runtimeEvidence.responseToolInventory = inventory.data.map(server => ({ name: server.name,
-        tools: Object.values(server.tools || {}).map(tool => ({ name: tool.name,
-          readOnlyHint: tool.annotations?.readOnlyHint === true })).slice(0, 32) }));
-      const responseTools = inventory.data.flatMap(server => Object.values(server.tools || {})).filter(tool => tool.name === "proactive_respond");
-      assert.equal(responseTools.length, 1, "Acceptance needs the sole production response tool");
-      assert.equal(responseTools[0].annotations?.readOnlyHint, true, "Response tool must retain production read-only metadata before starting a model turn");
-      return isolation(response, options);
-    };
-    observed.verifyProactiveReview = async () => {
-      try { const proof = await verify(); result.runtimeEvidence.phase = "verified"; return proof; }
-      catch (error) { result.runtimeEvidence.errorCodes = errorCodes(error); throw error; }
-    };
     const turnStart = handle.turnStart.bind(observed);
     observed.turnStart = async params => {
       assert.equal(metadataOnly, false, "Metadata acceptance cannot start a model turn");
@@ -139,7 +108,7 @@ async function runFixture(root) {
       assert.equal(result.nativeTurnRequests, 0);
       assert.equal(service.workDispatcher.listRuns({ source: "proactive" }).length, 0);
       assert.equal(submissions.length, 0);
-      result.responseToolVerified = true; result.verified = true;
+      result.verified = true;
       stage("metadata_only_completed"); return;
     }
     stage("automatic_tick");

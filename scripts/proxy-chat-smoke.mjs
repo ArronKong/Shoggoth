@@ -196,6 +196,7 @@ class AsyncChatBackend extends AgentBackend {
     const record = {
       sessionKey, message, runId, actualRunId: `service-${runId}`, aborted: false, settled: false,
       connectorSelection: opts.connectorSelection,
+      expectedModel: opts.expectedModel,
     };
     shoggothSendRecords.push(record);
     if (message === "thrown-preparation" || message === "thrown-uncertain") {
@@ -1575,6 +1576,7 @@ try {
       sessionKey: "agent:shoggoth-default:real-default",
       message: "keep running",
       idempotencyKey: "handoff-run",
+      expectedModel: { bindingId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", model: "gpt-6.1-terra" },
     },
   });
   await oldClient.wait(
@@ -1583,6 +1585,9 @@ try {
   );
   await new Promise((resolve) => setTimeout(resolve, 30));
   const oldSendObserver = shoggothSendRecords.at(-1);
+  check("native chat.send preserves the composer binding and model across the WebSocket proxy",
+    oldSendObserver?.expectedModel?.model === "gpt-6.1-terra"
+    && oldSendObserver.expectedModel.bindingId === "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
   await oldClient.close();
   await new Promise((resolve) => setTimeout(resolve, 30));
   check(

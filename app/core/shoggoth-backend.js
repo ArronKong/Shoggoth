@@ -1185,6 +1185,7 @@ function sessionToRow(profile, value, backendId) {
     sessionId: value.sessionKey,
     agentId: profile.agentId,
     agentName: profile.name,
+    runtime: profile.runtime,
     model: next?.model || value.modelOverride || profile.defaultModel || undefined,
     ...(modelSettings ? { thinkingLevel: modelSettings.thinkingLevel,
       fastMode: modelSettings.serviceTier !== null } : {}),
@@ -1232,7 +1233,7 @@ function displayHistoryMessage(message, item) {
     if (message.failure) message.failure = runtimeFailureDetail(message.failure);
     const displayCode = displayedRuntimeErrorCode(code, message.failure);
     message.content[0].text = `错误：${runtimeErrorMessage(displayCode, message.failure)}`;
-    if (message.errorCode === code) message.errorCode = displayCode;
+    if (message.errorCode === code || code.startsWith("PRODUCT_COMPACTION_")) message.errorCode = displayCode;
   }
   return message;
 }
@@ -7691,6 +7692,7 @@ class ShoggothBackend extends AgentBackend {
           operationId,
           sessionKey,
           prompt: String(message),
+          ...(opts.expectedModel !== undefined ? { expectedModel: opts.expectedModel } : {}),
           ...(attachments.length ? { attachments } : {}),
           createdAt: this.now(),
         };
@@ -8499,7 +8501,7 @@ class ShoggothBackend extends AgentBackend {
       return;
     }
     if (RUNTIME_START_MESSAGES[code] || failure) {
-      this._invokeHook(context.hooks, "error", runtimeErrorMessage(code, failure));
+      this._invokeHook(context.hooks, "error", runtimeErrorMessage(code, failure), { code });
       return;
     }
     this._invokeHook(context.hooks, "error", `Shoggoth 任务未完成 (${code})`);
