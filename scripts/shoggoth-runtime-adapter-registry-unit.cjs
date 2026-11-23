@@ -83,13 +83,13 @@ test("重复注册、非法注册与未知 Runtime 都严格拒绝", async () =>
   );
 });
 
-test("被禁用的 Claude 即使被注册也不能启动", async () => {
+test("发布策略放行后，已注册的 Claude 可以启动", async () => {
   const registry = new RuntimeAdapterRegistry({ validateHandles: false });
   let called = false;
-  registry.register("claude-code", adapter({ acquire() { called = true; } }));
-  await assert.rejects(() => registry.acquire({ runtime: "claude-code", runtimeProfileId: "saved-profile",
-    runtimeAccountId: "saved-account" }), error => error.code === "RUNTIME_UNSUPPORTED");
-  assert.equal(called, false);
+  registry.register("claude-code", adapter({ acquire() { called = true; return {}; } }));
+  await registry.acquire({ runtime: "claude-code", runtimeProfileId: "saved-profile",
+    runtimeAccountId: "saved-account" });
+  assert.equal(called, true);
 });
 
 test("主动检查专用能力不会自动启用摘要或记忆任务", async () => {
@@ -111,7 +111,7 @@ test("主动检查专用能力不会自动启用摘要或记忆任务", async ()
   }
   assert.equal(registry.canGenerateModelOnly("pi"), true);
   assert.equal(registry.canGenerateModelOnly("pi", { purpose: "proactive" }), true);
-  assert.equal(registry.canGenerateModelOnly("claude-code", { purpose: "proactive" }), false);
+  assert.equal(registry.canGenerateModelOnly("claude-code", { purpose: "proactive" }), true);
 });
 
 test("stop 保留目标 Adapter 的清理失败", async () => {

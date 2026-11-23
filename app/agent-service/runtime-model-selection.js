@@ -31,4 +31,13 @@ function sameRuntimeModel(left, right) {
   return left === right || JSON.stringify(runtimeModelIdentity(left)) === JSON.stringify(runtimeModelIdentity(right));
 }
 
-module.exports = { validRuntimeModelSelection, runtimeModelIdentity, sameRuntimeModel };
+function isLegacyClaudeDefaultModel(runtime, model) {
+  return runtime === "claude-code" && model === "default";
+}
+
+function matchesRuntimeModel(runtime, model, row) {
+  return isLegacyClaudeDefaultModel(runtime, model) ? row.isDefault : row.id === model;
+}
+
+module.exports = { validRuntimeModelSelection, runtimeModelIdentity, sameRuntimeModel,
+  isLegacyClaudeDefaultModel, matchesRuntimeModel };

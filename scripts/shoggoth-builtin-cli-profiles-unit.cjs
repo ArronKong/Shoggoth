@@ -51,25 +51,23 @@ function test(name, action) {
   }
 }
 
-test("首次启动幂等补建六个可用 CLI AgentProfile", () => {
+test("首次启动幂等补建七个可用 CLI AgentProfile", () => {
   const ctx = fixture();
   const created = ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
-  assert.equal(created.length, 6);
+  assert.equal(created.length, 7);
   assert.deepEqual(created.map((profile) => profile.name), [
-    "Codex", "Grok", "Antigravity", "Pi", "OpenCode", "DeepSeek",
+    "Codex", "Grok", "Antigravity", "Pi", "Claude Code", "OpenCode", "DeepSeek",
   ]);
   assert.deepEqual(created.map((profile) => profile.runtime), [
-    "codex", "grok-build", "antigravity", "pi", "opencode", "deepseek-harness",
+    "codex", "grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness",
   ]);
-  assert.equal(new Set(created.map((profile) => profile.runtimeProfileId)).size, 6);
-  assert.deepEqual(created.map((profile) => profile.backendId), [
-    "shoggoth", "shoggoth", "shoggoth", "shoggoth", "shoggoth", "shoggoth",
-  ]);
+  assert.equal(new Set(created.map((profile) => profile.runtimeProfileId)).size, 7);
+  assert.equal(created.every((profile) => profile.backendId === "shoggoth"), true);
   assert.equal(created.every((profile) => profile.enabled && !profile.isDefault), true);
   assert.equal(created.every((profile) => profile.permissionPolicy.approvalPolicy === "on-request"
     && profile.permissionPolicy.sandbox === "danger-full-access"), true);
   assert.equal(ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state).length, 0);
-  assert.equal(ctx.writes.length, 6);
+  assert.equal(ctx.writes.length, 7);
 });
 
 test("全新安装仅连接已安装的 CLI，未安装的 Runtime 不创建 AgentProfile", () => {
@@ -129,8 +127,8 @@ test("已存在的内置 Agent 保留用户可变配置", () => {
   const ctx = fixture([existing]);
   ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.deepEqual(ctx.profiles.get(spec.id), existing);
-  assert.equal(ctx.writes.length, 5,
-    "只应补建缺失的 Grok、Antigravity、Pi、DeepSeek 与 OpenCode profile");
+  assert.equal(ctx.writes.length, 6,
+    "只应补建缺失的 Grok、Antigravity、Pi、Claude Code、DeepSeek 与 OpenCode profile");
 });
 
 test("旧默认名升级为 DeepSeek，保留已有 Agent 配置且重复启动不再写入", () => {
@@ -200,7 +198,7 @@ test("不同 ID 占用内置 agentId 或 Runtime binding 时全量预检零写�
   }
 });
 
-test("禁用 Claude 时保留既有 profile 和用户设置且不补建", () => {
+test("已保存的 Claude Agent（门控关闭期间留下）原样保留，不被重写", () => {
   const spec = BUILTIN_CLI_AGENT_PROFILES.find((item) => item.runtime === "claude-code");
   const existing = { ...spec, name: "My Claude", isDefault: false, enabled: true, defaultModel: "saved-model" };
   const ctx = fixture([existing]);

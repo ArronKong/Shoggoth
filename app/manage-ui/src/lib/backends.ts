@@ -6,8 +6,11 @@ import { invalidatePageCache } from "./usePageCache";
 import { sortBackendTabs } from "./backendTabOrder";
 import releasePolicy from "../../../release-policy.json";
 
+// An empty JSON array imports as never[]; the policy lists runtime ids.
+const disabledRuntimes: readonly string[] = releasePolicy.disabledRuntimes;
+
 const isAvailableBackend = (descriptor: BackendDescriptor) =>
-  !releasePolicy.disabledRuntimes.includes(descriptor.id);
+  !disabledRuntimes.includes(descriptor.id);
 
 export type BackendId = string;
 export type ExternalBackendId = string;

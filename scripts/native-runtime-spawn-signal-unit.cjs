@@ -54,11 +54,16 @@ async function worker(runtime, failure, root) {
     assert.equal(host.process, undefined);
     assert.equal(revocations, 1);
   } else if (runtime === "claude-turn") {
+    const { ClaudeCodeLiveSessions } = require("../app/agent-service/claude-code-live-sessions");
     const host = Object.assign(Object.create(ClaudeCodeRuntimeHost.prototype), common,
       { fs, binaryPath: fs.realpathSync(process.execPath), _sdkEnvironment: () => ({}) });
-    assert.throws(() => host._spawnSdkTurnProcess(active, { command: process.execPath, args: [] }),
+    const live = new ClaudeCodeLiveSessions().create({ key: "fixture", runtimeProfileId: "fixture",
+      policyKey: "fixture", inputQueue: { close() {} }, killProcessGroup() {}, shutdownGraceMs: 100, killGraceMs: 100 });
+    live.cwd = workspace;
+    assert.throws(() => host._spawnLiveProcess(live, { command: process.execPath, args: [] }),
       { code: "CLAUDE_CODE_PROCESS_SPAWN_FAILED" });
-    assert.equal(active.child, undefined);
+    assert.equal(live.child, null);
+    assert.equal(revocations, 0, "a resident process receives MCP tickets only after it is running");
   } else if (runtime === "pi-control-abort") {
     const host = Object.assign(Object.create(PiRuntimeHost.prototype), common,
       { binaryPath: process.execPath, controlProcesses: new Map() });

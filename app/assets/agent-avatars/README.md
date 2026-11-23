@@ -1,7 +1,7 @@
 # Bundled Agent avatar library
 
-`builtin/` contains the seven reserved 640 × 640 JPEGs for Shoggoth, Codex,
-Grok, Antigravity, Pi, OpenCode, and DeepSeek. Its separate manifest maps each
+`builtin/` contains the reserved 640 × 640 JPEGs for Shoggoth, Codex, Grok,
+Antigravity, Pi, Claude Code, OpenCode, and DeepSeek. Its separate manifest maps each
 image to the automatically created Profile's fixed identity and records its
 SHA-256 digest. These files are not part of the random library below.
 

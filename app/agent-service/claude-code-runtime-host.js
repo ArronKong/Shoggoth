@@ -34,8 +34,14 @@ const {
 } = require("./claude-code-runtime-paths");
 const { ClaudeCodeRuntimeLedger } = require("./claude-code-runtime-ledger");
 const { loadClaudeAgentSdk, withClaudeConfigDir } = require("./claude-code-sdk");
+const { ClaudeCodeLiveSessions, liveSessionKey } = require("./claude-code-live-sessions");
+const { unknownRuntimeContextUsage } = require("./runtime-context-usage");
+const { quotaScopeDigest, quotaSnapshot } = require("../core/oauth-account-quota");
 
 const PARENT_ENV_ALLOWLIST = Object.freeze([
+  // The CLI reads its `claude auth login` credential from the macOS Keychain
+  // entry of $USER; without it a signed-in CLI reports itself signed out.
+  "USER",
   "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
   "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -54,6 +60,16 @@ const MODEL_CACHE_MS = 5 * 60 * 1_000;
 const COMMAND_CACHE_MS = 60_000;
 const TERMINAL_STATUSES = new Set(["completed", "failed", "interrupted", "canceled"]);
 const WRITE_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
+const PRODUCT_TOOL_PATTERN = /^mcp__shoggoth__([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u;
+// [field, window length in minutes, label] of the claude.ai plan usage reply.
+const CLAUDE_QUOTA_WINDOWS = Object.freeze([
+  Object.freeze(["five_hour", 300, null]),
+  Object.freeze(["seven_day", 10_080, null]),
+  Object.freeze(["seven_day_opus", 10_080, "Opus"]),
+]);
+const CLAUDE_PLAN_LABELS = Object.freeze({
+  free: "Free", pro: "Pro", max: "Max", max5x: "Max 5x", max20x: "Max 20x", team: "Team", enterprise: "Enterprise",
+});
 
 function hostError(code, message) {
   return serviceError(code, message);
@@ -234,7 +250,11 @@ function parseAuthStatus(stdout) {
   });
 }
 
-function normalizeModels(value) {
+function concreteModelId(value) {
+  return safeString(value, 512) && value !== "default";
+}
+
+function normalizeModels(value, appliedModel) {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_MODELS) {
     throw hostError("RUNTIME_MODEL_CATALOG_INVALID", "Claude Code returned no usable models");
   }
@@ -246,8 +266,9 @@ function normalizeModels(value) {
       throw hostError("RUNTIME_MODEL_CATALOG_INVALID", "Claude Code model catalog format changed");
     }
     seen.add(entry.value);
-    models.push(Object.freeze(defined({
+    models.push(defined({
       model: entry.value,
+      resolvedModel: entry.resolvedModel,
       displayName: entry.displayName,
       description: safeString(entry.description, 2048, { empty: true })
         ? entry.description : undefined,
@@ -255,9 +276,29 @@ function normalizeModels(value) {
         ? { capabilities: { thinkingOptions: [...new Set(entry.supportedEffortLevels)]
           .filter(level => ["low", "medium", "high", "xhigh", "max"].includes(level)),
         thinkingDefault: null, fastTier: null } } : {}),
-    })));
+    }));
   }
-  return Object.freeze(models);
+  const alias = models.find(model => model.model === "default");
+  const explicit = models.filter(model => model !== alias);
+  let defaultModel = explicit[0];
+  if (alias) {
+    // Claude Code attests the wire ID of each alias. Compare IDs so a change
+    // in the account's default or the CLI's display names needs no App update.
+    const resolved = concreteModelId(alias.resolvedModel) ? alias.resolvedModel : appliedModel;
+    if (!concreteModelId(resolved)) {
+      throw hostError("RUNTIME_MODEL_CATALOG_UNAVAILABLE", "Claude Code default model could not be resolved");
+    }
+    defaultModel = explicit.find(model => model.model === resolved)
+      ?? explicit.find(model => model.resolvedModel === resolved);
+    if (!defaultModel) {
+      defaultModel = { model: resolved, displayName: resolved, ...(alias.capabilities ? { capabilities: alias.capabilities } : {}) };
+      explicit.unshift(defaultModel);
+    }
+  }
+  return Object.freeze(explicit.map(entry => {
+    const { resolvedModel: _resolvedModel, ...model } = entry;
+    return Object.freeze({ ...model, isDefault: entry === defaultModel, hidden: false });
+  }));
 }
 
 function sdkUserMessage(text, uuid, sessionId, priority, attachments) {
@@ -292,6 +333,34 @@ function messageTextContent(message) {
 function resultFailureCode(result) {
   const text = `${Array.isArray(result?.errors) ? result.errors.join("\n") : ""}\n${result?.result || ""}`;
   return AUTH_ERROR_PATTERN.test(text) ? "AUTH_REQUIRED" : "CLAUDE_CODE_TURN_FAILED";
+}
+
+function claudePlanLabel(value) {
+  if (!safeString(value, 64)) return null;
+  const key = value.toLowerCase().replace(/[\s_-]+/gu, "").replace(/^claude/u, "").replace(/subscription$/u, "");
+  return `Claude ${CLAUDE_PLAN_LABELS[key] || value}`;
+}
+
+// Projects the SDK's claude.ai plan usage reply. API-key and third-party
+// provider sessions report rate_limits_available false and have no windows.
+function claudeQuotaSnapshot(usage, account, { home, checkedAt }) {
+  if (!plain(usage) || usage.rate_limits_available !== true || !plain(usage.rate_limits)) {
+    return { status: "unsupported" };
+  }
+  const windows = CLAUDE_QUOTA_WINDOWS.flatMap(([field, durationMinutes, label]) => {
+    const window = usage.rate_limits[field];
+    if (!plain(window) || !Number.isFinite(window.utilization)) return [];
+    const resetsAt = typeof window.resets_at === "string" ? Date.parse(window.resets_at) : Number.NaN;
+    return [{ label, durationMinutes, usedPercent: window.utilization, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null }];
+  });
+  const plan = claudePlanLabel(usage.subscription_type ?? account?.subscriptionType);
+  const email = safeString(account?.email, 254) ? account.email : null;
+  const accountName = [email, plan].filter(Boolean).join(" · ") || undefined;
+  return quotaSnapshot(windows, {
+    accountName,
+    checkedAt,
+    quotaScope: quotaScopeDigest("claude-code", home, email, plan),
+  });
 }
 
 function questionSchema(input) {
@@ -412,6 +481,11 @@ class ClaudeCodeRuntimeHost {
     };
     this.injectedSdk = options.sdk;
     this.sdk = null;
+    // The Pool shares one registry across its per-WorkRun Hosts. A standalone
+    // Host keeps its own and releases it on stop.
+    this.ownedLiveSessions = options.liveSessions ? null
+      : new ClaudeCodeLiveSessions({ idleMs: options.liveIdleMs });
+    this.liveSessions = options.liveSessions || this.ownedLiveSessions;
     this.mcpGateIssuer = options.mcpGateIssuer;
     if (!this.mcpGateIssuer || ["reserveMcpServer", "bindMcpServer", "revokeMcpServer"]
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
@@ -687,18 +761,19 @@ class ClaudeCodeRuntimeHost {
     return {};
   }
 
-  sessionArchive(input) {
+  async sessionArchive(input) {
     this._assertReady();
     const session = this._requireSession(input?.sessionId);
     if (this.activeTurns.has(session.id)) {
-      return Promise.reject(hostError("RUNTIME_SESSION_BUSY", "Claude Code session has an active turn"));
+      throw hostError("RUNTIME_SESSION_BUSY", "Claude Code session has an active turn");
     }
+    await this._releaseSessionProcess(session);
     this.ledger.update((data) => {
       const current = sessionById(data, session.id);
       current.archived = true;
       current.updatedAt = Math.max(current.updatedAt, this.now());
     });
-    return Promise.resolve({});
+    return {};
   }
 
   sessionUnarchive(input) {
@@ -718,6 +793,7 @@ class ClaudeCodeRuntimeHost {
     if (this.activeTurns.has(session.id)) {
       throw hostError("RUNTIME_SESSION_BUSY", "Claude Code session has an active turn");
     }
+    await this._releaseSessionProcess(session);
     if (session.turns.some((turn) => turn.acceptance === "accepted")) {
       try {
         await withClaudeConfigDir(this.home, () => (
@@ -814,10 +890,9 @@ class ClaudeCodeRuntimeHost {
       inputReleased: false,
       seenInit: false,
       result: null,
-      child: null,
       reservationId: null,
-      query: null,
-      inputQueue: new AsyncMessageQueue(),
+      live: null,
+      liveOwner: null,
       toolNames: new Map(),
       toolStarts: new Set(),
       localCommandOutputs: [],
@@ -837,11 +912,9 @@ class ClaudeCodeRuntimeHost {
       this.acceptanceTimeoutMs,
     );
     active.acceptanceTimer.unref?.();
-    try {
-      this._startSdkTurn(active, session, input);
-    } catch (error) {
+    this._startLiveTurn(active, session, input).catch((error) => {
       this._failActive(active, error, { definitelyRejected: !active.inputReleased });
-    }
+    });
     return active.acceptance.promise;
   }
 
@@ -852,14 +925,19 @@ class ClaudeCodeRuntimeHost {
       return Promise.reject(hostError("RUNTIME_TURN_PARAMS_INVALID", "Claude Code steer input is invalid"));
     }
     const active = this.activeTurns.get(input.sessionId);
-    if (!active || active.turnId !== input.turnId || active.settled) {
+    // A steer must follow the turn's own prompt into the shared input queue.
+    if (!active || active.turnId !== input.turnId || active.settled || !active.inputReleased) {
       return Promise.reject(hostError("RUNTIME_TURN_NOT_ACTIVE", "Claude Code turn is no longer active"));
     }
     const uuid = this.randomUUID();
     if (!isUuid(uuid)) {
       return Promise.reject(hostError("RUNTIME_TURN_ID_INVALID", "Claude Code steer id is invalid"));
     }
-    active.inputQueue.push(sdkUserMessage(input.message, uuid, active.remoteSessionId, "now"));
+    try {
+      active.live.inputQueue.push(sdkUserMessage(input.message, uuid, active.remoteSessionId, "now"));
+    } catch (error) {
+      return Promise.reject(error);
+    }
     return Promise.resolve({ turnId: active.turnId });
   }
 
@@ -880,15 +958,22 @@ class ClaudeCodeRuntimeHost {
       throw hostError("RUNTIME_TURN_STALE", "Claude Code turn is stale");
     }
     active.interruptRequested = true;
-    active.inputQueue.close();
-    try { await active.query?.interrupt?.(); } catch {}
+    if (!active.inputReleased) {
+      // The prompt never reached the shared queue; the session process stays.
+      this._failActive(active, hostError(
+        "CLAUDE_CODE_TURN_INTERRUPTED",
+        "Claude Code turn was interrupted before dispatch",
+      ), { terminalStatus: "interrupted", definitelyRejected: true, keepProcess: true });
+    } else {
+      // Interrupt stops this turn only; the resident process answers with a
+      // result and keeps serving the session.
+      try { await active.live?.query?.interrupt?.(); } catch {}
+    }
     let terminal = await Promise.race([
       active.terminal.promise,
       unrefDelay(this.requestTimeoutMs).then(() => null),
     ]);
     if (!terminal) {
-      try { active.query?.close?.(); } catch {}
-      this._signal(active, "SIGKILL");
       this._failActive(active, hostError(
         "CLAUDE_CODE_TURN_INTERRUPTED",
         "Claude Code turn was forcefully interrupted",
@@ -910,11 +995,7 @@ class ClaudeCodeRuntimeHost {
       || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw hostError("RUNTIME_MODEL_CURSOR_INVALID", "Claude Code model cursor is invalid");
     }
-    const page = models.slice(offset, offset + limit).map((model, index) => ({
-      ...model,
-      isDefault: offset + index === 0,
-      hidden: false,
-    }));
+    const page = models.slice(offset, offset + limit);
     const next = offset + page.length;
     return { data: page, nextCursor: next < models.length ? String(next) : null };
   }
@@ -950,11 +1031,12 @@ class ClaudeCodeRuntimeHost {
     this.state = "stopping";
     this.stopping = (async () => {
       const active = [...this.activeTurns.values()];
+      // A process borrowed by an active turn stops with this Host. Processes
+      // already handed back are released by idle time or by the Pool.
+      const closing = [];
       for (const turn of active) {
         turn.interruptRequested = true;
-        turn.inputQueue.close();
-        try { turn.query?.close?.(); } catch {}
-        this._signal(turn, "SIGTERM");
+        if (turn.live) closing.push(this.liveSessions.close(turn.live));
       }
       for (const record of [...this.controlQueries]) {
         try { record.query.close(); } catch {}
@@ -962,20 +1044,19 @@ class ClaudeCodeRuntimeHost {
       for (const child of this.controlProcesses.keys()) {
         this._signalControlProcess(child, "SIGTERM");
       }
-      if (active.length > 0) {
-        await Promise.race([
-          Promise.all(active.map((turn) => turn.terminal.promise)),
-          delay(this.shutdownGraceMs),
-        ]);
-      }
-      for (const turn of [...this.activeTurns.values()]) this._signal(turn, "SIGKILL");
-      if (this.activeTurns.size > 0) await delay(this.killGraceMs);
+      await Promise.all(closing);
       for (const turn of [...this.activeTurns.values()]) {
+        const incomplete = turn.live?.cleanupIncomplete === true;
+        if (incomplete) this.cleanupIncomplete = true;
+        this._failActive(turn, incomplete
+          ? hostError("CLAUDE_CODE_PROCESS_CLOSE_TIMEOUT", "Claude Code process did not terminate")
+          : hostError("CLAUDE_CODE_TURN_INTERRUPTED", "Claude Code turn was interrupted"), {
+          terminalStatus: "interrupted",
+          definitelyRejected: !turn.inputReleased,
+        });
+      }
+      if (this.ownedLiveSessions && (await this.ownedLiveSessions.closeAll()).length > 0) {
         this.cleanupIncomplete = true;
-        this._failActive(turn, hostError(
-          "CLAUDE_CODE_PROCESS_CLOSE_TIMEOUT",
-          "Claude Code process did not terminate",
-        ), { terminalStatus: "interrupted" });
       }
       if (this.controlProcesses.size > 0) {
         await Promise.race([
@@ -1007,19 +1088,11 @@ class ClaudeCodeRuntimeHost {
     return this.stopping;
   }
 
-  _startSdkTurn(active, session, input) {
-    const reservation = this.mcpGateIssuer.reserveMcpServer({
-      runtimeProfileId: this.runtimeProfileId,
-      runtimeAccountId: this.runtimeAccountId,
-      executionRunId: this.mcpExecutionRunId,
-      parentExecutable: this.binaryPath,
-      parentLauncherExecutable: "/bin/sh",
-    });
-    active.reservationId = reservation.reservationId;
+  _turnQueryOptions(active, session, input) {
+    const delivery = require("./native-instruction-delivery");
     const permission = claudeCodePermissionOptions(active.permissionPolicy, active.cwd, active.permissionMode, active.agentWorkspace);
-    const mcpEnvironment = Object.fromEntries(reservation.env.map((entry) => [entry.name, entry.value]));
     const hasAcceptedTurn = session.turns.some((turn) => turn.acceptance === "accepted");
-    const options = {
+    return {
       cwd: active.cwd,
       ...(active.agentWorkspace && active.agentWorkspace !== active.cwd ? { additionalDirectories: [active.agentWorkspace] } : {}),
       pathToClaudeCodeExecutable: this.binaryPath,
@@ -1027,15 +1100,9 @@ class ClaudeCodeRuntimeHost {
       settingSources: this.runtimeEnvironment.configurationMode === "persistent"
         ? trustedImportedSettingSources(this.home) : [],
       strictMcpConfig: true,
-      mcpServers: {
-        shoggoth: {
-          type: "stdio",
-          command: reservation.command,
-          args: [...reservation.args],
-          env: mcpEnvironment,
-          timeout: DEFAULT_MCP_TOOL_TIMEOUT_MS,
-        },
-      },
+      // The Shoggoth server is set per turn with setMcpServers so each WorkRun
+      // gets its own ticket on the shared process.
+      mcpServers: {},
       tools: { type: "preset", preset: "claude_code" },
       includePartialMessages: true,
       forwardSubagentText: true,
@@ -1044,21 +1111,13 @@ class ClaudeCodeRuntimeHost {
       permissionMode: permission.permissionMode,
       allowDangerouslySkipPermissions: permission.allowDangerouslySkipPermissions,
       settings: permission.settings,
-      canUseTool: (toolName, toolInput, toolOptions) => (
-        this._canUseTool(active, toolName, toolInput, toolOptions)
-      ),
-      onElicitation: (request, requestOptions) => (
-        this._onElicitation(active, request, requestOptions)
-      ),
       systemPrompt: defined({
         type: "preset",
         preset: "claude_code",
-        append: require("./native-instruction-delivery").systemInstructions(
+        append: delivery.systemInstructions(
           this.sessionConfigs.get(session.id)?.developerInstructions,
-          require("./native-instruction-delivery").splitTurnInstructions(
-            require("./native-instruction-delivery").turnInstructions(input)).rules) || undefined,
+          delivery.splitTurnInstructions(delivery.turnInstructions(input)).rules) || undefined,
       }),
-      spawnClaudeCodeProcess: (spawnOptions) => this._spawnSdkTurnProcess(active, spawnOptions),
       ...(permission.sandbox ? { sandbox: permission.sandbox } : {}),
       ...(active.model ? { model: active.model } : {}),
       ...(input.thinkingLevel != null ? { effort: input.thinkingLevel } : {}),
@@ -1066,32 +1125,132 @@ class ClaudeCodeRuntimeHost {
         ? { resume: active.remoteSessionId }
         : { sessionId: active.remoteSessionId, ...(session.title ? { title: session.title } : {}) }),
     };
+  }
+
+  // Everything fixed when the process starts. A turn reuses the session's
+  // process only when all of it is unchanged; otherwise the process is replaced.
+  _livePolicyKey(options) {
+    const { resume, sessionId, title, ...fixed } = options;
+    return crypto.createHash("sha256").update(JSON.stringify(fixed)).digest("hex");
+  }
+
+  _liveKey(session) {
+    return liveSessionKey({
+      runtimeProfileId: this.runtimeProfileId,
+      runtimeAccountId: this.runtimeAccountId,
+      workspace: session.cwd,
+      remoteSessionId: session.remoteSessionId,
+    });
+  }
+
+  _liveCall(pending, message) {
+    return Promise.race([
+      Promise.resolve(pending),
+      unrefDelay(this.requestTimeoutMs).then(() => {
+        throw hostError("CLAUDE_CODE_CONTROL_TIMEOUT", message);
+      }),
+    ]);
+  }
+
+  async _startLiveTurn(active, session, input) {
+    const options = this._turnQueryOptions(active, session, input);
+    const policyKey = this._livePolicyKey(options);
+    const key = this._liveKey(session);
+    let live = this.liveSessions.get(key);
+    if (live?.owner) throw hostError("RUNTIME_SESSION_BUSY", "Claude Code session already has an active turn");
+    if (live && live.policyKey !== policyKey) {
+      // Frequent replacement means per-turn input leaked into start options.
+      try { this.onDiagnostic?.({ code: "CLAUDE_CODE_PROCESS_REPLACED" }); } catch {}
+      await this.liveSessions.close(live);
+    }
+    await this.liveSessions.settled(key);
+    if (active.settled) return;
+    live = this.liveSessions.get(key);
+    if (live && (live.owner || live.policyKey !== policyKey)) {
+      throw hostError("RUNTIME_SESSION_BUSY", "Claude Code session process changed");
+    }
+    const opened = !live;
+    if (opened) live = this._openLive(key, policyKey, options);
+    if (active.settled) {
+      if (opened) void this.liveSessions.close(live);
+      return;
+    }
+    active.liveOwner = { host: this, active };
+    live.attach(active.liveOwner);
+    active.live = live;
+    if (typeof live.query.initializationResult === "function") {
+      await this._liveCall(live.query.initializationResult(), "Claude Code did not finish starting");
+    }
+    if (active.settled) return;
+    if (!Number.isSafeInteger(live.child?.pid)) {
+      throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code process is unavailable");
+    }
+    const reservation = this.mcpGateIssuer.reserveMcpServer({
+      runtimeProfileId: this.runtimeProfileId,
+      runtimeAccountId: this.runtimeAccountId,
+      executionRunId: this.mcpExecutionRunId,
+      parentExecutable: this.binaryPath,
+    });
+    active.reservationId = reservation.reservationId;
+    this.mcpGateIssuer.bindMcpServer({ reservationId: reservation.reservationId, parentPid: live.child.pid });
+    const mcp = await this._liveCall(live.query.setMcpServers({
+      shoggoth: {
+        type: "stdio",
+        command: reservation.command,
+        args: [...reservation.args],
+        env: Object.fromEntries(reservation.env.map((entry) => [entry.name, entry.value])),
+        timeout: DEFAULT_MCP_TOOL_TIMEOUT_MS,
+      },
+    }), "Claude Code did not connect Shoggoth tools");
+    if (active.settled) return;
+    if (!plain(mcp) || (plain(mcp.errors) && Object.hasOwn(mcp.errors, "shoggoth"))) {
+      throw hostError("CLAUDE_CODE_MCP_UNAVAILABLE", "Shoggoth tools could not connect to Claude Code");
+    }
     const promptParts = this._promptParts(session.id, input);
     active.promptCommit = promptParts.commit;
-    const prompt = promptParts.text;
-    active.inputQueue.push(sdkUserMessage(
-      prompt,
+    active.inputReleased = true;
+    live.inputQueue.push(sdkUserMessage(
+      promptParts.text,
       active.userMessageUuid,
       active.remoteSessionId,
       undefined,
       input.attachments,
     ));
-    try {
-      active.query = this.sdk.query({ prompt: active.inputQueue, options });
-    } catch (error) {
-      this.mcpGateIssuer.revokeMcpServer({ reservationId: reservation.reservationId });
-      active.reservationId = null;
-      throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code query could not start");
-    }
-    Promise.resolve().then(() => this._consumeQuery(active)).catch((error) => {
-      this._failActive(active, this._sdkFailure(error), {
-        definitelyRejected: !active.inputReleased,
-      });
-    });
   }
 
-  _spawnSdkTurnProcess(active, options) {
-    if (active.settled || active.child) {
+  _openLive(key, policyKey, options) {
+    const live = this.liveSessions.create({
+      key,
+      runtimeProfileId: this.runtimeProfileId,
+      policyKey,
+      inputQueue: new AsyncMessageQueue(),
+      killProcessGroup: this.killProcessGroup,
+      shutdownGraceMs: this.shutdownGraceMs,
+      killGraceMs: this.killGraceMs,
+    });
+    live.cwd = options.cwd;
+    // Callbacks follow whichever WorkRun's Host currently borrows the process.
+    try {
+      live.query = this.sdk.query({ prompt: live.inputQueue, options: {
+        ...options,
+        canUseTool: (toolName, toolInput, toolOptions) => (live.owner
+          ? live.owner.host._canUseTool(live.owner.active, toolName, toolInput, toolOptions)
+          : Promise.resolve({ behavior: "deny", message: "No Shoggoth turn is active", interrupt: true })),
+        onElicitation: (request, requestOptions) => (live.owner
+          ? live.owner.host._onElicitation(live.owner.active, request, requestOptions)
+          : Promise.resolve({ action: "cancel" })),
+        spawnClaudeCodeProcess: (spawnOptions) => this._spawnLiveProcess(live, spawnOptions),
+      } });
+    } catch {
+      void this.liveSessions.close(live);
+      throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code query could not start");
+    }
+    void live.consume();
+    return live;
+  }
+
+  _spawnLiveProcess(live, options) {
+    if (live.closed || live.child) {
       throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code spawned an unexpected process");
     }
     let resolvedCommand;
@@ -1101,73 +1260,52 @@ class ClaudeCodeRuntimeHost {
     if (resolvedCommand !== this.binaryPath || !Array.isArray(options.args)) {
       throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code SDK requested an unsafe process");
     }
-    const env = this._sdkEnvironment(options.env);
-    const launcher = "/bin/sh";
-    const launcherArgs = [
-      "-c",
-      "IFS= read -r _ <&3 || exit 125; exec 3<&-; exec \"$@\"",
-      "shoggoth-claude-code-launcher",
-      resolvedCommand,
-      ...options.args,
-    ];
     let child;
     try {
-      child = this.spawnProcess(launcher, launcherArgs, {
-        cwd: active.cwd,
-        env,
+      child = this.spawnProcess(resolvedCommand, options.args, {
+        cwd: live.cwd,
+        env: this._sdkEnvironment(options.env),
         detached: true,
-        stdio: ["pipe", "pipe", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         signal: options.signal,
       });
     } catch {
       throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code process could not start");
     }
     if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 1
-      || !child.stdin || !child.stdout || !child.stderr || !child.stdio?.[3]) {
+      || !child.stdin || !child.stdout || !child.stderr) {
       retireFailedSpawn(child);
       try { killStartedChild(child, "SIGKILL"); } catch {}
       throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code process pipes are invalid");
     }
-    active.child = child;
     child.once("error", () => {});
-    child.stdio[3].once("error", () => {});
-    try {
-      this.mcpGateIssuer.bindMcpServer({
-        reservationId: active.reservationId,
-        parentPid: child.pid,
-      });
-      child.stdio[3].end("go\n");
-      active.inputReleased = true;
-    } catch (error) {
-      try { killStartedChild(child, "SIGKILL"); } catch {}
-      throw error;
-    }
+    live.trackChild(child);
     return child;
   }
 
-  async _consumeQuery(active) {
-    try {
-      for await (const message of active.query) {
-        if (active.settled) break;
-        const terminal = await this._onSdkMessage(active, message);
-        if (terminal) break;
-      }
-      if (!active.settled) {
-        this._failActive(active, hostError(
-          "CLAUDE_CODE_STREAM_RESULT_MISSING",
-          "Claude Code result event is missing",
-        ));
-      }
-    } catch (error) {
-      if (!active.settled) {
-        this._failActive(active, this._sdkFailure(error), {
-          definitelyRejected: !active.inputReleased,
-        });
-      }
-    } finally {
-      active.inputQueue.close();
-      try { active.query?.close?.(); } catch {}
-    }
+  // The shared query ended (process exit, close or stream error) while this
+  // turn borrowed it.
+  _liveEnded(active, failure) {
+    this._failActive(active, failure
+      ? this._sdkFailure(failure)
+      : hostError("CLAUDE_CODE_STREAM_RESULT_MISSING", "Claude Code result event is missing"), {
+      definitelyRejected: !active.inputReleased,
+    });
+  }
+
+  // Hands the process back for the next turn, or retires it after a fault.
+  _releaseLive(active, close) {
+    const live = active.live;
+    if (!live) return;
+    if (close) void this.liveSessions.close(live);
+    else live.detach(active.liveOwner);
+  }
+
+  async _releaseSessionProcess(session) {
+    const live = this.liveSessions.get(this._liveKey(session));
+    if (live?.owner) throw hostError("RUNTIME_SESSION_BUSY", "Claude Code session has an active turn");
+    if (live) await this.liveSessions.close(live);
+    await this.liveSessions.settled(this._liveKey(session));
   }
 
   async _onSdkMessage(active, message) {
@@ -1177,11 +1315,14 @@ class ClaudeCodeRuntimeHost {
     if (typeof message.session_id === "string" && message.session_id !== active.remoteSessionId) {
       throw hostError("RUNTIME_SESSION_CONFLICT", "Claude Code event session changed");
     }
+    // A resident process may announce init once for its first turn or before
+    // each turn; every announcement must match this session and workspace.
     if (message.type === "system" && message.subtype === "init") {
-      if (active.seenInit || message.session_id !== active.remoteSessionId
-        || path.resolve(message.cwd) !== active.cwd) {
+      if (message.session_id !== active.remoteSessionId || path.resolve(message.cwd) !== active.cwd) {
         throw hostError("CLAUDE_CODE_STREAM_SEQUENCE_INVALID", "Claude Code init event is inconsistent");
       }
+      if (active.live) active.live.initSeen = true;
+      if (active.seenInit) return false;
       active.seenInit = true;
       this._publish({
         known: true,
@@ -1193,8 +1334,20 @@ class ClaudeCodeRuntimeHost {
       });
       return false;
     }
-    if (!active.seenInit) {
-      throw hostError("CLAUDE_CODE_STREAM_SEQUENCE_INVALID", "Claude Code emitted data before init");
+    // Manual /compact and the CLI's automatic compaction both end with this
+    // boundary; it is the native completion fact.
+    if (message.type === "system" && message.subtype === "compact_boundary") {
+      this._acceptActive(active);
+      this._publish({
+        known: true,
+        method: "claude-code/system/compact_boundary",
+        type: "context_compacted",
+        sessionId: active.sessionId,
+        turnId: active.turnId,
+        ...(safeString(message.uuid, 512) ? { compactionId: message.uuid } : {}),
+        contextUsage: unknownRuntimeContextUsage(active.sessionId, { observedAt: this.now(), source: "runtime_event" }),
+      });
+      return false;
     }
     if (message.type === "stream_event") {
       this._acceptActive(active);
@@ -1281,7 +1434,7 @@ class ClaudeCodeRuntimeHost {
         this._failActive(active, hostError(
           resultFailureCode(message),
           "Claude Code rejected the turn before acceptance",
-        ), { definitelyRejected: message.num_turns === 0 });
+        ), { definitelyRejected: message.num_turns === 0, keepProcess: true });
         return true;
       }
       const failed = message.subtype !== "success" || message.is_error === true;
@@ -1422,6 +1575,8 @@ class ClaudeCodeRuntimeHost {
     if (active.permissionPolicy.approvalPolicy === "never") {
       return { behavior: "allow", updatedInput: plain(input) ? input : {} };
     }
+    const productTool = PRODUCT_TOOL_PATTERN.exec(toolName);
+    if (productTool) return this._askProductToolPermission(active, productTool[1], input, options);
     const method = WRITE_TOOLS.has(toolName)
       ? "item/fileChange/requestApproval" : "item/commandExecution/requestApproval";
     const sessionPermissions = Array.isArray(options.suggestions)
@@ -1464,6 +1619,28 @@ class ClaudeCodeRuntimeHost {
         message: response?.decision === "cancel" ? "User canceled the turn" : "User denied the tool",
         interrupt: response?.decision === "cancel",
       };
+    } catch {
+      return { behavior: "deny", message: "Tool approval was unavailable" };
+    }
+  }
+
+  // Shoggoth's own MCP tools ask in the canonical MCP permission form, so the
+  // Service applies the Agent's product tool permissions (as for Codex) and
+  // only asks the user when those do not already allow the tool.
+  async _askProductToolPermission(active, toolName, input, options) {
+    try {
+      const response = await this._requestServer(active, "mcpServer/elicitation/request", {
+        sessionId: active.sessionId,
+        turnId: active.turnId,
+        serverName: "shoggoth",
+        mode: "form",
+        message: `Allow the shoggoth MCP server to run tool "${toolName}"?`,
+        requestedSchema: { type: "object", properties: {} },
+        elicitationId: options.toolUseID,
+      }, options.signal);
+      return response?.action === "accept"
+        ? { behavior: "allow", updatedInput: plain(input) ? input : {} }
+        : { behavior: "deny", message: "User denied the tool" };
     } catch {
       return { behavior: "deny", message: "Tool approval was unavailable" };
     }
@@ -1643,6 +1820,9 @@ class ClaudeCodeRuntimeHost {
     });
     active.settled = true;
     this._clearActive(active);
+    // A sign-in failure retires the process so the next turn starts with the
+    // CLI's current credentials.
+    this._releaseLive(active, errorCode === "AUTH_REQUIRED");
     const common = {
       known: true,
       method: "claude-code/result",
@@ -1702,6 +1882,7 @@ class ClaudeCodeRuntimeHost {
       active.terminal.resolve({ status: "interrupted" });
       active.settled = true;
       this._clearActive(active);
+      this._releaseLive(active, true);
       return;
     }
     if (failure.code === "AUTH_REQUIRED") {
@@ -1714,9 +1895,10 @@ class ClaudeCodeRuntimeHost {
       this.commandsExpiresAt = 0;
     }
     active.settled = true;
-    active.inputQueue.close();
-    try { active.query?.close?.(); } catch {}
     this._clearActive(active);
+    // Only a clean pre-dispatch refusal or an explicit native result keeps the
+    // process; stream faults, timeouts and sign-in failures retire it.
+    this._releaseLive(active, options.keepProcess !== true || failure.code === "AUTH_REQUIRED");
     if (!active.accepted) active.acceptance.reject(failure);
     this._publish({
       known: true,
@@ -1731,12 +1913,11 @@ class ClaudeCodeRuntimeHost {
 
   _acceptanceTimedOut(active) {
     if (active.settled || active.accepted) return;
-    try { active.query?.close?.(); } catch {}
-    this._signal(active, "SIGKILL");
+    // A prompt that never reached the input queue is definitely not accepted.
     this._failActive(active, hostError(
       "RUNTIME_TURN_ACCEPTANCE_UNKNOWN",
       "Claude Code did not prove turn acceptance",
-    ));
+    ), { definitelyRejected: !active.inputReleased });
   }
 
   _clearActive(active) {
@@ -1747,11 +1928,6 @@ class ClaudeCodeRuntimeHost {
       active.reservationId = null;
     }
     if (this.activeTurns.get(active.sessionId) === active) this.activeTurns.delete(active.sessionId);
-  }
-
-  _signal(active, signal) {
-    if (!active.child || !Number.isSafeInteger(active.child.pid)) return;
-    try { this.killProcessGroup(active.child.pid, signal); } catch {}
   }
 
   _signalControlProcess(child, signal) {
@@ -1974,6 +2150,56 @@ class ClaudeCodeRuntimeHost {
     });
   }
 
+  async accountQuotaRead() {
+    this._assertReady();
+    const auth = await this._readAuthenticationState(true);
+    if (!auth.authenticated) return { status: "unsupported" };
+    return this._withControlQuery(async (query) => {
+      // The SDK marks its plan usage reply experimental; a release without it
+      // reports quota as unsupported instead of failing the account view.
+      const readUsage = query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+      if (typeof readUsage !== "function") return { status: "unsupported" };
+      const [usage, account] = await Promise.all([
+        this._liveCall(readUsage.call(query, { skipBehaviors: true }), "Claude Code usage timed out"),
+        typeof query.accountInfo === "function"
+          ? this._liveCall(query.accountInfo(), "Claude Code account timed out").catch(() => null) : null,
+      ]);
+      this._assertReady();
+      return claudeQuotaSnapshot(usage, account, { home: this.home, checkedAt: this.now() });
+    });
+  }
+
+  async _withControlQuery(work) {
+    const input = new AsyncMessageQueue();
+    const record = { query: null };
+    let query;
+    try {
+      query = this.sdk.query({
+        prompt: input,
+        options: {
+          cwd: this.workspace || this.userHome,
+          pathToClaudeCodeExecutable: this.binaryPath,
+          env: this._spawnEnvironment(),
+          settingSources: this.runtimeEnvironment.configurationMode === "persistent"
+            ? trustedImportedSettingSources(this.home) : [],
+          strictMcpConfig: true,
+          mcpServers: {},
+          tools: [],
+          persistSession: false,
+          permissionMode: "dontAsk",
+          spawnClaudeCodeProcess: (options) => this._spawnSdkControlProcess(options),
+        },
+      });
+      record.query = query;
+      this.controlQueries.add(record);
+      return await work(query);
+    } finally {
+      input.close();
+      try { query?.close?.(); } catch {}
+      this.controlQueries.delete(record);
+    }
+  }
+
   async _ensureModelCatalog() {
     const now = this.now();
     if (Array.isArray(this.profileState.models) && this.profileState.modelsExpiresAt > now) {
@@ -2004,12 +2230,18 @@ class ClaudeCodeRuntimeHost {
       });
       record.query = query;
       this.controlQueries.add(record);
-      const models = normalizeModels(await Promise.race([
-        query.supportedModels(),
+      const models = await Promise.race([
+        (async () => {
+          const catalog = await query.supportedModels();
+          const alias = Array.isArray(catalog) && catalog.find(entry => entry?.value === "default");
+          const applied = alias && !concreteModelId(alias.resolvedModel) && typeof query.getSettings === "function"
+            ? (await query.getSettings())?.applied?.model : undefined;
+          return normalizeModels(catalog, applied);
+        })(),
         unrefDelay(this.requestTimeoutMs).then(() => {
           throw hostError("RUNTIME_MODEL_CATALOG_UNAVAILABLE", "Claude Code model catalog timed out");
         }),
-      ]));
+      ]);
       this._assertReady();
       this.profileState.models = models;
       this.profileState.modelsExpiresAt = now + MODEL_CACHE_MS;
@@ -2154,6 +2386,9 @@ class ClaudeCodeRuntimeHost {
 
   _validateModel(model) {
     if (model === undefined || model === null) return null;
+    // Historical Agent, session and task selections can contain the CLI alias.
+    // Keep their execution meaning and recorded operation fingerprints.
+    if (model === "default") return model;
     if (!safeString(model, 512)
       || !this.profileState.models?.some((candidate) => candidate.model === model)) {
       throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Claude Code model is unavailable");
@@ -2245,7 +2480,12 @@ class ClaudeCodeRuntimeHost {
     }
     env.PATH = runtimePath(env.PATH, this.userHome);
     env.HOME = this.runtimeEnvironment.spawnEnv.HOME;
-    env.CLAUDE_CONFIG_DIR = this.runtimeEnvironment.spawnEnv.CLAUDE_CONFIG_DIR;
+    // Pass the config directory only when the user configured one, so the CLI
+    // resolves configuration and the credentials `claude auth login` stored
+    // exactly as in the user's terminal.
+    if (typeof this.parentEnv.CLAUDE_CONFIG_DIR === "string" && this.parentEnv.CLAUDE_CONFIG_DIR.length > 0) {
+      env.CLAUDE_CONFIG_DIR = this.runtimeEnvironment.spawnEnv.CLAUDE_CONFIG_DIR;
+    }
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "shoggoth-desktop";
     env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
     env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "false";
@@ -2357,6 +2597,7 @@ class ClaudeCodeRuntimeHost {
 module.exports = {
   AsyncMessageQueue,
   ClaudeCodeRuntimeHost,
+  claudeQuotaSnapshot,
   normalizeModels,
   parseAuthStatus,
   questionSchema,

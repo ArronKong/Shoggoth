@@ -16,11 +16,13 @@ export function findOpenClawModel<T extends { id: string; provider?: string }>(m
 
 function findInheritedModel(models: ModelMenuChoice[], selection: CronModelChoice | undefined, kind?: BackendCronKind) {
   if (!selection?.model) return undefined;
+  if ("bindingId" in selection) {
+    const choices = models.filter(model => model.bindingId === selection.bindingId
+      && model.modelProviderRef === selection.modelProviderRef);
+    return choices.find(model => model.id === selection.model)
+      ?? (selection.model === "default" ? choices.find(model => model.isDefault) : undefined);
+  }
   let matches = models.filter((model) => {
-    if ("bindingId" in selection) {
-      return model.bindingId === selection.bindingId && model.id === selection.model
-        && model.modelProviderRef === selection.modelProviderRef;
-    }
     if (kind === "openclaw") {
       return Boolean(model.provider) && openClawModelReference(model.id, model.provider) === selection.model;
     }
@@ -55,7 +57,9 @@ export function CronTaskModelField({ backendId, agentId, kind, value, defaultMod
   const inheritedName = inheritedModel?.name || inherited?.model || defaultModelHint;
   const defaultLabel = inheritedName ? t("cronForm.modelDefaultNamed", { model: inheritedName }) : t("cronForm.modelDefault");
   const native = value && "bindingId" in value ? value : null;
-  const current = value ? (kind === "openclaw" ? findOpenClawModel(models, value.model) : undefined) : inheritedModel;
+  const current = value
+    ? (kind === "openclaw" ? findOpenClawModel(models, value.model) : findInheritedModel(models, value, kind))
+    : inheritedModel;
   const provider = value && "provider" in value ? value.provider : current?.provider;
   return (
     <div className="field">

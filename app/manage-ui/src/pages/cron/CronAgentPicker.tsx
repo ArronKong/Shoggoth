@@ -88,7 +88,7 @@ export default function CronAgentPicker({ value, onChange, backends, agents, loa
                   {(agents[runtime.id] || []).map((agent) => {
                     const checked = value.backendId === runtime.id && value.agentId === agent.id;
                     const available = cronAgentAvailable(agent);
-                    const name = assistantLabel(agent, runtime.name);
+                    const name = agent.name || agent.id;
                     const label = available ? name : `${name} · ${t("inspiration.unavailable")}`;
                     return <button key={agent.id} type="button" className={styles.agent}
                       aria-pressed={checked} aria-label={label} title={label} disabled={!available}

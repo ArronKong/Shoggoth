@@ -63,18 +63,19 @@ const compactionRuns = coordinator => coordinator.dispatcher.listRuns({ source: 
 const compactedMarkers = (f, session) => f.service.transcriptStore.listEvents(session.profileId, session.id)
   .filter(event => event.content?.transcriptType === "context.native.compacted");
 
-test("compaction modes: OpenCode and Codex by command, Grok Build, Pi and DeepSeek by turn, Antigravity self-managed", () => {
+test("compaction modes: OpenCode and Codex by command, Grok Build, Claude Code, Pi and DeepSeek by turn, Antigravity self-managed", () => {
   assert.deepEqual(nativeCompaction("opencode"), { mode: "command", automatic: true });
   assert.deepEqual(nativeCompaction("codex"), { mode: "command", automatic: true });
   assert.deepEqual(nativeCompaction("grok-build"), { mode: "turn", automatic: true });
+  assert.deepEqual(nativeCompaction("claude-code"), { mode: "turn", automatic: true });
   assert.deepEqual(nativeCompaction("pi"), { mode: "turn", automatic: false });
   assert.deepEqual(nativeCompaction("deepseek-harness"), { mode: "turn", automatic: false });
-  for (const runtime of ["antigravity", "claude-code", "constructor", "__proto__"]) {
+  for (const runtime of ["antigravity", "constructor", "__proto__"]) {
     assert.equal(nativeCompaction(runtime), null, runtime);
   }
   assert.equal(selfManagedCompaction("antigravity"), true);
   assert.equal(selfManagedCompaction("opencode"), false);
-  for (const runtime of ["opencode", "grok-build"]) {
+  for (const runtime of ["opencode", "grok-build", "claude-code"]) {
     assert.equal(runtimeContextCapabilities(runtime)["context.compact.native"], true, runtime);
     assert.equal(runtimeContextCapabilities(runtime)["context.compact.auto"], true, runtime);
   }

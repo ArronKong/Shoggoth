@@ -38,14 +38,17 @@ function fixture() {
   return { root, userHome, paths, create };
 }
 
-test("catalog exposes seven available account-scoped environments without creating Runtime Homes", () => {
+test("catalog exposes eight available account-scoped environments without creating Runtime Homes", () => {
   const value = fixture();
   try {
     const before = fs.readdirSync(value.paths.stateDir);
     const catalog = value.create();
-    assert.ok(catalog.every((item) => !item.runtimeAccountId.includes("claude")));
-    assert.equal(catalog.length, 7);
-    assert.equal(new Set(catalog.map((entry) => entry.runtimeAccountId)).size, 7);
+    const claude = catalog.find((item) => item.runtime === "claude-code");
+    // The user's own CLI sign-in: Shoggoth only hands the official commands over.
+    assert.deepEqual({ homeEnv: claude.homeEnv, loginArgs: claude.loginArgs, logoutArgs: claude.logoutArgs },
+      { homeEnv: "CLAUDE_CONFIG_DIR", loginArgs: ["auth", "login", "--claudeai"], logoutArgs: ["auth", "logout"] });
+    assert.equal(catalog.length, 8);
+    assert.equal(new Set(catalog.map((entry) => entry.runtimeAccountId)).size, 8);
     const internal = catalog.find((entry) => (
       entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
     ));

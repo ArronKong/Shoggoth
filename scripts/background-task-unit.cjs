@@ -406,7 +406,7 @@ test("cross runtime: each supported binding reports back to the same Agent's ori
       service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime, runtimeAccountId }, { operationId: `bind-${runtime}` });
     }
   }
-  assert.deepEqual([...BACKGROUND_TASK_RUNTIMES].sort(), ["antigravity", "codex", "deepseek-harness", "grok-build", "opencode", "pi"]);
+  assert.deepEqual([...BACKGROUND_TASK_RUNTIMES].sort(), ["antigravity", "claude-code", "codex", "deepseek-harness", "grok-build", "opencode", "pi"]);
   const source = ownSession(f);
   let reportCount = 0;
   for (const runtime of BACKGROUND_TASK_RUNTIMES) {

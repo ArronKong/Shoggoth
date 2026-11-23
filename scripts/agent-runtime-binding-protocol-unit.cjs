@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { bindingId } = require("../app/agent-service/agent-runtime-binding");
 const { validateAgentBindingParams: params, validateAgentBindingResult: result } = require("../app/agent-service/agent-runtime-binding-protocol");
+const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 function binding(runtime = "codex") {
   const runtimeProfileId = `runtime-${runtime}`;
@@ -55,9 +56,13 @@ test("Backend resolves Agent authority, validates before IPC and isolates unsafe
 });
 
 test("automatic CLI sync accepts only bounded, unique data arrays without evaluating accessors", () => {
-  const request = { profileId: "profile-one", runtimeAccountIds: ["native-pi-default-v1"] };
+  const nativeAccountIds = DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").map(account => account.id);
+  const request = { profileId: "profile-one", runtimeAccountIds: nativeAccountIds };
   assert.deepEqual(params("agent.binding.sync", request), request);
-  for (const runtimeAccountIds of [["duplicate", "duplicate"], Array(1), Array(7).fill("x"), Object.assign(["valid"], { extra: 1 })]) {
+  for (const runtimeAccountIds of [
+    ["duplicate", "duplicate"], Array(1), [...nativeAccountIds, "extra-cli-account"],
+    Object.assign(["valid"], { extra: 1 }),
+  ]) {
     assert.throws(() => params("agent.binding.sync", { ...request, runtimeAccountIds }), { code: "AGENT_BINDING_INVALID" });
   }
   let evaluated = 0;

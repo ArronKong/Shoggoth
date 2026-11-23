@@ -5,6 +5,7 @@ const { readRuntimeAuthenticationState } = require("./runtime-adapter");
 const { isRuntimeAvailable } = require("../runtime-availability");
 const { isRuntimeIncompatible } = require("./runtime-compatibility");
 const { runtimeOperationSupport } = require("./runtime-capability-evidence");
+const { isLegacyClaudeDefaultModel } = require("./runtime-model-selection");
 
 const RUNTIME_SUPPORT_CODES = Object.freeze(["BINDING_DISABLED", "RUNTIME_NOT_INSTALLED",
   "RUNTIME_INCOMPATIBLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
@@ -43,7 +44,8 @@ function supports({ binding, facts, requirements = {} }) {
   if (permission.permissionPolicy.sandbox !== "read-only" && !requirements.workspace) {
     return unsupported("WORKSPACE_REQUIRED");
   }
-  if (requirements.model && !facts.models?.includes(requirements.model)) return unsupported(
+  const model = isLegacyClaudeDefaultModel(binding.runtime, requirements.model) ? facts.defaultModel : requirements.model;
+  if (requirements.model && !facts.models?.includes(model)) return unsupported(
     facts.catalogState === "unverified" ? "RUNTIME_FACTS_UNKNOWN" : "MODEL_ROUTE_UNSUPPORTED");
   if ((requirements.attachmentKinds || []).some(kind => !facts.attachmentKinds?.includes(kind))) {
     return unsupported("ATTACHMENT_UNSUPPORTED");

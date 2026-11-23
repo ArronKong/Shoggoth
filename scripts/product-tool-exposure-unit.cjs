@@ -91,7 +91,7 @@ test("background dispatch is resident and its instruction reaches only chat runs
   const instructions = (source, runtime) => manifest.shoggothProductDeveloperInstructions({
     source, sourceId: "source-1", profileName: "Agent", backendId: "shoggoth", runtime });
   for (const runtime of BACKGROUND_TASK_RUNTIMES) assert.equal(instructions("chat", runtime).includes(line), true, runtime);
-  for (const runtime of ["claude-code", "hermes"]) assert.equal(instructions("chat", runtime).includes(line), false, runtime);
+  for (const runtime of ["hermes"]) assert.equal(instructions("chat", runtime).includes(line), false, runtime);
   for (const source of ["cron", "kanban", "inspiration", "proactive"]) assert.equal(instructions(source, "codex").includes(line), false, source);
   assert.equal(manifest.SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes(line), false);
   assert.equal(manifest.SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS.includes(line), false);

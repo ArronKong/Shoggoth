@@ -45,6 +45,7 @@ const yauzl = require("yauzl");
 const OUTPUT_LIMIT = 512 * 1024;
 // Rosetta 首次冷启动可能需要几十秒；保持有界，但不要把冷启动误判为 runtime 失败。
 const TIMEOUT_MS = 90_000;
+const CLAUDE_AGENT_SDK_VERSION = "0.3.329";
 const EXPECTED_DIRECTORIES = [
   "bin",
   "codex-path",
@@ -986,14 +987,28 @@ async function verifyPackagedCua(appPath, archivePath, electronExecutable, expec
   assert.equal(JSON.parse(sdkProbe.stdout).loaded, true);
 }
 
-function verifyClaudeExcluded(archivePath) {
-  assert.equal(listAsarFiles(archivePath).some((file) =>
-    /node_modules[/\\]@anthropic-ai[/\\]claude-agent-sdk/.test(file)), false,
-  "Claude Agent SDK must not be redistributed while its terms are unresolved");
+async function verifyClaudeSdkJavaScriptOnly(archivePath, electronExecutable) {
+  const files = listAsarFiles(archivePath);
+  assert.equal(files.some((file) => /node_modules[/\\]@anthropic-ai[/\\]claude-agent-sdk[/\\]sdk\.mjs$/u.test(file)), true,
+    "Claude Agent SDK JavaScript must be packaged");
+  assert.equal(files.some((file) => /node_modules[/\\]@anthropic-ai[/\\]claude-agent-sdk-/u.test(file)), false,
+    "Claude Code uses the installed CLI; platform SDK packages bundle a CLI and must stay out");
   const policy = JSON.parse(extractAsarFile(archivePath, "app/release-policy.json"));
-  assert.ok(policy.disabledRuntimes.includes("claude-code"));
+  assert.equal(policy.disabledRuntimes.includes("claude-code"), false);
   const pkg = JSON.parse(extractAsarFile(archivePath, "package.json"));
-  assert.equal(pkg.dependencies?.["@anthropic-ai/claude-agent-sdk"], undefined);
+  assert.equal(pkg.dependencies?.["@anthropic-ai/claude-agent-sdk"], CLAUDE_AGENT_SDK_VERSION);
+  const sdkEntry = path.join(path.dirname(archivePath), "app.asar", "node_modules", "@anthropic-ai", "claude-agent-sdk", "sdk.mjs");
+  const probe = await runCaptured(electronExecutable, ["-e", `
+    const { pathToFileURL } = require("node:url");
+    import(pathToFileURL(${JSON.stringify(sdkEntry)}).href).then((sdk) => {
+      process.stdout.write(JSON.stringify(["query", "renameSession", "deleteSession"].map((name) => typeof sdk[name])));
+    }).catch((error) => { process.stderr.write(String(error?.stack || error)); process.exitCode = 1; });
+  `], {
+    timeoutMs: TIMEOUT_MS,
+    env: { ELECTRON_RUN_AS_NODE: "1", HOME: tmpdir(), PATH: "/usr/bin:/bin", TMPDIR: tmpdir() },
+  });
+  assert.equal(probe.code, 0, `packaged Claude Agent SDK load failed: ${probe.stderr}`);
+  assert.deepEqual(JSON.parse(probe.stdout), ["function", "function", "function"]);
 }
 
 async function verifyPackagedPiExtension(appPath, electronExecutable) {
@@ -1051,7 +1066,9 @@ async function verifySourceContract(onlyArch = null) {
   const builder = await readFile(path.join(REPO_ROOT, "electron-builder.yml"), "utf8");
   assert.match(builder, /files:[\s\S]*\n\s*- schemas\/\*\*\/\*/);
   const builderConfig = require("js-yaml").load(builder);
-  assert.ok(builderConfig.files.includes("!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"));
+  assert.ok(builderConfig.files.includes("node_modules/@anthropic-ai/claude-agent-sdk/**/*"));
+  assert.ok(builderConfig.files.includes("!node_modules/@anthropic-ai/claude-agent-sdk-*/**/*"));
+  assert.equal(packageJson.dependencies?.["@anthropic-ai/claude-agent-sdk"], CLAUDE_AGENT_SDK_VERSION);
   assert.ok(builderConfig.files.includes("node_modules/electron-updater/**/*"));
   assert.deepEqual(builderConfig.publish, {
     provider: "github", owner: "ArronKong", repo: "Shoggoth", releaseType: "draft",
@@ -1442,8 +1459,8 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   ));
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: cua-sdk`);
   await verifyPackagedCua(appPath, archivePath, electronExecutable, expected);
-  console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: claude-excluded`);
-  verifyClaudeExcluded(archivePath);
+  console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: claude-sdk-js-only`);
+  await verifyClaudeSdkJavaScriptOnly(archivePath, electronExecutable);
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: pi-extension`);
   await verifyPackagedPiExtension(appPath, electronExecutable);
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: deepseek-harness-bridge`);

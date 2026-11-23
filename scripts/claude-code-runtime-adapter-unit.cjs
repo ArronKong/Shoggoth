@@ -27,10 +27,12 @@ const {
   NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID,
 } = require("../app/agent-service/runtime-account");
 const {
+  claudeQuotaSnapshot,
   questionSchema,
   usageFromResult,
 } = require("../app/agent-service/claude-code-runtime-host");
-const { normalizeInteractiveRequestV1 } = require("../app/core/shoggoth-interaction-contract");
+const { validQuotaSnapshot } = require("../app/core/oauth-account-quota");
+const { normalizeInteractiveRequestV1, parseMcpToolPermission } = require("../app/core/shoggoth-interaction-contract");
 
 class FakeChild extends EventEmitter {
   constructor(pid) {
@@ -66,14 +68,22 @@ class FakeChild extends EventEmitter {
   }
 }
 
+// Models one resident Claude Code process: a single query keeps reading user
+// messages from its prompt stream and answers each with its own result.
 class FakeQuery {
-  constructor(child) {
+  constructor(sdk, child, control) {
+    this.sdk = sdk;
     this.child = child;
+    this.control = control;
     this.values = [];
     this.waiters = [];
     this.closed = false;
     this.ended = false;
     this.userMessage = null;
+    this.activeTurn = null;
+    this.initSent = false;
+    this.steers = [];
+    child?.once("exit", () => this.end());
   }
 
   push(value) {
@@ -102,15 +112,20 @@ class FakeQuery {
 
   [Symbol.asyncIterator]() { return this; }
 
+  initializationResult() {
+    return Promise.resolve({ commands: [], models: [], account: { email: "dev@example.test", subscriptionType: "max" } });
+  }
+
   supportedModels() {
-    return Promise.resolve([
-      { value: "sonnet", displayName: "Claude Sonnet", description: "Balanced", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high"] },
-      { value: "opus", displayName: "Claude Opus", description: "Deep reasoning" },
+    return Promise.resolve(this.sdk.behavior.models ?? [
+      { value: "default", resolvedModel: "claude-opus-fixture", displayName: "Default (recommended)" },
+      { value: "sonnet", resolvedModel: "claude-sonnet-fixture", displayName: "Claude Sonnet", description: "Balanced", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high"] },
+      { value: "opus", resolvedModel: "claude-opus-fixture", displayName: "Claude Opus", description: "Deep reasoning" },
     ]);
   }
 
   getSettings() {
-    return Promise.resolve({ model: "sonnet", applied: { model: "claude-fixture-actual" } });
+    return Promise.resolve({ model: "sonnet", applied: { model: this.sdk.behavior.appliedModel ?? "claude-fixture-actual" } });
   }
 
   supportedCommands() {
@@ -123,22 +138,52 @@ class FakeQuery {
     ]);
   }
 
-  async interrupt() {
-    if (this.userMessage && !this.ended) {
-      this.push({
-        type: "result",
-        subtype: "error_during_execution",
-        is_error: true,
-        num_turns: 1,
-        errors: ["Interrupted"],
-        modelUsage: {},
-        uuid: crypto.randomUUID(),
-        session_id: this.userMessage.session_id,
-        user_message_uuid: this.userMessage.uuid,
-        terminal_reason: "aborted_streaming",
-      });
-      this.end();
+  accountInfo() {
+    return Promise.resolve({ email: "dev@example.test", subscriptionType: "max", apiProvider: "firstParty" });
+  }
+
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(options) {
+    this.sdk.usageCalls.push(options);
+    if (this.sdk.behavior.noPlanUsage) {
+      return Promise.resolve({ session: {}, subscription_type: null, rate_limits_available: false, rate_limits: null });
     }
+    return Promise.resolve({
+      session: {},
+      subscription_type: "max",
+      rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: 42, resets_at: "2026-11-23T10:00:00.000Z" },
+        seven_day: { utilization: 7.5, resets_at: "2026-11-27T00:00:00.000Z" },
+        seven_day_opus: null,
+      },
+    });
+  }
+
+  setMcpServers(servers) {
+    this.sdk.mcpCalls.push({ child: this.child, servers });
+    return Promise.resolve({
+      added: Object.keys(servers),
+      removed: [],
+      errors: this.sdk.behavior.mcpError ? { shoggoth: "connection failed" } : {},
+    });
+  }
+
+  async interrupt() {
+    const turn = this.activeTurn;
+    if (!turn || this.ended) return;
+    this.activeTurn = null;
+    this.push({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      num_turns: 1,
+      errors: ["Interrupted"],
+      modelUsage: {},
+      uuid: crypto.randomUUID(),
+      session_id: turn.session_id,
+      user_message_uuid: turn.uuid,
+      terminal_reason: "aborted_streaming",
+    });
   }
 
   close() {
@@ -153,6 +198,10 @@ class FakeSdk {
   constructor(behavior = {}) {
     this.behavior = behavior;
     this.queryCalls = [];
+    this.turnQueries = [];
+    this.priorProcessesExited = [];
+    this.mcpCalls = [];
+    this.usageCalls = [];
     this.prompts = [];
     this.userMessages = [];
     this.renames = [];
@@ -161,41 +210,66 @@ class FakeSdk {
 
   query(params) {
     this.queryCalls.push(params);
-    const abortController = new AbortController();
     const child = params.options.spawnClaudeCodeProcess({
       command: params.options.pathToClaudeCodeExecutable,
       args: ["--sdk-fake"],
       cwd: params.options.cwd,
       env: params.options.env,
-      signal: abortController.signal,
+      signal: new AbortController().signal,
     });
-    const query = new FakeQuery(child);
     const control = Array.isArray(params.options.tools) && params.options.tools.length === 0;
-    if (!control) void this.#runTurn(query, params);
+    const query = new FakeQuery(this, child, control);
+    if (!control) {
+      this.priorProcessesExited.push(this.turnQueries.every((prior) => prior.child.closed));
+      this.turnQueries.push(query);
+      void this.#serve(query, params);
+    }
     return query;
   }
 
-  async #runTurn(query, params) {
-    const first = await params.prompt.next();
-    if (first.done) return;
-    this.prompts.push(first.value.message.content[0].text);
-    this.userMessages.push(first.value.message);
-    query.userMessage = first.value;
-    const sessionId = first.value.session_id;
-    query.push({
-      type: "system",
-      subtype: "init",
-      session_id: sessionId,
-      cwd: params.options.cwd,
-      model: params.options.model || "sonnet",
-    });
-    if (first.value.message.content[0].text === "/compact") {
+  async #serve(query, params) {
+    for (;;) {
+      const next = await params.prompt.next();
+      if (next.done || query.ended) return;
+      // While a held turn runs, further messages are steers into that turn.
+      if (query.activeTurn) {
+        query.steers.push(next.value);
+        continue;
+      }
+      await this.#runTurn(query, params, next.value);
+    }
+  }
+
+  async #runTurn(query, params, user) {
+    const text = user.message.content[0].text;
+    this.prompts.push(text);
+    this.userMessages.push(user.message);
+    query.userMessage = user;
+    const sessionId = user.session_id;
+    if (!query.initSent || this.behavior.initPerTurn) {
+      query.initSent = true;
+      query.push({
+        type: "system",
+        subtype: "init",
+        session_id: sessionId,
+        cwd: params.options.cwd,
+        model: params.options.model || "sonnet",
+      });
+    }
+    if (text === "/compact") {
       query.push({
         type: "system",
         subtype: "local_command_output",
         content: "Conversation compacted",
         uuid: crypto.randomUUID(),
         session_id: sessionId,
+      });
+      query.push({
+        type: "system",
+        subtype: "compact_boundary",
+        uuid: "compact-boundary-one",
+        session_id: sessionId,
+        compact_metadata: { trigger: "manual", pre_tokens: 1000 },
       });
       query.push({
         type: "result",
@@ -206,10 +280,9 @@ class FakeSdk {
         modelUsage: {},
         uuid: crypto.randomUUID(),
         session_id: sessionId,
-        user_message_uuid: first.value.uuid,
+        user_message_uuid: user.uuid,
         terminal_reason: "completed",
       });
-      query.end();
       return;
     }
     query.push({
@@ -226,9 +299,12 @@ class FakeSdk {
         }],
       },
     });
-    if (this.behavior.hold) return;
+    if (this.behavior.hold) {
+      query.activeTurn = user;
+      return;
+    }
     if (this.behavior.permission !== false) {
-      const decision = await params.options.canUseTool("Bash", { command: "pwd" }, {
+      const decision = await params.options.canUseTool(this.behavior.permissionTool ?? "Bash", { command: "pwd" }, {
         signal: new AbortController().signal,
         toolUseID: "tool-call-one",
         requestId: "sdk-request-one",
@@ -290,10 +366,9 @@ class FakeSdk {
       },
       uuid: crypto.randomUUID(),
       session_id: sessionId,
-      user_message_uuid: first.value.uuid,
+      user_message_uuid: user.uuid,
       terminal_reason: "completed",
     });
-    query.end();
   }
 
   renameSession(sessionId, title, options) {
@@ -355,14 +430,17 @@ function fixture(behavior = {}) {
     return child;
   };
   const bindings = [];
+  const reservations = [];
   const revocations = [];
   let reservation = 0;
   const mcpGateIssuer = {
     reserveMcpServer(input) {
-      assert.equal(input.parentLauncherExecutable, "/bin/sh",
-        "Claude Code must reserve its waiting shell before bind releases fd 3");
+      assert.equal(input.parentLauncherExecutable, undefined,
+        "a resident Claude Code process is already its own executable when a turn binds MCP");
+      assert.equal(input.parentExecutable, binaryPath);
       reservation += 1;
       const reservationId = reservation.toString(16).padStart(64, "0");
+      reservations.push({ ...input, reservationId });
       return {
         reservationId,
         name: "shoggoth",
@@ -377,7 +455,7 @@ function fixture(behavior = {}) {
   const pool = new ClaudeCodeRuntimePool({
     paths: { trustedRoot, stateDir },
     binaryPath,
-    parentEnv: { PATH: binDir, ANTHROPIC_API_KEY: "must-not-leak" },
+    parentEnv: { PATH: binDir, USER: "fixture-user", ANTHROPIC_API_KEY: "must-not-leak", ...behavior.parentEnv },
     homedir: trustedRoot,
     spawnProcess,
     killProcessGroup(pid, signal) {
@@ -385,6 +463,7 @@ function fixture(behavior = {}) {
     },
     mcpGateIssuer,
     sdk,
+    ...(behavior.liveIdleMs === undefined ? {} : { liveIdleMs: behavior.liveIdleMs }),
     ...(behavior.serverRequestTimeoutMs === undefined
       ? {} : { serverRequestTimeoutMs: behavior.serverRequestTimeoutMs }),
   });
@@ -393,7 +472,9 @@ function fixture(behavior = {}) {
     adapter,
     binaryPath,
     bindings,
+    children,
     pool,
+    reservations,
     revocations,
     sdk,
     spawns,
@@ -575,6 +656,10 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     });
     const catalog = await runtime.modelsList({ limit: 100 });
     assert.deepEqual(catalog.data.map((model) => model.model), ["sonnet", "opus"]);
+    assert.deepEqual(catalog.data.filter(model => model.isDefault).map(model => model.model), ["opus"]);
+    const firstPage = await runtime.modelsList({ limit: 1 });
+    assert.equal(firstPage.data[0].isDefault, false);
+    assert.equal((await runtime.modelsList({ cursor: firstPage.nextCursor, limit: 1 })).data[0].isDefault, true);
     assert.deepEqual(catalog.data[0].capabilities.thinkingOptions, ["low", "medium", "high"]);
     const commands = await runtime.commandsList();
     assert.equal(commands.reason, null);
@@ -667,6 +752,9 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
       sessionId: started.session.id,
       operationId: "operation-command",
       prompt: "/compact",
+      agentWorkspace,
+      turnDeveloperInstructions: "CURRENT_RUN_ONLY",
+      thinkingLevel: "high",
       context: "must not wrap native command",
       cwd: ctx.workspace,
       model: "sonnet",
@@ -681,6 +769,13 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
       includeTurns: true,
     });
     assert.equal(commandHistory.session.turns.at(-1).items.at(-1).text, "Conversation compacted");
+    const compacted = events.find((event) => event.type === "context_compacted");
+    assert.equal(compacted.turnId, commandTurn.turn.id);
+    assert.equal(compacted.compactionId, "compact-boundary-one");
+    assert.equal(compacted.contextUsage.runtimeSessionId, started.session.id);
+    assert.equal(ctx.sdk.turnQueries.length, 1, "both turns share the session's resident process");
+    const resident = ctx.sdk.turnQueries[0].child;
+    assert.equal(resident.killed, false, "a finished turn hands the process back instead of closing it");
     await runtime.sessionRename({ sessionId: started.session.id, name: "Claude 测试会话" });
     assert.equal(ctx.sdk.renames.length, 1);
     assert.match(ctx.sdk.renames[0].configDir, /claude-code/u);
@@ -689,9 +784,12 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     await runtime.sessionUnarchive({ sessionId: started.session.id });
     await runtime.sessionDelete({ sessionId: started.session.id });
     assert.equal(ctx.sdk.deletes.length, 1);
+    assert.equal(resident.killed, true, "deleting a session releases its resident process first");
     assert.equal((await runtime.sessionList({ archived: false })).data.length, 0);
     assert.equal(ctx.bindings.length, 2);
-    assert.equal(ctx.revocations.length, 2);
+    assert.deepEqual(ctx.bindings.map((binding) => binding.parentPid), [resident.pid, resident.pid]);
+    assert.deepEqual(ctx.revocations.map((entry) => entry.reservationId),
+      ctx.reservations.map((entry) => entry.reservationId));
     const turnQuery = ctx.sdk.queryCalls.find((call) => !Array.isArray(call.options.tools));
     assert.deepEqual(turnQuery.options.additionalDirectories, [agentWorkspace]);
     assert.deepEqual(turnQuery.options.sandbox.filesystem.allowWrite, [ctx.workspace, agentWorkspace]);
@@ -703,16 +801,50 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     assert.equal(turnQuery.options.strictMcpConfig, true);
     assert.deepEqual(turnQuery.options.settingSources, []);
     assert.equal(turnQuery.options.skills, undefined, "CLI skill discovery must not be disabled for execution");
-    assert.deepEqual(Object.keys(turnQuery.options.mcpServers), ["shoggoth"]);
-    assert.equal(turnQuery.options.mcpServers.shoggoth.timeout, 2_147_000_000);
-    const turnSpawn = ctx.spawns.find((entry) => entry.command === "/bin/sh");
-    assert.ok(turnSpawn);
+    assert.deepEqual(turnQuery.options.mcpServers, {}, "the Shoggoth server is set per turn, not at process start");
+    assert.equal(ctx.sdk.mcpCalls.length, 2);
+    assert.equal(ctx.sdk.mcpCalls.every((call) => call.child === resident), true);
+    assert.equal(ctx.sdk.mcpCalls[0].servers.shoggoth.timeout, 2_147_000_000);
+    assert.deepEqual(ctx.sdk.mcpCalls[0].servers.shoggoth.env, {
+      SHOGGOTH_RUNTIME_MCP_GATE_NONCE: ctx.reservations[0].reservationId,
+    });
+    const turnSpawn = ctx.spawns.find((entry) => entry.child === resident);
+    assert.equal(turnSpawn.command, ctx.binaryPath);
+    assert.equal(turnSpawn.options.stdio.length, 3);
     assert.equal(turnSpawn.options.env.ANTHROPIC_API_KEY, undefined);
-    assert.match(turnSpawn.options.env.CLAUDE_CONFIG_DIR, /claude-code/u);
+    // Real CLI 2.1.329: without USER, or with CLAUDE_CONFIG_DIR set even to
+    // ~/.claude, a signed-in `claude auth status` reports loggedIn false.
+    assert.equal(turnSpawn.options.env.USER, "fixture-user", "the CLI's Keychain lookup needs USER");
+    assert.equal(turnSpawn.options.env.CLAUDE_CONFIG_DIR, undefined,
+      "an unconfigured config directory is left to the CLI, as in the user's terminal");
+    const authSpawn = ctx.spawns.find((entry) => entry.args[0] === "auth");
+    assert.equal(authSpawn.options.env.USER, "fixture-user");
+    assert.equal(authSpawn.options.env.CLAUDE_CONFIG_DIR, undefined);
     assert.equal(turnSpawn.options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "Claude Code auto memory stays off");
   } finally {
     await ctx.close();
   }
+});
+
+test("Claude Code projects an applied default outside its named model rows and accepts the saved alias", async () => {
+  const ctx = fixture({ models: [
+    { value: "default", displayName: "Default (recommended)" },
+    { value: "sonnet", resolvedModel: "claude-sonnet-fixture", displayName: "Claude Sonnet" },
+  ], appliedModel: "claude-configured-fixture" });
+  try {
+    const runtime = await ctx.adapter.acquire({
+      runtime: "claude-code",
+      runtimeProfileId: "shoggoth-claude-code-cli-v1",
+      runtimeAccountId: NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID,
+    }, { workspace: ctx.workspace });
+    const { data } = await runtime.modelsList();
+    assert.deepEqual(data.map(({ model, displayName, isDefault }) => [model, displayName, isDefault]), [
+      ["claude-configured-fixture", "claude-configured-fixture", true],
+      ["sonnet", "Claude Sonnet", false],
+    ]);
+    const { session } = await runtime.sessionStart({ source: "chat:saved-default", cwd: ctx.workspace, model: "default" });
+    assert.ok(session.id);
+  } finally { await ctx.close(); }
 });
 
 test("Claude Code approval ignores the finite form-request deadline", async () => {
@@ -842,9 +974,229 @@ test("Claude Code turn steer 与 interrupt 保持同一 turn binding", async () 
     await runtime.turnInterrupt({ sessionId: started.session.id, turnId: turn.turn.id });
     const read = await runtime.sessionRead({ sessionId: started.session.id, includeTurns: true });
     assert.equal(read.session.turns[0].status, "interrupted");
+    const resident = ctx.sdk.turnQueries[0];
+    assert.equal(resident.steers.length, 1, "the steer reached the running turn through the shared queue");
+    assert.equal(resident.child.killed, false, "interrupting a turn keeps the session process");
+    ctx.sdk.behavior.hold = false;
+    await runTurn(runtime, ctx.workspace, started.session.id, "operation-after-interrupt", "继续");
+    assert.equal(ctx.sdk.turnQueries.length, 1, "the next turn reuses the interrupted turn's process");
   } finally {
     await ctx.close();
   }
+});
+
+const PERMISSION = Object.freeze({ approvalPolicy: "on-request", sandbox: "workspace-write" });
+const bindingFor = (runtimeProfileId) => ({
+  runtime: "claude-code", runtimeProfileId, runtimeAccountId: NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID,
+});
+
+async function runTurn(runtime, workspace, sessionId, operationId, prompt, extra = {}) {
+  const completions = [];
+  const unsubscribe = runtime.subscribe((event) => {
+    if (event.type === "complete") completions.push(event);
+  });
+  runtime.registerServerRequestHandler("item/commandExecution/requestApproval", async () => ({ decision: "accept" }));
+  try {
+    const turn = await runtime.turnStart({
+      sessionId, operationId, prompt, cwd: workspace, model: "sonnet", permissionPolicy: PERMISSION, ...extra,
+    });
+    await waitUntil(() => completions.some((event) => event.turnId === turn.turn.id), `${operationId} terminal`);
+    return { turn, status: completions.find((event) => event.turnId === turn.turn.id).status };
+  } finally {
+    unsubscribe();
+  }
+}
+
+test("Claude Code 常驻进程：同一会话跨 WorkRun 复用一个进程，每回合换上本 Run 的 MCP 门票", async () => {
+  const ctx = fixture();
+  try {
+    const first = await ctx.adapter.acquire(bindingFor("resident-profile"), {
+      workspace: ctx.workspace, permissionPolicy: PERMISSION, executionContract: { runId: "run-one" },
+    });
+    const second = await ctx.adapter.acquire(bindingFor("resident-profile"), {
+      workspace: ctx.workspace, permissionPolicy: PERMISSION, executionContract: { runId: "run-two" },
+    });
+    assert.notEqual(first.host, second.host, "execution Hosts stay isolated per WorkRun");
+    const started = await first.sessionStart({
+      source: "chat:resident", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION,
+    });
+    assert.equal((await runTurn(first, ctx.workspace, started.session.id, "resident-one", "第一轮")).status, "completed");
+    await second.sessionResume({
+      sessionId: started.session.id, cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION,
+    });
+    assert.equal((await runTurn(second, ctx.workspace, started.session.id, "resident-two", "第二轮")).status, "completed");
+    assert.equal(ctx.sdk.turnQueries.length, 1, "one Claude Code process serves both turns");
+    const resident = ctx.sdk.turnQueries[0].child;
+    assert.equal(resident.killed, false);
+    assert.deepEqual(ctx.sdk.prompts.map((prompt) => prompt.split("\n").at(-1)), ["第一轮", "第二轮"]);
+    assert.deepEqual(ctx.reservations.map((entry) => entry.executionRunId), ["run-one", "run-two"]);
+    assert.deepEqual(ctx.bindings.map((entry) => entry.parentPid), [resident.pid, resident.pid]);
+    assert.deepEqual(ctx.revocations.map((entry) => entry.reservationId),
+      ctx.reservations.map((entry) => entry.reservationId), "each turn's ticket is revoked when the turn ends");
+    assert.deepEqual(ctx.sdk.mcpCalls.map((call) => call.servers.shoggoth.env.SHOGGOTH_RUNTIME_MCP_GATE_NONCE),
+      ctx.reservations.map((entry) => entry.reservationId), "each turn replaces the server with its own ticket");
+    await ctx.adapter.stop(bindingFor("resident-profile"));
+    assert.equal(resident.killed, true, "stopping the profile releases its resident process");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("Claude Code 常驻进程：每回合都发 init 时同样复用并只报告一次开始", async () => {
+  const ctx = fixture({ initPerTurn: true });
+  try {
+    const runtime = await ctx.adapter.acquire(bindingFor("init-profile"), { workspace: ctx.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:init", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    const statuses = [];
+    runtime.subscribe((event) => { if (event.method === "claude-code/system/init") statuses.push(event.turnId); });
+    const one = await runTurn(runtime, ctx.workspace, started.session.id, "init-one", "一");
+    const two = await runTurn(runtime, ctx.workspace, started.session.id, "init-two", "二");
+    assert.deepEqual([one.status, two.status], ["completed", "completed"]);
+    assert.deepEqual(statuses, [one.turn.turn.id, two.turn.turn.id]);
+    assert.equal(ctx.sdk.turnQueries.length, 1);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("Claude Code 常驻进程：启动参数变化时先等旧进程退出，再用 resume 重开", async () => {
+  const ctx = fixture();
+  try {
+    const runtime = await ctx.adapter.acquire(bindingFor("replace-profile"), { workspace: ctx.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:replace", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    await runTurn(runtime, ctx.workspace, started.session.id, "replace-one", "一");
+    await runTurn(runtime, ctx.workspace, started.session.id, "replace-two", "二", { model: "opus" });
+    assert.equal(ctx.sdk.turnQueries.length, 2);
+    assert.equal(ctx.sdk.turnQueries[0].child.killed, true);
+    assert.deepEqual(ctx.sdk.priorProcessesExited, [true, true],
+      "two processes never write one native session at the same time");
+    const [opened, reopened] = ctx.sdk.queryCalls.filter((call) => !Array.isArray(call.options.tools));
+    assert.equal(opened.options.sessionId, started.session.id);
+    assert.equal(opened.options.resume, undefined);
+    assert.equal(reopened.options.resume, started.session.id);
+    assert.equal(reopened.options.sessionId, undefined);
+    assert.equal(reopened.options.model, "opus");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("Claude Code 常驻进程：空闲到期释放，回合间进程退出后下一回合 resume", async () => {
+  const idle = fixture({ liveIdleMs: 20 });
+  try {
+    const runtime = await idle.adapter.acquire(bindingFor("idle-profile"), { workspace: idle.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:idle", cwd: idle.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    await runTurn(runtime, idle.workspace, started.session.id, "idle-one", "一");
+    await waitUntil(() => idle.sdk.turnQueries[0].child.killed, "idle release");
+    assert.equal((await runTurn(runtime, idle.workspace, started.session.id, "idle-two", "二")).status, "completed");
+    assert.equal(idle.sdk.turnQueries.length, 2);
+    assert.equal(idle.sdk.queryCalls.filter((call) => !Array.isArray(call.options.tools))[1].options.resume, started.session.id);
+  } finally {
+    await idle.close();
+  }
+  const crash = fixture();
+  try {
+    const runtime = await crash.adapter.acquire(bindingFor("crash-profile"), { workspace: crash.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:crash", cwd: crash.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    await runTurn(runtime, crash.workspace, started.session.id, "crash-one", "一");
+    crash.sdk.turnQueries[0].child.finish(1, null);
+    await waitUntil(() => crash.pool.liveSessions.entries.size === 0, "exited process removed");
+    assert.equal((await runTurn(runtime, crash.workspace, started.session.id, "crash-two", "二")).status, "completed");
+    assert.equal(crash.sdk.turnQueries.length, 2);
+  } finally {
+    await crash.close();
+  }
+});
+
+test("Claude Code MCP 连接失败时回合确定未受理且退役该进程", async () => {
+  const ctx = fixture({ mcpError: true });
+  try {
+    const runtime = await ctx.adapter.acquire(bindingFor("mcp-profile"), { workspace: ctx.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:mcp", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    await assert.rejects(runtime.turnStart({
+      sessionId: started.session.id, operationId: "mcp-one", prompt: "一", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION,
+    }), { code: "CLAUDE_CODE_MCP_UNAVAILABLE" });
+    assert.equal(ctx.sdk.prompts.length, 0, "the prompt never reaches Claude Code");
+    const read = await runtime.sessionRead({ sessionId: started.session.id, includeTurns: true });
+    assert.equal(read.session.turns[0].status, "failed");
+    assert.equal(ctx.revocations.length, 1);
+    await waitUntil(() => ctx.sdk.turnQueries[0].child.killed, "process retired");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("Claude Code 的 Shoggoth 产品工具以规范 MCP 权限请求交给 Service 产品策略", async () => {
+  const ctx = fixture({ permissionTool: "mcp__shoggoth__memory_search" });
+  try {
+    const runtime = await ctx.adapter.acquire(bindingFor("product-tool-profile"), { workspace: ctx.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:product-tool", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    const requests = [];
+    runtime.registerServerRequestHandler("mcpServer/elicitation/request", async (params) => {
+      requests.push(params);
+      return { action: "accept", content: {} };
+    });
+    const completions = [];
+    runtime.subscribe((event) => { if (event.type === "complete") completions.push(event); });
+    let commandApprovals = 0;
+    runtime.registerServerRequestHandler("item/commandExecution/requestApproval", async () => {
+      commandApprovals += 1;
+      return { decision: "decline" };
+    });
+    await runtime.turnStart({ sessionId: started.session.id, operationId: "product-tool", prompt: "search memory",
+      cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    await waitUntil(() => completions.length === 1, "product tool turn");
+    assert.equal(commandApprovals, 0, "product tools never become command approvals");
+    assert.equal(requests.length, 1);
+    assert.deepEqual(parseMcpToolPermission({ ...requests[0], method: "mcpServer/elicitation/request", kind: "mcp_elicitation" }),
+      { serverName: "shoggoth", toolName: "memory_search" });
+    assert.equal(ctx.sdk.lastPermissionDecision.behavior, "allow");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("Claude Code 显式配置的 CLAUDE_CONFIG_DIR 原样传给 CLI", async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-claude-config-"));
+  const ctx = fixture({ parentEnv: { CLAUDE_CONFIG_DIR: configDir } });
+  try {
+    const runtime = await ctx.adapter.acquire(bindingFor("config-profile"), { workspace: ctx.workspace, permissionPolicy: PERMISSION });
+    const started = await runtime.sessionStart({ source: "chat:config", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+    await runTurn(runtime, ctx.workspace, started.session.id, "config-one", "一");
+    const spawn = ctx.spawns.find((entry) => entry.child === ctx.sdk.turnQueries[0].child);
+    assert.equal(spawn.options.env.CLAUDE_CONFIG_DIR, fs.realpathSync(configDir));
+  } finally {
+    await ctx.close();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude Code 额度读取映射 claude.ai 计划窗口，不适用的账号报告 unsupported", async () => {
+  const ctx = fixture();
+  try {
+    const runtime = await ctx.adapter.acquire(bindingFor("quota-profile"), { permissionPolicy: PERMISSION });
+    assert.equal(runtime.capabilities["account.quota.read"], true);
+    const quota = await runtime.accountQuotaRead();
+    assert.equal(validQuotaSnapshot(quota), true);
+    assert.deepEqual(quota.windows, [
+      { label: null, durationMinutes: 300, usedPercent: 42, resetsAt: Date.parse("2026-11-23T10:00:00.000Z") },
+      { label: null, durationMinutes: 10_080, usedPercent: 7.5, resetsAt: Date.parse("2026-11-27T00:00:00.000Z") },
+    ]);
+    assert.equal(quota.accountName, "dev@example.test · Claude Max");
+    assert.match(quota.quotaScope, /^[a-f0-9]{64}$/u);
+    assert.deepEqual(ctx.sdk.usageCalls, [{ skipBehaviors: true }]);
+    ctx.sdk.behavior.noPlanUsage = true;
+    assert.deepEqual(await runtime.accountQuotaRead(), { status: "unsupported" });
+  } finally {
+    await ctx.close();
+  }
+  const opus = claudeQuotaSnapshot({
+    subscription_type: "claude_max_20x_subscription",
+    rate_limits_available: true,
+    rate_limits: { five_hour: { utilization: null, resets_at: null }, seven_day_opus: { utilization: 99, resets_at: null } },
+  }, null, { home: "/tmp/claude-home", checkedAt: 1 });
+  assert.deepEqual(opus.windows, [{ label: "Opus", durationMinutes: 10_080, usedPercent: 99, resetsAt: null }]);
+  assert.equal(opus.accountName, "Claude Max 20x");
 });
 
 test("Claude Code ledger 重启将已接收的 inProgress turn 收敛为 interrupted", () => {

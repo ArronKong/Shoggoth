@@ -24,11 +24,13 @@ const CLAUDE_CODE_CAPABILITIES = runtimeCapabilities({
   "commands.list": true,
   "commands.execute": true,
   "account.read": false,
+  "account.quota.read": true,
   "account.login": false,
   "account.logout": false,
   events: true,
   serverRequests: true,
   "context.usage.estimated": true,
+  "context.compact.native": true,
   "model.generate.toolFree": true,
   "model.generate.settings": true,
   "model.resolve.toolFree": true,
@@ -56,6 +58,7 @@ class ClaudeCodeRuntimeHandle {
   }
 
   authenticationState() { return this.host.authenticationState(); }
+  accountQuotaRead() { return this.host.accountQuotaRead(); }
   generateModelOnly(input) { return this.host.generateModelOnly(input); }
   resolveModelOnly(input) { return this.host.resolveModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }

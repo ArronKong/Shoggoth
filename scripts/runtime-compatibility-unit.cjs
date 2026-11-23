@@ -103,8 +103,8 @@ test("native account readiness requires protocol, auth and catalog proof; rechec
   assert.equal(row("grok-build").readiness, "unverified");
   assert.equal(row("deepseek-harness").readiness, "unverified");
   assert.equal(row("opencode").readiness, "auth-required");
-  assert.equal(row("claude-code").releaseEnabled, false);
-  assert.ok(!calls.some(([, id]) => id.includes("claude")));
+  assert.equal(row("claude-code").releaseEnabled, true);
+  assert.equal(row("claude-code").readiness, "ready");
   const piId = row("pi").runtimeAccountId;
   assert.deepEqual(backend._bindingAvailability("", "pi", piId), { available: false, reason: "runtime-incompatible" });
   assert.throws(() => backend._assertRuntimeEnabled({ runtime: "pi", runtimeAccountId: piId }), { code: "RUNTIME_INCOMPATIBLE" });

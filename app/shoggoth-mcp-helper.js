@@ -65,6 +65,7 @@ const MCP_MAX_FRAME_BYTES = 64 * 1024;
 const MCP_MAX_CATALOG_FRAME_BYTES = 256 * 1024;
 const MCP_INITIALIZE_CAPABILITIES_MAX_BYTES = 4 * 1024;
 const MCP_INITIALIZE_TEXT_MAX_BYTES = 128;
+const MCP_INITIALIZE_CLIENT_METADATA_MAX_BYTES = 4 * 1024;
 const MCP_SESSION_REFRESH_SKEW_MS = 5_000;
 // Refresh can include two authentication requests (10s each) and credential access.
 // Its outer deadline must not cut off an otherwise valid authentication exchange.
@@ -565,11 +566,9 @@ function cloneMcpServiceResult(value, state = { nodes: 0 }, depth = 0) {
 
 function validateInitializeParams(params) {
   const hasMeta = params && Object.prototype.hasOwnProperty.call(params, "_meta");
-  const clientInfoKeys = params?.clientInfo && typeof params.clientInfo === "object"
-    ? Object.keys(params.clientInfo)
-    : [];
-  const validClientInfoShape = exactObject(params?.clientInfo, ["name", "version"])
-    || exactObject(params?.clientInfo, ["name", "title", "version"]);
+  const clientInfo = params?.clientInfo;
+  const clientInfoFields = ["name", "version", ...["title", "description", "websiteUrl"]
+    .filter((field) => Object.hasOwn(clientInfo ?? {}, field))];
   const capabilities = params?.capabilities;
   const capabilityKeys = capabilities && typeof capabilities === "object" ? Object.keys(capabilities) : [];
   const knownCapabilities = new Set(["experimental", "roots", "sampling", "elicitation"]);
@@ -601,11 +600,10 @@ function validateInitializeParams(params) {
     && (!hasMeta || boundedJsonObject(params._meta, 4 * 1024))
     && boundedNonEmptyString(params.protocolVersion, 32)
     && capabilitiesShapeValid
-    && validClientInfoShape
-    && boundedNonEmptyString(params.clientInfo.name, MCP_INITIALIZE_TEXT_MAX_BYTES)
-    && boundedNonEmptyString(params.clientInfo.version, MCP_INITIALIZE_TEXT_MAX_BYTES)
-    && (!clientInfoKeys.includes("title")
-      || boundedNonEmptyString(params.clientInfo.title, MCP_INITIALIZE_TEXT_MAX_BYTES));
+    && exactObject(clientInfo, clientInfoFields)
+    && clientInfoFields.every((field) => boundedNonEmptyString(clientInfo[field],
+      field === "description" || field === "websiteUrl"
+        ? MCP_INITIALIZE_CLIENT_METADATA_MAX_BYTES : MCP_INITIALIZE_TEXT_MAX_BYTES));
 }
 
 function validateRequestUserInputArguments(value) {

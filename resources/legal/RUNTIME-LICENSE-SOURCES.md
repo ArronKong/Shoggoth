@@ -63,13 +63,19 @@ Recipients can obtain the source at the links above. Any future modifications
 to MPL-covered files must remain available to recipients under MPL 2.0, with
 the source location and notices updated accordingly.
 
-## Deferred Claude Code integration
+## Claude Code integration
 
-The Claude Agent SDK is excluded from both dependency lockfiles and application
-packages. Native Claude Code connection and execution are disabled by
-`app/release-policy.json`. Existing user data and first-party integration source
-are retained for a possible later return after the applicable terms are reviewed.
-This does not disable Anthropic models supplied by separately configured backends.
+The application package contains the unmodified JavaScript of
+`@anthropic-ai/claude-agent-sdk` 0.3.329 (npm, exact version in `package.json`).
+Its license notice is kept verbatim in `CLAUDE-AGENT-SDK-LICENSE.md`: the SDK is
+© Anthropic PBC, all rights reserved, and its use is subject to Anthropic's
+legal agreements at https://code.claude.com/docs/en/legal-and-compliance.
+
+The optional per-platform packages (`@anthropic-ai/claude-agent-sdk-darwin-*`),
+which bundle a Claude Code executable, are excluded from the application
+package. Shoggoth runs the Claude Code CLI that the user installed and signed in
+to themselves, passing its path to the SDK. Shoggoth does not read, store or
+forward the CLI's credentials. The SDK's npm peer dependencies are not packaged.
 
 ## License document checksums
 
@@ -79,4 +85,5 @@ SHA-256 of the unmodified downloaded files:
 d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc  CODEX-LICENSE.txt
 9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915  CODEX-NOTICE.txt
 3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04  MPL-2.0.txt
+8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a  CLAUDE-AGENT-SDK-LICENSE.md
 ```

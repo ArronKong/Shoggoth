@@ -37,6 +37,13 @@
       "bytes": 120552
     },
     {
+      "profileId": "4e1c7a92-8b35-4d60-a4f1-2c9e7b5d8306",
+      "agentId": "shoggoth-claude-code",
+      "file": "shoggoth_claude.jpg",
+      "sha256": "b12a43f72b6b6176505df36633b2a639d63767d4d6910eafdd527e549e61263d",
+      "bytes": 99695
+    },
+    {
       "profileId": "e7f48b2a-9c51-4d36-8f0e-2b8a71d5c603",
       "agentId": "shoggoth-opencode",
       "file": "shoggoth_opencode.jpg",

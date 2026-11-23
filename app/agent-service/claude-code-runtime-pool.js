@@ -3,6 +3,7 @@ const { poolLedgerSlot } = require("./runtime-shared-ledger");
 const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
 const { ClaudeCodeRuntimeHost } = require("./claude-code-runtime-host");
+const { ClaudeCodeLiveSessions } = require("./claude-code-live-sessions");
 const {
   CLAUDE_CODE_RUNTIME,
   claudeCodePermissionFingerprint,
@@ -74,6 +75,10 @@ class ClaudeCodeRuntimePool {
       homedir: options.homedir ?? options.hostOptions?.homedir,
     });
     configurePoolCapacity(this, options, "CLAUDE_CODE_POOL_OPTIONS_INVALID");
+    // Execution Hosts are per WorkRun; resident session processes outlive them.
+    this.liveSessions = options.liveSessions || new ClaudeCodeLiveSessions({
+      idleMs: options.liveIdleMs ?? this.hostOptions.liveIdleMs,
+    });
     this.entries = new Map();
     this.profileStates = new Map();
     this.stopPromises = new Map();
@@ -180,6 +185,7 @@ class ClaudeCodeRuntimePool {
       onDiagnostic: this.options.onDiagnostic ?? this.hostOptions.onDiagnostic,
       mcpGateIssuer: this.options.mcpGateIssuer ?? this.hostOptions.mcpGateIssuer,
       sdk: this.options.sdk ?? this.hostOptions.sdk,
+      liveSessions: this.liveSessions,
       runtimeProfileId: id,
       runtimeAccountId: accountId,
       runtimeBinding: binding,
@@ -227,10 +233,11 @@ class ClaudeCodeRuntimePool {
     const existing = this.stopPromises.get(id);
     if (existing) return existing;
     const entries = [...this.entries.entries()].filter(([, entry]) => entry.runtimeProfileId === id);
-    if (entries.length === 0) return Promise.resolve();
+    const hasLive = [...this.liveSessions.entries.values()].some((live) => live.runtimeProfileId === id);
+    if (entries.length === 0 && !hasLive) return Promise.resolve();
     for (const [key] of entries) this.entries.delete(key);
     this.stoppingProfiles.add(id);
-    const stopping = this._stopEntries(entries.map(([, entry]) => entry)).finally(() => {
+    const stopping = this._stopEntries(entries.map(([, entry]) => entry), id).finally(() => {
       this.stopPromises.delete(id);
       this.stoppingProfiles.delete(id);
     });
@@ -248,7 +255,7 @@ class ClaudeCodeRuntimePool {
     for (const id of profileIds) this.stoppingProfiles.add(id);
     this.stopAllPromise = (async () => {
       const failures = [];
-      try { await this._stopEntries(entries.map(([, entry]) => entry)); } catch (error) {
+      try { await this._stopEntries(entries.map(([, entry]) => entry), null); } catch (error) {
         failures.push(...(Array.isArray(error?.errors) ? error.errors : [error]));
       }
       const inFlight = await Promise.allSettled([...this.stopPromises.values()]);
@@ -266,9 +273,23 @@ class ClaudeCodeRuntimePool {
     return this.stopAllPromise;
   }
 
-  async _stopEntries(entries) {
+  // runtimeProfileId null stops every resident session process.
+  async _stopEntries(entries, runtimeProfileId) {
     const failures = [];
-    await Promise.all(entries.map(async (entry) => {
+    const releasing = (async () => {
+      // Active turns are interrupted by their Host's stop; idle resident
+      // processes are released here.
+      const incomplete = runtimeProfileId === null
+        ? await this.liveSessions.closeAll()
+        : await this.liveSessions.closeProfile(runtimeProfileId);
+      for (const live of incomplete) {
+        this.blockedProfiles.add(live.runtimeProfileId);
+        const error = poolError("CLAUDE_CODE_PROCESS_CLOSE_TIMEOUT", "Claude Code process did not terminate");
+        error.cleanupIncomplete = true;
+        failures.push(error);
+      }
+    })();
+    await Promise.all([releasing, ...entries.map(async (entry) => {
       const [result] = await Promise.allSettled([
         Promise.resolve().then(() => entry.host.stop()),
         entry.promise,
@@ -279,7 +300,7 @@ class ClaudeCodeRuntimePool {
         }
         failures.push(result.reason);
       }
-    }));
+    })]);
     if (failures.length > 0) {
       const aggregate = new AggregateError(failures, "Claude Code runtime pool stop failed");
       aggregate.code = "CLAUDE_CODE_RUNTIME_POOL_STOP_FAILED";

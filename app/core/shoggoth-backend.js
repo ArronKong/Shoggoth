@@ -8,6 +8,7 @@ const { describeAgentWorkspace } = require("../agent-service/chat-workspace");
 const { claimsNativeAgentId,
   isNativeBindingDisabled } = require("../agent-service/native-backend-identity");
 const { isRuntimeAvailable } = require("../runtime-availability");
+const { isLegacyClaudeDefaultModel } = require("../agent-service/runtime-model-selection");
 
 const crypto = require("node:crypto");
 const chatUiProtocol = require("../agent-service/chat-ui-protocol");
@@ -3167,7 +3168,8 @@ class ShoggothBackend extends AgentBackend {
       }).finally(() => { if (entry.refresh === refresh) entry.refresh = null; });
       Object.assign(entry, { refresh, refreshStamp: stamp });
     }
-    if (!cached) return entry.refresh;
+    // A cache written by an older App may still contain the retired option.
+    if (!cached || cached.models.some(model => isLegacyClaudeDefaultModel(binding.runtime, model?.id))) return entry.refresh;
     let timer;
     const budget = new Promise(resolve => { timer = setTimeout(resolve, RUNTIME_MODEL_GROUP_FRESH_BUDGET_MS, null); });
     try { return (await Promise.race([entry.refresh, budget])) ?? cached; } finally { clearTimeout(timer); }
@@ -3287,7 +3289,10 @@ class ShoggothBackend extends AgentBackend {
     const activeCapabilities = groups.find(group => group.bindingId === activeId
       || (activeBinding && group.runtime === activeBinding.runtime && bindings.bindings.some(binding =>
         binding.id === group.bindingId && binding.runtimeAccountId === activeBinding.runtimeAccountId)))?.capabilities;
-    return { selection, models: groups.flatMap(group => group.models),
+    const selectedModel = isLegacyClaudeDefaultModel(currentBinding?.runtime, selection.model)
+      ? groups.find(group => group.bindingId === selection.bindingId)?.models.find(entry => entry.isDefault)?.id ?? null
+      : selection.model;
+    return { selection: { ...selection, model: selectedModel }, models: groups.flatMap(group => group.models),
       runtimes: groups.map(({ models: _models, ...group }) => group),
       capabilities: { ...currentCapabilities, steer: activeCapabilities?.steer === true } };
   }
@@ -3301,7 +3306,8 @@ class ShoggothBackend extends AgentBackend {
     if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
     const groups = await this._agentRuntimeModelGroups(profile, bindings, binding.id, defaultBindingOnly || !bindings.canAdd, true);
     const modelProviderRef = supportsSessionProviders(binding) ? sourceToken(profile.providerRef) : undefined;
-    const model = profileAtRuntimeBinding(profile, binding).defaultModel
+    const configured = profileAtRuntimeBinding(profile, binding).defaultModel;
+    const model = (isLegacyClaudeDefaultModel(binding.runtime, configured) ? null : configured)
       ?? groups.find(group => group.bindingId === binding.id)?.models.find(entry => entry.isDefault)?.id ?? null;
     return { selection: { bindingId: binding.id, model, revision: bindings.revision,
       ...(modelProviderRef ? { modelProviderRef } : {}) },
@@ -3329,7 +3335,8 @@ class ShoggothBackend extends AgentBackend {
     const { defaultBindingId } = bindings;
     const groups = await this._agentRuntimeModelGroups(profile, bindings, defaultBindingId);
     const binding = bindings.bindings.find(entry => entry.id === defaultBindingId);
-    return { defaultBindingId, defaultModel: profileAtRuntimeBinding(profile, binding).defaultModel ?? null,
+    const configured = profileAtRuntimeBinding(profile, binding).defaultModel ?? null;
+    return { defaultBindingId, defaultModel: isLegacyClaudeDefaultModel(binding?.runtime, configured) ? null : configured,
       models: groups.flatMap(group => group.models),
       runtimes: groups.map(({ models: _models, ...group }) => group) };
   }

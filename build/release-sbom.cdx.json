@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.369",
+      "version": "0.8.374",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.369",
-      "purl": "pkg:generic/shoggoth@0.8.369",
+      "bom-ref": "pkg:generic/shoggoth@0.8.374",
+      "purl": "pkg:generic/shoggoth@0.8.374",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -158,6 +158,336 @@
         {
           "name": "shoggoth:target-arch",
           "value": "x64"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-darwin-arm64",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "49a545103607a1f80a7ed2465fc51fe686b5c06f5dd84f50010a84a520ad889aedec887cd84927f5be22af41ae7e0c2838ac7920ebff0a732c5c859197dbd6ae"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-darwin-x64",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-darwin-x64@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-darwin-x64@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9d8b46af3e687bf48af2330aaff240af3ae3101b53a8b5a5441946bba40b5c1a177783c1e45763f8d87b21d9dff8b0fc3b05b3d5fa978fccedd074c850c4af60"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-linux-arm64-musl",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "68e7f59c0f2ba060293337cbfdaa043010c68b5d592ad355ee6be9e8e99a534a600b6e2a10205e49476c52e401bbd67dee47f93c30a1d7626191e1d50cafb824"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-linux-arm64",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-arm64@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-arm64@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "42f21fc8c7e3898536c2431f43eb574d2c0aefaa5787fc5281d005baa70f3a2337aa07e2d64226702232ff4c149e6f471a7d0664b5eeef1d3f941bbf3cd1f156"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-linux-x64-musl",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d23d4fbbf7a06fbb5b664e7bd0c39df6f5154a51efc67a00f5c70331dac016a146ab7a9bdb421d1dfe00bd7ba8f6c6e4b0a1574f1f68784b2f0f8885acbfb094"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-linux-x64",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-x64@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-x64@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4ca1dc37e90ec06d50ea678e84abbd64224f52c5d12f8760c74ed1d413e09b4bd110fa6c4b16844f9c3b2ee0ace292c842001325daa3ea18d6b5e8c3855b3334"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-win32-arm64",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-arm64@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-arm64@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "96fe152864274d62154e879636ba5e91623361e4c042d3b30c65ec53b92b522cef265dd7d09fca8aa114075622fc5f55718b37022bbcd515ad29d0132cce6790"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk-win32-x64",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-x64@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-x64@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3f29f6b107223e2ad993d39587a12c852adaf38381935d642724d7803bffbf93db1d4da7d88f816c1616913787a5678b95f448eb52d69051edaacf5c60e2ce92"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN LICENSE.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.329",
+      "bom-ref": "pkg:npm/%40anthropic-ai/claude-agent-sdk@0.3.329",
+      "purl": "pkg:npm/%40anthropic-ai/claude-agent-sdk@0.3.329",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "68a54880f06680d1c1a0d5d4146e5e5495ee74377e6a639bc53e901fd6fa476c8629fe1e8ac3d9dc88f9452a641470ef26f699cbc9b500978491b292bac4d4fd"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN README.md"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@anthropic-ai/sdk",
+      "version": "1.12.0",
+      "bom-ref": "pkg:npm/%40anthropic-ai/sdk@1.12.0",
+      "purl": "pkg:npm/%40anthropic-ai/sdk@1.12.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d23f73c2241d92fafdd0ba228810d487b91a7b596c356d84a9e134bc671e6277b806b98c0dd0d5a10e0a18e89e51e7b4cd665b5492ac7ffd3a258f14e62eb75e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@babel/runtime",
+      "version": "7.29.15",
+      "bom-ref": "pkg:npm/%40babel/runtime@7.29.15",
+      "purl": "pkg:npm/%40babel/runtime@7.29.15",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "df4e20b1b6c656641cf9c3461f3c07065a9ea587562ca8f7557090046b7f106715ecf50f7ca23b90050d5b515910e0b095088bbd08e0d4911a025450eb5ea1f9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -1483,6 +1813,36 @@
     },
     {
       "type": "library",
+      "name": "@hono/node-server",
+      "version": "2.1.11",
+      "bom-ref": "pkg:npm/%40hono/node-server@2.1.11",
+      "purl": "pkg:npm/%40hono/node-server@2.1.11",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2b32b3f6f978befaf5be02c76a68fe839ba89dbae3e4dc0074edf2cce4ba71dd878c02d578e81381e64ec80ccdc5e8db91f38e3c872fb9ffd383c975a4414ba2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "@huggingface/tokenizers",
       "version": "0.2.0",
       "bom-ref": "pkg:npm/%40huggingface/tokenizers@0.2.0",
@@ -1697,6 +2057,36 @@
     },
     {
       "type": "library",
+      "name": "@modelcontextprotocol/sdk",
+      "version": "1.32.2",
+      "bom-ref": "pkg:npm/%40modelcontextprotocol/sdk@1.32.2",
+      "purl": "pkg:npm/%40modelcontextprotocol/sdk@1.32.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "496b15b47ff4bd42d2412b6867ac711f62b4f4b8bc7d7613302eb865ea2009da59dd74a2d5e08f381c95d4ea6e271b88dce7261e1a2c0d66328a2d3bb693ec2f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "@noble/hashes",
       "version": "1.4.0",
       "bom-ref": "pkg:npm/%40noble/hashes@1.4.0",
@@ -1741,6 +2131,36 @@
         {
           "license": {
             "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/api",
+      "version": "1.10.0",
+      "bom-ref": "pkg:npm/%40opentelemetry/api@1.10.0",
+      "purl": "pkg:npm/%40opentelemetry/api@1.10.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "94c9327acf221eb1be9a4e961fb5fbd0c7422c8d914b41703416353f243c51e99a8a31369b99afe40d0d8b2dc7b5b61316b82450442314c5e64809368500ee3d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
           }
         }
       ],
@@ -2425,6 +2845,36 @@
         {
           "alg": "SHA-512",
           "content": "b74f6f48ddcc75fb32087a057134421ff894b46ece2740ac8f307c72302629cfef6bf90881e0c8fd3c6c8a0767704ff86deef7e26d1cbc863035a5788b65ea03"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@stablelib/base64",
+      "version": "1.0.1",
+      "bom-ref": "pkg:npm/%40stablelib/base64@1.0.1",
+      "purl": "pkg:npm/%40stablelib/base64@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d5b9cf42a4b14ae737222e8c841caca160a0e7c8fdeda523b82499ac64a60f136ab72b488b493cbad51e9c0c1364de15e665d7606b15508f73781ab2fa304e49"
         }
       ],
       "licenses": [
@@ -3581,6 +4031,36 @@
     },
     {
       "type": "library",
+      "name": "accepts",
+      "version": "2.0.0",
+      "bom-ref": "pkg:npm/accepts@2.0.0",
+      "purl": "pkg:npm/accepts@2.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e5cbe0e82b4ac1f81d995a98d562225ca7374356e446a18b8bed96ffa6a8fba63b82efd10b046e021184ce1e41e0a96ccd2b932e0658baa16aa396c89a334a9e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "adm-zip",
       "version": "0.6.1",
       "bom-ref": "pkg:npm/adm-zip@0.6.1",
@@ -3619,6 +4099,36 @@
         {
           "alg": "SHA-512",
           "content": "32703e613f1fc1f24f801c779bad0c36a6a49b7d173a4c88a07d72ea1b9342f0b43f0646ee48bc35a70b05cacf6cda28f2f119cbb269ba4efe8cc3be094a2f4d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ajv-formats",
+      "version": "3.0.1",
+      "bom-ref": "pkg:npm/ajv-formats@3.0.1",
+      "purl": "pkg:npm/ajv-formats@3.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f2252a979d04511fae51c7514371c3a9ae84572a3776870bf20e5627714d7169aeeb621b90652e7bfa44c8b056f1518a2ae7133e0a9e92ce1f214d43038ca8c1"
         }
       ],
       "licenses": [
@@ -4167,6 +4677,36 @@
     },
     {
       "type": "library",
+      "name": "body-parser",
+      "version": "2.4.0",
+      "bom-ref": "pkg:npm/body-parser@2.4.0",
+      "purl": "pkg:npm/body-parser@2.4.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "21f93529c2ebc5a1add6871c41a81034534d3aa46dd4b16e7a11271c7cc1f19e9c460231454d5305a888b14882740fa0cb93cbed8d485f7d4334a9119b1b578d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "boolean",
       "version": "3.2.0",
       "bom-ref": "pkg:npm/boolean@3.2.0",
@@ -4377,6 +4917,36 @@
     },
     {
       "type": "library",
+      "name": "bytes",
+      "version": "3.1.2",
+      "bom-ref": "pkg:npm/bytes@3.1.2",
+      "purl": "pkg:npm/bytes@3.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "fcd7fb4f2cd3c7a4b7c9124e6ce015efde7aafc72bdbe3a3f000b976df3048fdc1400a1e5f9f0da07c8253c3fccc690d5d2b634d28ba7f33ba174a4175c61b12"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "bytestreamjs",
       "version": "2.0.1",
       "bom-ref": "pkg:npm/bytestreamjs@2.0.1",
@@ -4475,6 +5045,36 @@
         {
           "alg": "SHA-512",
           "content": "4a9d5a6e52748af0e44b38dc68977112e9cde7f5ef92c149dac30115fabac74af285057fd9bfcac057b6d5c329987b4f3928a3f0af7dff049fa04b9339b9ae31"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "call-bound",
+      "version": "1.0.4",
+      "bom-ref": "pkg:npm/call-bound@1.0.4",
+      "purl": "pkg:npm/call-bound@1.0.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "fb2b3df7b53dea9a382b1fc0069042aa103d12ec49690583420ef6f791f8841a61bf72198346e804abb0629b78617a7a319e4099942753fb72313951a5a49e8e"
         }
       ],
       "licenses": [
@@ -4917,6 +5517,156 @@
     },
     {
       "type": "library",
+      "name": "content-disposition",
+      "version": "2.0.1",
+      "bom-ref": "pkg:npm/content-disposition@2.0.1",
+      "purl": "pkg:npm/content-disposition@2.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7be1f46571d2598ac4361433c352cfb8fe2817933354a98353a77787196f68f1182cb83ad8cc6d40d3d1c784984ae6094815209d0206e0720ddad12d36fec3a2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "content-type",
+      "version": "1.0.5",
+      "bom-ref": "pkg:npm/content-type@1.0.5",
+      "purl": "pkg:npm/content-type@1.0.5",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9d38ea7dc045122a4a7570afe180d05827e670b64a9bcd65745d29028a53bf2ac51956dc47a3ff54001de46ecdfb4b53afc42a894d2d15a743e852b836d27038"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "content-type",
+      "version": "2.1.0",
+      "bom-ref": "pkg:npm/content-type@2.1.0",
+      "purl": "pkg:npm/content-type@2.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9a3ed43d71348daa9a3acba435945411f122d8070bec2fefc26c1c1d5d0ef7b78ed44d69c4166eca3959af1e6c79368d060d54ebea37e70a5adf941f71cfbb6a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cookie-signature",
+      "version": "1.2.2",
+      "bom-ref": "pkg:npm/cookie-signature@1.2.2",
+      "purl": "pkg:npm/cookie-signature@1.2.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0fbeae53bdee9525eb0f5517178284d93331555c21b270a07c0c9383d93c3fa2866639572ab38b7b874940a2370718b9c237ac6681572561253560633d931b86"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cookie",
+      "version": "0.7.2",
+      "bom-ref": "pkg:npm/cookie@0.7.2",
+      "purl": "pkg:npm/cookie@0.7.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ca48b95e72ae7fbe74979d2e193965b7a90a20b6389d0d5e34841ab685c40726797568272aa6e7aa64eb044e41e0dee5acc24a436cad58c8933b6a34bfa130ff"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "cookie",
       "version": "1.1.1",
       "bom-ref": "pkg:npm/cookie@1.1.1",
@@ -4955,6 +5705,36 @@
         {
           "alg": "SHA-512",
           "content": "65006f8b50dca49e060ea6a78ee719d878f7c043b9a590d2f3d0566e472bbddc64b09a2bc140c365a997f65745929f5ac369660432e090e6c40380d6349f4561"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cors",
+      "version": "2.8.6",
+      "bom-ref": "pkg:npm/cors@2.8.6",
+      "purl": "pkg:npm/cors@2.8.6",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b49b590411c0eaf8c801a17a12721aaba95a0413fd6aafd8de8b9526311fa076d105c1c100761c321ff0f0b0eb9363ef20c32af209a8a5ae43e15f1199baf11b"
         }
       ],
       "licenses": [
@@ -5277,6 +6057,36 @@
     },
     {
       "type": "library",
+      "name": "depd",
+      "version": "2.0.0",
+      "bom-ref": "pkg:npm/depd@2.0.0",
+      "purl": "pkg:npm/depd@2.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "83b9c7e8fe9dc838a8268800006a6b1a90ad5489898693e4feba02cdd6f77c887ad7fb3f9cfb1f47aa27c8cc2408047f3a50b7c810b49444af52840402cb08af"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "detect-libc",
       "version": "2.1.2",
       "bom-ref": "pkg:npm/detect-libc@2.1.2",
@@ -5511,7 +6321,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -5531,6 +6341,36 @@
         {
           "license": {
             "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ee-first",
+      "version": "1.1.1",
+      "bom-ref": "pkg:npm/ee-first@1.1.1",
+      "purl": "pkg:npm/ee-first@1.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "58cc26f4b851528f9651a44dfaf46e113a86f3d22066985548d91d16079beac4bf1383ab0c837bb78f0201ec121d773a0bc95e7c3f0a29faf9bd8eb56eb425a3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -5791,6 +6631,36 @@
     },
     {
       "type": "library",
+      "name": "encodeurl",
+      "version": "2.0.3",
+      "bom-ref": "pkg:npm/encodeurl@2.0.3",
+      "purl": "pkg:npm/encodeurl@2.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "988b5e60e36211f738c567f6175597a2f87573c9e9cd2d34bcd7a250f770145f909552678be80dbe9425b4b3108686fcadec3f6d659cfdb193b94af41141add3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "end-of-stream",
       "version": "1.4.5",
       "bom-ref": "pkg:npm/end-of-stream@1.4.5",
@@ -6025,7 +6895,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -6151,6 +7021,36 @@
     },
     {
       "type": "library",
+      "name": "escape-html",
+      "version": "1.0.3",
+      "bom-ref": "pkg:npm/escape-html@1.0.3",
+      "purl": "pkg:npm/escape-html@1.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3624aea59e0e7ae1b0afaf251887b29bf92c219309a1d506392099fc54a74f172b7a46efaab81d53194938ca628da299563009ad6ac6b3fe89cbc38cbb28fda3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "escape-string-regexp",
       "version": "4.0.0",
       "bom-ref": "pkg:npm/escape-string-regexp@4.0.0",
@@ -6176,6 +7076,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "etag",
+      "version": "1.8.1",
+      "bom-ref": "pkg:npm/etag@1.8.1",
+      "purl": "pkg:npm/etag@1.8.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6882f9171ee66b055adf4d1a976067104e2236fa35a844f12eb3c8fe8d392fbcfa828edf0b0d49e844266cae05989d804bb920545fca1195ae7c17dd0a531c3e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -6271,6 +7201,66 @@
     },
     {
       "type": "library",
+      "name": "express-rate-limit",
+      "version": "8.7.5",
+      "bom-ref": "pkg:npm/express-rate-limit@8.7.5",
+      "purl": "pkg:npm/express-rate-limit@8.7.5",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c22fafdfc731d84a83d099e113f7bbe28e6d16a29650e00f149220c848aa27cbf630da68380037908da15d8388f9833e1c4e72a9b740955c66d86a8e21e60e80"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "express",
+      "version": "5.3.0",
+      "bom-ref": "pkg:npm/express@5.3.0",
+      "purl": "pkg:npm/express@5.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a82ab2d714a86ae831383e085476f5656764bc21765b7684da890aa2e5a3f15c09fb3b6c912897a019c2489a9f293f9c54f261b89a9ef582db638db9f99874d2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "fast-deep-equal",
       "version": "3.1.3",
       "bom-ref": "pkg:npm/fast-deep-equal@3.1.3",
@@ -6296,6 +7286,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fast-sha256",
+      "version": "1.3.0",
+      "bom-ref": "pkg:npm/fast-sha256@1.3.0",
+      "purl": "pkg:npm/fast-sha256@1.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9f5d5118ffe5ad610523f6d677280bc6123ea557a8d59608570bef3e45bb6b397facecbe1771d8459d8ae73784f669a4850a69caff6c405c7424cf5469b9e93d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Unlicense"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -6425,6 +7445,36 @@
     },
     {
       "type": "library",
+      "name": "finalhandler",
+      "version": "2.1.1",
+      "bom-ref": "pkg:npm/finalhandler@2.1.1",
+      "purl": "pkg:npm/finalhandler@2.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4bc2a866045937e6b9acdc2a4f195965e3e34ffe1c9e6d11395ef42de7511d9d29f2ef5f4480f484951942990a2f3ae8f0b7e60bcb31db76d8ead54dc6ff2940"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "form-data",
       "version": "4.0.6",
       "bom-ref": "pkg:npm/form-data@4.0.6",
@@ -6433,6 +7483,66 @@
         {
           "alg": "SHA-512",
           "content": "bca6ad021e129557e06eff98b66862463844309b18a6c1b5636acc42d47e49549bcadb120f5606cc321cac026674579cf3cbbff95a069b19e5fbcd202f5b5109"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "forwarded",
+      "version": "0.2.0",
+      "bom-ref": "pkg:npm/forwarded@0.2.0",
+      "purl": "pkg:npm/forwarded@0.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6ee446d1fa41b511d24c238049eea10f6e7cb44b9b16844b6f864d03a3713151cdc3680e7301e8f70c9a6e5ccccce039cfdc40f4bd4a36393f36de8c4fd698a3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fresh",
+      "version": "2.0.0",
+      "bom-ref": "pkg:npm/fresh@2.0.0",
+      "purl": "pkg:npm/fresh@2.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "471fd6c9c67ad0739aa8b2808ba70744a288ef3c566c9df53219ed9adc0ca1a4de17b5c51fd861069f2f21368c89d7e58d143a7985822a46932beca45491cfd8"
         }
       ],
       "licenses": [
@@ -6719,7 +7829,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -6779,7 +7889,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -6809,7 +7919,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -7139,7 +8249,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -7199,7 +8309,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -7230,6 +8340,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "hono",
+      "version": "4.13.20",
+      "bom-ref": "pkg:npm/hono@4.13.20",
+      "purl": "pkg:npm/hono@4.13.20",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c68ea079c10943e0a34ed39451b70b1c4f0275128c785e2a2137be0d3f8e8459d2526651fd905af576af01f8868781e5ba49a568715d68ae1dcf9b644d814d98"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -7309,6 +8449,36 @@
         {
           "license": {
             "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "http-errors",
+      "version": "2.0.1",
+      "bom-ref": "pkg:npm/http-errors@2.0.1",
+      "purl": "pkg:npm/http-errors@2.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e056d17405fe6d2766a3801416e4b458d88fcfc36016dfabf138603569a5ae3423b7543b651f7ecd395c7b6f39f71e0a497af022c69e4ea0e82909ad3fca4b99"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -7445,6 +8615,36 @@
     },
     {
       "type": "library",
+      "name": "iconv-lite",
+      "version": "0.7.3",
+      "bom-ref": "pkg:npm/iconv-lite@0.7.3",
+      "purl": "pkg:npm/iconv-lite@0.7.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "20a5e9bc8ce39c2f574c051b54170c7c64b410f6885ed5babfecebf91469fa1a942c4a68d28c196b1eb0c91c0f3896d66f38d8b29430bac4ec7d5af489f878b9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "inflight",
       "version": "1.0.6",
       "bom-ref": "pkg:npm/inflight@1.0.6",
@@ -7499,6 +8699,66 @@
         },
         {
           "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ip-address",
+      "version": "10.7.6",
+      "bom-ref": "pkg:npm/ip-address@10.7.6",
+      "purl": "pkg:npm/ip-address@10.7.6",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d342d890ce9bc882daf5e408c7aaa869708ce34c532dde7a019e2fc9a3d6dd84f26f8f556583e8e71b2202ae2db90e78187e11ee055d612709d41ec1efb3ee4e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ipaddr.js",
+      "version": "1.9.1",
+      "bom-ref": "pkg:npm/ipaddr.js@1.9.1",
+      "purl": "pkg:npm/ipaddr.js@1.9.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d0a23feb4ef1a31493a07ec68cdd457d26cba14d3e6ed4e2723b1049642587f859ca437c2a998c7fbb98c0f5b747e6a467a47fc35f199574870585e26143cede"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
           "value": "development-or-other-platform"
         }
       ]
@@ -7513,6 +8773,36 @@
         {
           "alg": "SHA-512",
           "content": "cf29a6e7ebbeb02b125b20fda8d69e8d5dc316f84229c94a762cd868952e1c0f3744b8dbee74ae1a775d0871afd2193e298ec130096c59e2b851e83a115e9742"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "is-promise",
+      "version": "4.0.0",
+      "bom-ref": "pkg:npm/is-promise@4.0.0",
+      "purl": "pkg:npm/is-promise@4.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "86fa6823a928ae124c9de8f6f3975283a9eed7e7babb1b3bcc6dc16009b96f2a83b2024d5b0c7333acfa8998808104784c9df42660533b0a99530dd69721f701"
         }
       ],
       "licenses": [
@@ -7925,6 +9215,36 @@
     },
     {
       "type": "library",
+      "name": "json-schema-to-ts",
+      "version": "3.1.1",
+      "bom-ref": "pkg:npm/json-schema-to-ts@3.1.1",
+      "purl": "pkg:npm/json-schema-to-ts@3.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f835a0f230891b64c49e9cbb90e9bfeff031698a1a45b8d50782c564bc926655a7f1ec46b3703838b251f7ae9c56f536e8ded7f535b197e26cc3b77302a293ea"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "json-schema-traverse",
       "version": "1.0.0",
       "bom-ref": "pkg:npm/json-schema-traverse@1.0.0",
@@ -7950,6 +9270,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "json-schema-typed",
+      "version": "8.0.2",
+      "bom-ref": "pkg:npm/json-schema-typed@8.0.2",
+      "purl": "pkg:npm/json-schema-typed@8.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7d08685dd72f737576f31ec2ec132ce0fe7e90d96051445eda39944f54fffe8051303aeacb540f7a52629b0646a3b1e0f553d5dc4415e419eae216c5cb6bdeb4"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -8909,7 +10259,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -8945,6 +10295,66 @@
     },
     {
       "type": "library",
+      "name": "media-typer",
+      "version": "1.1.1",
+      "bom-ref": "pkg:npm/media-typer@1.1.1",
+      "purl": "pkg:npm/media-typer@1.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cb3df145a1b6d1cebf04ecef6280da1ad3e61ac72ced88af22d64412a7ba19bc0d7c7bb1bbd60d9af9c490ccca95d006638ffcd2945c41165212786aba4f57b9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "merge-descriptors",
+      "version": "2.0.0",
+      "bom-ref": "pkg:npm/merge-descriptors@2.0.0",
+      "purl": "pkg:npm/merge-descriptors@2.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4a7937d785796b214b869ddf914444b9be96b6305f3dd08f6352e7f3ff26ba7b8bba2621b000600555aca33006f8c58c6d512f71d7296e2f51ef0c36da5f50de"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "mime-db",
       "version": "1.52.0",
       "bom-ref": "pkg:npm/mime-db@1.52.0",
@@ -8975,6 +10385,36 @@
     },
     {
       "type": "library",
+      "name": "mime-db",
+      "version": "1.54.0",
+      "bom-ref": "pkg:npm/mime-db@1.54.0",
+      "purl": "pkg:npm/mime-db@1.54.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "694e4426e20dd960de982700a76bc505fa7f9b810085626750d492c348b1b3bfe45db77a3e0eb8126c0990d745841f1a5add6c1f60935eb2f1a3f880195de83d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "mime-types",
       "version": "2.1.35",
       "bom-ref": "pkg:npm/mime-types@2.1.35",
@@ -8983,6 +10423,36 @@
         {
           "alg": "SHA-512",
           "content": "64363e6cf9b9cd34c5f98a42ac053d9cad148080983d3d10b53d4d65616fe2cfbe4cd91c815693d20ebee11dae238323423cf2b07075cf1b962f9d21cda7978b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "mime-types",
+      "version": "3.0.2",
+      "bom-ref": "pkg:npm/mime-types@3.0.2",
+      "purl": "pkg:npm/mime-types@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2db833764d21e23ba843d7c22975b86f2d1426a8fe9ce3ab23d309d6c4a3e2723c688d9ea35aa6bd01227b8543d6096c4b6e749f5e4bb16b18b42ba0892b52e4"
         }
       ],
       "licenses": [
@@ -9365,6 +10835,36 @@
     },
     {
       "type": "library",
+      "name": "negotiator",
+      "version": "1.1.0",
+      "bom-ref": "pkg:npm/negotiator@1.1.0",
+      "purl": "pkg:npm/negotiator@1.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "34c3c144c2608901e36ddf29846dd579b771e246751f5db5adb97922432a78eb1a869b41f412a8fddee8277cd35ea4e06a09f66d694d497921d10506337d5162"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "node-abi",
       "version": "4.35.0",
       "bom-ref": "pkg:npm/node-abi@4.35.0",
@@ -9595,7 +11095,37 @@
       "properties": [
         {
           "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
+          "value": "desktop,frontend"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "object-inspect",
+      "version": "1.14.0",
+      "bom-ref": "pkg:npm/object-inspect@1.14.0",
+      "purl": "pkg:npm/object-inspect@1.14.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "215807365a7f8f0417dbbd7e5f3a2af4b64d4d65f164af9c10eac604e0715cd6e7edf6a99d9f93b3a4d532034eb807b3c06db076d9cc5fdeed4cf2ba5449ee39"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
         },
         {
           "name": "shoggoth:distribution",
@@ -9635,6 +11165,36 @@
     },
     {
       "type": "library",
+      "name": "on-finished",
+      "version": "2.4.2",
+      "bom-ref": "pkg:npm/on-finished@2.4.2",
+      "purl": "pkg:npm/on-finished@2.4.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "013594bf7f3b8be9cb0f8f44883a0e7ede6c71fdf656c773de4b6b4091bd6e2ee344599a5d3b2cbf2be3d4499e295560bdeb1ba94b6f410bda4b64e94ee90065"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "once",
       "version": "1.4.0",
       "bom-ref": "pkg:npm/once@1.4.0",
@@ -9659,7 +11219,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -9821,6 +11381,36 @@
     },
     {
       "type": "library",
+      "name": "parseurl",
+      "version": "1.3.3",
+      "bom-ref": "pkg:npm/parseurl@1.3.3",
+      "purl": "pkg:npm/parseurl@1.3.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0a2c9e3b1153fc96723799b4cfd3df5f0e1208127a4b2833d43a65d30aa39610c418604fd469ec51510bd29eb78681b57dc8f77c7ca75e2f4d60ee2758e2fea9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "path-is-absolute",
       "version": "1.0.1",
       "bom-ref": "pkg:npm/path-is-absolute@1.0.1",
@@ -9895,6 +11485,36 @@
         {
           "license": {
             "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "path-to-regexp",
+      "version": "8.4.2",
+      "bom-ref": "pkg:npm/path-to-regexp@8.4.2",
+      "purl": "pkg:npm/path-to-regexp@8.4.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a9172e21d3faf4d3e6e2a6c008af9a0e8808e42043322d6329ed2bcb9ad2409cfc2552ec0bb8d5f17a622631912cba25dcdf91e6284661cacf2d39e8ea901d04"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -10445,6 +12065,36 @@
     },
     {
       "type": "library",
+      "name": "proxy-addr",
+      "version": "2.0.8",
+      "bom-ref": "pkg:npm/proxy-addr@2.0.8",
+      "purl": "pkg:npm/proxy-addr@2.0.8",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e679f1d321b2554718eadf519d6700456b704fd1750fc3bdaedd3c86d3ef9dde3d5b522066d98b921bbd59f333423d5c1718c720ee9ca279d43555b993b015c9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "pump",
       "version": "3.0.4",
       "bom-ref": "pkg:npm/pump@3.0.4",
@@ -10595,6 +12245,36 @@
     },
     {
       "type": "library",
+      "name": "qs",
+      "version": "6.17.1",
+      "bom-ref": "pkg:npm/qs@6.17.1",
+      "purl": "pkg:npm/qs@6.17.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8dddc23a468a5601945be647c841c21bd6c7ed1a1a6a25ae320cec2018d43158cb01a5865a9a14015c258d5bc11f146eff6a841e769d2c666b92eb585013d024"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "quick-lru",
       "version": "5.1.1",
       "bom-ref": "pkg:npm/quick-lru@5.1.1",
@@ -10603,6 +12283,66 @@
         {
           "alg": "SHA-512",
           "content": "5aec802d18d63c31adb7fc3326269d3b901763ef2167cd215697ba3328af82b691116ef9d57dd26e146f1b778b28e60dfbc544bea2dc7f7c1d9ede386784b848"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "range-parser",
+      "version": "1.3.0",
+      "bom-ref": "pkg:npm/range-parser@1.3.0",
+      "purl": "pkg:npm/range-parser@1.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "85e9369854293ee2381350412ab4ada3e054ddedf1e31b9aaec6e2c2bdfe95fee9e388eebc5315d171564003f7c54caa5c0e11ad72c8a1a49419b4add39e9933"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "raw-body",
+      "version": "3.0.2",
+      "bom-ref": "pkg:npm/raw-body@3.0.2",
+      "purl": "pkg:npm/raw-body@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2b9cd08c3965c5691fed9e7125d574fc1d164cdab1eafc46ef4cc9138374901b382e8be6118589cd01b10bd6d2f5100abb76e0338d25adde73a0b275d8c43904"
         }
       ],
       "licenses": [
@@ -11225,6 +12965,36 @@
     },
     {
       "type": "library",
+      "name": "router",
+      "version": "2.3.0",
+      "bom-ref": "pkg:npm/router@2.3.0",
+      "purl": "pkg:npm/router@2.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6e9a3045f1a310f7bcb7d47a7c92338709b2086017c0abf1054b20266f9b26e93075c5a65176cca3ba76db0eda6264013d04d430da8c577f585f490ca2edf3f3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "rrule",
       "version": "2.8.1",
       "bom-ref": "pkg:npm/rrule@2.8.1",
@@ -11263,6 +13033,36 @@
         {
           "alg": "SHA-512",
           "content": "19dd94641243917958ec66c9c5fb04f3f9ef2a45045351b7f1cd6c88de903fa6bd3d3f4c98707c1a7a6c71298c252a05f0b388aedf2e77fc0fb688f2b381bafa"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "safer-buffer",
+      "version": "2.1.2",
+      "bom-ref": "pkg:npm/safer-buffer@2.1.2",
+      "purl": "pkg:npm/safer-buffer@2.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "619a372bcd920fb462ca2d04d4440fa232f3ee4a5ea6749023d2323db1c78355d75debdbe5d248eeda72376003c467106c71bbbdcc911e4d1c6f0a9c42b894b6"
         }
       ],
       "licenses": [
@@ -11523,6 +13323,36 @@
     },
     {
       "type": "library",
+      "name": "send",
+      "version": "1.2.1",
+      "bom-ref": "pkg:npm/send@1.2.1",
+      "purl": "pkg:npm/send@1.2.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d609d97fb0c572821c6a34e34f08f0b838f3bb3e0f3dc6364ad28f96c180435f981f6d08455ac169749699d8e8c1327abbc45cd353e860e1875df3f599871935"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "serialize-error",
       "version": "7.0.1",
       "bom-ref": "pkg:npm/serialize-error@7.0.1",
@@ -11553,6 +13383,36 @@
     },
     {
       "type": "library",
+      "name": "serve-static",
+      "version": "2.2.1",
+      "bom-ref": "pkg:npm/serve-static@2.2.1",
+      "purl": "pkg:npm/serve-static@2.2.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c515c19f4a4fa904d54220bcc3242b2acd8c3a55f6e334343ce19a8f492e96dbe8382b2d050339caf3a1015494c0e32342d4efb0f5a83421df3c6c1a6902614f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "set-cookie-parser",
       "version": "2.7.2",
       "bom-ref": "pkg:npm/set-cookie-parser@2.7.2",
@@ -11578,6 +13438,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "setprototypeof",
+      "version": "1.2.0",
+      "bom-ref": "pkg:npm/setprototypeof@1.2.0",
+      "purl": "pkg:npm/setprototypeof@1.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1392c35fb5aba7ce4a8a5e5b859bf8ea3f2339e6e82aae4932660cde05467461fcc45a4f59750cb0dae53830ab928c4c11e362fd7648c2e46f6385cdc18309a7"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -11638,6 +13528,126 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel-list",
+      "version": "1.0.1",
+      "bom-ref": "pkg:npm/side-channel-list@1.0.1",
+      "purl": "pkg:npm/side-channel-list@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9a39ffd1b8bfa145118dce5797b21a5a2fce24926e9aea0915025f0c3c8ee3afa1056b1f69533ae53047ab67a864187397d11c8713a28e991b442f12541414d3"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel-map",
+      "version": "1.0.1",
+      "bom-ref": "pkg:npm/side-channel-map@1.0.1",
+      "purl": "pkg:npm/side-channel-map@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5428c235f80cb1bcb7b53768d369db8ed33f7b0adaea33c79a94e17a7913621f291bdb9c67fd4ff12a38bb814605e93f063a4e56c0c23282c0fe2b8128815744"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel-weakmap",
+      "version": "1.0.2",
+      "bom-ref": "pkg:npm/side-channel-weakmap@1.0.2",
+      "purl": "pkg:npm/side-channel-weakmap@1.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "58f4bf1ef1d04d89c78ac2e8f4c72a0473899361641cefed969be5772ae77a6e1a790a7885a8b7832b61b3083aa74d684a84e5e7cadca621408c5d9baf6024d8"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel",
+      "version": "1.1.1",
+      "bom-ref": "pkg:npm/side-channel@1.1.1",
+      "purl": "pkg:npm/side-channel@1.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "eb1e9d2bacc97694f3178b1078d631c2dbc1cdfe848381ad95eb12f781cebd3b9d51ec8ad965c06887e60e0b32b2562b441785225b22e78018b05194ba19afad"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -11853,6 +13863,36 @@
     },
     {
       "type": "library",
+      "name": "standardwebhooks",
+      "version": "1.3.0",
+      "bom-ref": "pkg:npm/standardwebhooks@1.3.0",
+      "purl": "pkg:npm/standardwebhooks@1.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e56f6c9078ea026d9d940f705af8254cffa85f8ec95f89455d593568957bf931b5b27bd347841769580fb1c133bcec3d191ade79abccc1ba8478bf8c1a16470a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "stat-mode",
       "version": "1.0.0",
       "bom-ref": "pkg:npm/stat-mode@1.0.0",
@@ -11861,6 +13901,36 @@
         {
           "alg": "SHA-512",
           "content": "8c7f4486d2888ee5d9d9c5b19974bc64ff345f20b789ab10c4c0d5f23ce1349a5f0dbed56d02d55b85afb31cfd419bf357e1b862849f05454a0cecb12f38bfb2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "statuses",
+      "version": "2.0.2",
+      "bom-ref": "pkg:npm/statuses@2.0.2",
+      "purl": "pkg:npm/statuses@2.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0ef132e795770c1eee927468fb888e193e5f3f5b2547cc10a2155d9278a064f32932cb5a289416870898040089137525da94e70138a18416274616501c606247"
         }
       ],
       "licenses": [
@@ -12273,6 +14343,36 @@
     },
     {
       "type": "library",
+      "name": "toidentifier",
+      "version": "1.0.1",
+      "bom-ref": "pkg:npm/toidentifier@1.0.1",
+      "purl": "pkg:npm/toidentifier@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a39b123ca12483f0c840d987e37574fee7ab2eba7355e764521f2d18dbda797a5fa6ec2329e9e54a8c7fd8efc14e5654b447be246eece58844cfad3c3e500744"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "truncate-utf8-bytes",
       "version": "1.0.2",
       "bom-ref": "pkg:npm/truncate-utf8-bytes@1.0.2",
@@ -12287,6 +14387,36 @@
         {
           "license": {
             "id": "WTFPL"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ts-algebra",
+      "version": "2.0.0",
+      "bom-ref": "pkg:npm/ts-algebra@2.0.0",
+      "purl": "pkg:npm/ts-algebra@2.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "14f02134f14cae4c33efa3fb71d8dd9a24a1c0cca765837a4a03ae8c3d6ead8e28366f343aef6831d99b478e4ba2d70a397a32ef04a61e444513a3316eb85e7f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -12356,6 +14486,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "type-is",
+      "version": "2.1.0",
+      "bom-ref": "pkg:npm/type-is@2.1.0",
+      "purl": "pkg:npm/type-is@2.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7da607c346a705b73f916177cc54c49f14853801945fd1856ce06d86f0dd2ec22512858e14eb52d3380289063022c90bf6219764bde40170fc3a86781a63004c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -12605,6 +14765,36 @@
     },
     {
       "type": "library",
+      "name": "unpipe",
+      "version": "1.0.0",
+      "bom-ref": "pkg:npm/unpipe@1.0.0",
+      "purl": "pkg:npm/unpipe@1.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a63cb66d8852b2e7f05a52b03dcfa5ddc37bfb0b8994aeaecf461d2443a54036e5ea3a3f6253e2e266fc6a0524542f0117b57c36ecdec8f36a464b00de1ced29"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "unzipper",
       "version": "0.12.5",
       "bom-ref": "pkg:npm/unzipper@0.12.5",
@@ -12701,6 +14891,36 @@
         {
           "alg": "SHA-512",
           "content": "10f0f9ab5b97c85c49a42acb9c27359c79eade039ae83641a1c008888d93692080ed5089d5424331a802cc891736c5187c3d5d68afff2d3110f318886eb1ed73"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "vary",
+      "version": "1.1.2",
+      "bom-ref": "pkg:npm/vary@1.1.2",
+      "purl": "pkg:npm/vary@1.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "04d19b58b7ddd1e50f69b8645d4566d23f2ebaf444c93879a2f45afddca8c3f06a01b649c82fb97d4f88cd03b39802b362a6110084a8461750af778867f3d7aa"
         }
       ],
       "licenses": [
@@ -12957,7 +15177,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -13217,6 +15437,36 @@
         {
           "license": {
             "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "zod-to-json-schema",
+      "version": "3.25.2",
+      "bom-ref": "pkg:npm/zod-to-json-schema@3.25.2",
+      "purl": "pkg:npm/zod-to-json-schema@3.25.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3bf3e07e7a53d712920de4184827d12391b2de13dff7598a543b982d41d924c883169b6f3f8d4c4a75a87e6f1d9c29b4db9e9935f64833b0d2cee48c0059e31c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
           }
         }
       ],
@@ -13613,12 +15863,23 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.369",
+      "ref": "pkg:generic/shoggoth@0.8.374",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
         "pkg:generic/openai-codex@0.170.0?platform=darwin-arm64",
         "pkg:generic/openai-codex@0.170.0?platform=darwin-x64",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-darwin-x64@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-arm64@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-linux-x64@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-arm64@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-x64@0.3.329",
+        "pkg:npm/%40anthropic-ai/claude-agent-sdk@0.3.329",
+        "pkg:npm/%40anthropic-ai/sdk@1.12.0",
+        "pkg:npm/%40babel/runtime@7.29.15",
         "pkg:npm/%40babel/runtime@7.29.7",
         "pkg:npm/%40base-ui/react@1.5.0",
         "pkg:npm/%40base-ui/utils@0.2.9",
@@ -13663,6 +15924,7 @@
         "pkg:npm/%40floating-ui/dom@1.7.6",
         "pkg:npm/%40floating-ui/react-dom@2.1.8",
         "pkg:npm/%40floating-ui/utils@0.2.11",
+        "pkg:npm/%40hono/node-server@2.1.11",
         "pkg:npm/%40huggingface/tokenizers@0.2.0",
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
         "pkg:npm/%40isaacs/nonrecursive-glob-match@1.0.3",
@@ -13670,8 +15932,10 @@
         "pkg:npm/%40malept/flatpak-bundler@0.4.0",
         "pkg:npm/%40modelcontextprotocol/client@2.3.1",
         "pkg:npm/%40modelcontextprotocol/core@2.3.1",
+        "pkg:npm/%40modelcontextprotocol/sdk@1.32.2",
         "pkg:npm/%40noble/hashes@1.4.0",
         "pkg:npm/%40noble/hashes@2.4.0",
+        "pkg:npm/%40opentelemetry/api@1.10.0",
         "pkg:npm/%40oxc-project/types@0.155.0",
         "pkg:npm/%40peculiar/asn1-schema@2.9.4",
         "pkg:npm/%40peculiar/json-schema@1.1.12",
@@ -13695,6 +15959,7 @@
         "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.15",
         "pkg:npm/%40rolldown/pluginutils@1.0.1",
         "pkg:npm/%40sindresorhus/is@4.6.0",
+        "pkg:npm/%40stablelib/base64@1.0.1",
         "pkg:npm/%40szmarczak/http-timer@4.0.6",
         "pkg:npm/%40trycua/cua-driver-darwin-arm64@0.22.0",
         "pkg:npm/%40trycua/cua-driver-darwin-x64@0.22.0",
@@ -13732,8 +15997,10 @@
         "pkg:npm/%40vitejs/plugin-react@6.1.1",
         "pkg:npm/%40xmldom/xmldom@0.8.15",
         "pkg:npm/abbrev@4.0.0",
+        "pkg:npm/accepts@2.0.0",
         "pkg:npm/adm-zip@0.6.1",
         "pkg:npm/agent-base@7.1.4",
+        "pkg:npm/ajv-formats@3.0.1",
         "pkg:npm/ajv@8.20.0",
         "pkg:npm/animejs@4.4.1",
         "pkg:npm/ansi-regex@5.0.1",
@@ -13751,6 +16018,7 @@
         "pkg:npm/base64-js@1.5.1",
         "pkg:npm/better-sqlite3@13.0.3",
         "pkg:npm/bluebird@3.7.2",
+        "pkg:npm/body-parser@2.4.0",
         "pkg:npm/boolean@3.2.0",
         "pkg:npm/brace-expansion@1.1.21",
         "pkg:npm/brace-expansion@2.1.7",
@@ -13758,10 +16026,12 @@
         "pkg:npm/buffer-from@1.1.2",
         "pkg:npm/builder-util-runtime@9.7.0",
         "pkg:npm/builder-util@26.15.3",
+        "pkg:npm/bytes@3.1.2",
         "pkg:npm/bytestreamjs@2.0.1",
         "pkg:npm/cacheable-lookup@5.0.4",
         "pkg:npm/cacheable-request@7.0.4",
         "pkg:npm/call-bind-apply-helpers@1.0.2",
+        "pkg:npm/call-bound@1.0.4",
         "pkg:npm/chalk@4.1.2",
         "pkg:npm/chownr@3.0.0",
         "pkg:npm/chromium-pickle-js@0.2.0",
@@ -13776,8 +16046,14 @@
         "pkg:npm/commander@9.5.0",
         "pkg:npm/compare-version@0.1.2",
         "pkg:npm/concat-map@0.0.1",
+        "pkg:npm/content-disposition@2.0.1",
+        "pkg:npm/content-type@1.0.5",
+        "pkg:npm/content-type@2.1.0",
+        "pkg:npm/cookie-signature@1.2.2",
+        "pkg:npm/cookie@0.7.2",
         "pkg:npm/cookie@1.1.1",
         "pkg:npm/core-util-is@1.0.3",
+        "pkg:npm/cors@2.8.6",
         "pkg:npm/cron-parser@5.4.0",
         "pkg:npm/cross-dirname@0.1.0",
         "pkg:npm/cross-spawn@7.0.6",
@@ -13788,6 +16064,7 @@
         "pkg:npm/define-data-property@1.1.4",
         "pkg:npm/define-properties@1.2.1",
         "pkg:npm/delayed-stream@1.0.0",
+        "pkg:npm/depd@2.0.0",
         "pkg:npm/detect-libc@2.1.2",
         "pkg:npm/detect-node@2.1.0",
         "pkg:npm/dir-compare@4.2.0",
@@ -13797,6 +16074,7 @@
         "pkg:npm/dotenv@16.6.1",
         "pkg:npm/dunder-proto@1.0.1",
         "pkg:npm/duplexer2@0.1.4",
+        "pkg:npm/ee-first@1.1.1",
         "pkg:npm/ejs@3.1.10",
         "pkg:npm/electron-builder-squirrel-windows@26.15.3",
         "pkg:npm/electron-builder@26.15.3",
@@ -13805,6 +16083,7 @@
         "pkg:npm/electron-winstaller@5.4.0",
         "pkg:npm/electron@44.9.3",
         "pkg:npm/emoji-regex@8.0.0",
+        "pkg:npm/encodeurl@2.0.3",
         "pkg:npm/end-of-stream@1.4.5",
         "pkg:npm/entities@4.5.0",
         "pkg:npm/env-paths@2.2.1",
@@ -13817,16 +16096,24 @@
         "pkg:npm/es6-error@4.1.1",
         "pkg:npm/esbuild@0.28.2",
         "pkg:npm/escalade@3.2.0",
+        "pkg:npm/escape-html@1.0.3",
         "pkg:npm/escape-string-regexp@4.0.0",
+        "pkg:npm/etag@1.8.1",
         "pkg:npm/eventsource-parser@3.1.1",
         "pkg:npm/eventsource@3.0.7",
         "pkg:npm/exponential-backoff@3.1.3",
+        "pkg:npm/express-rate-limit@8.7.5",
+        "pkg:npm/express@5.3.0",
         "pkg:npm/fast-deep-equal@3.1.3",
+        "pkg:npm/fast-sha256@1.3.0",
         "pkg:npm/fast-uri@3.1.9",
         "pkg:npm/fdir@6.5.0",
         "pkg:npm/fflate@0.8.3",
         "pkg:npm/filelist@1.0.6",
+        "pkg:npm/finalhandler@2.1.1",
         "pkg:npm/form-data@4.0.6",
+        "pkg:npm/forwarded@0.2.0",
+        "pkg:npm/fresh@2.0.0",
         "pkg:npm/fs-extra@10.1.0",
         "pkg:npm/fs-extra@11.3.1",
         "pkg:npm/fs-extra@11.4.0",
@@ -13853,16 +16140,22 @@
         "pkg:npm/has-tostringtag@1.0.2",
         "pkg:npm/hasown@2.0.4",
         "pkg:npm/highlight.js@11.11.1",
+        "pkg:npm/hono@4.13.20",
         "pkg:npm/hosted-git-info@4.1.0",
         "pkg:npm/html-parse-stringify@3.0.1",
         "pkg:npm/http-cache-semantics@4.3.0",
+        "pkg:npm/http-errors@2.0.1",
         "pkg:npm/http-proxy-agent@7.0.2",
         "pkg:npm/http2-wrapper@1.0.3",
         "pkg:npm/https-proxy-agent@7.0.6",
         "pkg:npm/i18next@26.3.0",
+        "pkg:npm/iconv-lite@0.7.3",
         "pkg:npm/inflight@1.0.6",
         "pkg:npm/inherits@2.0.4",
+        "pkg:npm/ip-address@10.7.6",
+        "pkg:npm/ipaddr.js@1.9.1",
         "pkg:npm/is-fullwidth-code-point@3.0.0",
+        "pkg:npm/is-promise@4.0.0",
         "pkg:npm/isarray@1.0.0",
         "pkg:npm/isbinaryfile@4.0.10",
         "pkg:npm/isbinaryfile@5.0.7",
@@ -13876,7 +16169,9 @@
         "pkg:npm/js-yaml@4.3.2",
         "pkg:npm/js-yaml@5.4.2",
         "pkg:npm/json-buffer@3.0.1",
+        "pkg:npm/json-schema-to-ts@3.1.1",
         "pkg:npm/json-schema-traverse@1.0.0",
+        "pkg:npm/json-schema-typed@8.0.2",
         "pkg:npm/json-stringify-safe@5.0.1",
         "pkg:npm/json5@2.2.3",
         "pkg:npm/jsonfile@4.0.0",
@@ -13910,8 +16205,12 @@
         "pkg:npm/matcher@3.0.0",
         "pkg:npm/math-intrinsics@1.1.0",
         "pkg:npm/mdurl@2.0.0",
+        "pkg:npm/media-typer@1.1.1",
+        "pkg:npm/merge-descriptors@2.0.0",
         "pkg:npm/mime-db@1.52.0",
+        "pkg:npm/mime-db@1.54.0",
         "pkg:npm/mime-types@2.1.35",
+        "pkg:npm/mime-types@3.0.2",
         "pkg:npm/mime@2.6.0",
         "pkg:npm/mimic-response@1.0.1",
         "pkg:npm/mimic-response@3.1.0",
@@ -13924,6 +16223,7 @@
         "pkg:npm/mkdirp@0.5.6",
         "pkg:npm/ms@2.1.3",
         "pkg:npm/nanoid@3.3.20",
+        "pkg:npm/negotiator@1.1.0",
         "pkg:npm/node-abi@4.35.0",
         "pkg:npm/node-addon-api@8.9.2",
         "pkg:npm/node-api-version@0.2.1",
@@ -13932,16 +16232,20 @@
         "pkg:npm/nopt@9.0.0",
         "pkg:npm/normalize-url@6.1.0",
         "pkg:npm/object-assign@4.1.1",
+        "pkg:npm/object-inspect@1.14.0",
         "pkg:npm/object-keys@1.1.1",
+        "pkg:npm/on-finished@2.4.2",
         "pkg:npm/once@1.4.0",
         "pkg:npm/onnxruntime-common@1.22.0",
         "pkg:npm/onnxruntime-node@1.22.0",
         "pkg:npm/opencc-js@1.4.2",
         "pkg:npm/p-cancelable@2.1.1",
         "pkg:npm/p-limit@3.1.0",
+        "pkg:npm/parseurl@1.3.3",
         "pkg:npm/path-is-absolute@1.0.1",
         "pkg:npm/path-key@3.1.1",
         "pkg:npm/path-scurry@3.0.0",
+        "pkg:npm/path-to-regexp@8.4.2",
         "pkg:npm/pe-library@0.4.1",
         "pkg:npm/pend@1.2.0",
         "pkg:npm/picocolors@1.1.1",
@@ -13959,12 +16263,16 @@
         "pkg:npm/progress@2.0.3",
         "pkg:npm/promise-retry@2.0.1",
         "pkg:npm/proper-lockfile@4.1.2",
+        "pkg:npm/proxy-addr@2.0.8",
         "pkg:npm/pump@3.0.4",
         "pkg:npm/punycode.js@2.3.1",
         "pkg:npm/pvtsutils@1.3.6",
         "pkg:npm/pvutils@1.2.0",
         "pkg:npm/qrcode-generator@2.0.4",
+        "pkg:npm/qs@6.17.1",
         "pkg:npm/quick-lru@5.1.1",
+        "pkg:npm/range-parser@1.3.0",
+        "pkg:npm/raw-body@3.0.2",
         "pkg:npm/react-dom@18.3.1",
         "pkg:npm/react-i18next@17.0.8",
         "pkg:npm/react-is@18.3.1",
@@ -13985,8 +16293,10 @@
         "pkg:npm/rimraf@2.6.3",
         "pkg:npm/roarr@2.15.4",
         "pkg:npm/rolldown@1.2.15",
+        "pkg:npm/router@2.3.0",
         "pkg:npm/rrule@2.8.1",
         "pkg:npm/safe-buffer@5.1.2",
+        "pkg:npm/safer-buffer@2.1.2",
         "pkg:npm/sanitize-filename@1.6.4",
         "pkg:npm/sax@1.6.1",
         "pkg:npm/scheduler@0.23.2",
@@ -13995,10 +16305,17 @@
         "pkg:npm/semver@6.3.1",
         "pkg:npm/semver@7.7.4",
         "pkg:npm/semver@7.8.5",
+        "pkg:npm/send@1.2.1",
         "pkg:npm/serialize-error@7.0.1",
+        "pkg:npm/serve-static@2.2.1",
         "pkg:npm/set-cookie-parser@2.7.2",
+        "pkg:npm/setprototypeof@1.2.0",
         "pkg:npm/shebang-command@2.0.0",
         "pkg:npm/shebang-regex@3.0.0",
+        "pkg:npm/side-channel-list@1.0.1",
+        "pkg:npm/side-channel-map@1.0.1",
+        "pkg:npm/side-channel-weakmap@1.0.2",
+        "pkg:npm/side-channel@1.1.1",
         "pkg:npm/signal-exit@3.0.7",
         "pkg:npm/simple-update-notifier@2.0.0",
         "pkg:npm/smol-toml@1.9.0",
@@ -14006,7 +16323,9 @@
         "pkg:npm/source-map-support@0.5.21",
         "pkg:npm/source-map@0.6.1",
         "pkg:npm/sprintf-js@1.1.3",
+        "pkg:npm/standardwebhooks@1.3.0",
         "pkg:npm/stat-mode@1.0.0",
+        "pkg:npm/statuses@2.0.2",
         "pkg:npm/string-width@4.2.3",
         "pkg:npm/string_decoder@1.1.1",
         "pkg:npm/strip-ansi@6.0.1",
@@ -14020,9 +16339,12 @@
         "pkg:npm/tinyglobby@0.2.17",
         "pkg:npm/tmp-promise@3.0.3",
         "pkg:npm/tmp@0.2.7",
+        "pkg:npm/toidentifier@1.0.1",
         "pkg:npm/truncate-utf8-bytes@1.0.2",
+        "pkg:npm/ts-algebra@2.0.0",
         "pkg:npm/tslib@2.8.1",
         "pkg:npm/type-fest@0.13.1",
+        "pkg:npm/type-is@2.1.0",
         "pkg:npm/typescript@5.9.3",
         "pkg:npm/uc.micro@2.1.0",
         "pkg:npm/undici-types@6.21.0",
@@ -14031,10 +16353,12 @@
         "pkg:npm/undici@7.30.1",
         "pkg:npm/universalify@0.1.2",
         "pkg:npm/universalify@2.0.1",
+        "pkg:npm/unpipe@1.0.0",
         "pkg:npm/unzipper@0.12.5",
         "pkg:npm/use-sync-external-store@1.6.0",
         "pkg:npm/utf8-byte-length@1.0.5",
         "pkg:npm/util-deprecate@1.0.2",
+        "pkg:npm/vary@1.1.2",
         "pkg:npm/vite@8.3.5",
         "pkg:npm/void-elements@3.1.0",
         "pkg:npm/webcrypto-core@1.9.2",
@@ -14052,6 +16376,7 @@
         "pkg:npm/yargs@17.7.3",
         "pkg:npm/yauzl@3.4.0",
         "pkg:npm/yocto-queue@0.1.0",
+        "pkg:npm/zod-to-json-schema@3.25.2",
         "pkg:npm/zod@4.6.7",
         "source:ChillKai",
         "source:Codex inline visualization stylesheet",

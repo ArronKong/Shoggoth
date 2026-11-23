@@ -58,7 +58,10 @@ files:
   - node_modules/lodash.isequal/**/*
   - node_modules/sax/**/*
   - node_modules/tiny-typed-emitter/**/*
-  - "!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"
+  # Claude Code runs the user's installed CLI through pathToClaudeCodeExecutable.
+  # Ship only the SDK JavaScript; the optional per-platform packages bundle a CLI.
+  - node_modules/@anthropic-ai/claude-agent-sdk/**/*
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-*/**/*"
   - node_modules/@trycua/cua-driver/**/*
   - node_modules/@ubjs/core/**/*
   - node_modules/@ubjs/node/**/*

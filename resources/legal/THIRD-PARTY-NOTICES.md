@@ -10,6 +10,9 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 
 | Component | Version | License | Complete texts |
 |---|---|---|---|
+| @anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.329 | SEE LICENSE IN LICENSE.md | [CLAUDE-AGENT-SDK-LICENSE.md](CLAUDE-AGENT-SDK-LICENSE.md) |
+| @anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.329 | SEE LICENSE IN LICENSE.md | [CLAUDE-AGENT-SDK-LICENSE.md](CLAUDE-AGENT-SDK-LICENSE.md) |
+| @anthropic-ai/claude-agent-sdk | 0.3.329 | SEE LICENSE IN README.md | [CLAUDE-AGENT-SDK-LICENSE.md](CLAUDE-AGENT-SDK-LICENSE.md) |
 | @babel/runtime | 7.29.7 | MIT | [LICENSE](licenses/npm/_babel_runtime@7.29.7/LICENSE) |
 | @base-ui/react | 1.5.0 | MIT | [LICENSE](licenses/npm/_base-ui_react@1.5.0/LICENSE) |
 | @base-ui/utils | 0.2.9 | MIT | [LICENSE](licenses/npm/_base-ui_utils@0.2.9/LICENSE) |
@@ -36,6 +39,7 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | better-sqlite3 | 13.0.3 | MIT | [LICENSE](licenses/npm/better-sqlite3@13.0.3/LICENSE) |
 | boolean | 3.2.0 | MIT | [LICENSE.txt](licenses/npm/boolean@3.2.0/LICENSE.txt) |
 | builder-util-runtime | 9.7.0 | MIT | [LICENSE](licenses/npm/builder-util-runtime@9.7.0/LICENSE) |
+| call-bind-apply-helpers | 1.0.2 | MIT | [LICENSE](licenses/npm/call-bind-apply-helpers@1.0.2/LICENSE) |
 | cookie | 1.1.1 | MIT | [LICENSE](licenses/npm/cookie@1.1.1/LICENSE) |
 | cron-parser | 5.4.0 | MIT | [LICENSE](licenses/npm/cron-parser@5.4.0/LICENSE) |
 | cross-spawn | 7.0.6 | MIT | [LICENSE](licenses/npm/cross-spawn@7.0.6/LICENSE) |
@@ -44,11 +48,13 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | define-properties | 1.2.1 | MIT | [LICENSE](licenses/npm/define-properties@1.2.1/LICENSE) |
 | detect-node | 2.1.0 | MIT | [LICENSE](licenses/npm/detect-node@2.1.0/LICENSE) |
 | dompurify | 3.4.17 | Apache-2.0 | [LICENSE](licenses/npm/dompurify@3.4.17/LICENSE), [LICENSE-MPL](licenses/npm/dompurify@3.4.17/LICENSE-MPL) |
+| dunder-proto | 1.0.1 | MIT | [LICENSE](licenses/npm/dunder-proto@1.0.1/LICENSE) |
 | electron-updater | 6.8.9 | MIT | [LICENSE](licenses/npm/electron-updater@6.8.9/LICENSE) |
 | electron | 44.9.3 | MIT | [LICENSE](licenses/npm/electron@44.9.3/LICENSE) |
 | entities | 4.5.0 | BSD-2-Clause | [LICENSE](licenses/npm/entities@4.5.0/LICENSE) |
 | es-define-property | 1.0.1 | MIT | [LICENSE](licenses/npm/es-define-property@1.0.1/LICENSE) |
 | es-errors | 1.3.0 | MIT | [LICENSE](licenses/npm/es-errors@1.3.0/LICENSE) |
+| es-object-atoms | 1.1.2 | MIT | [LICENSE](licenses/npm/es-object-atoms@1.1.2/LICENSE) |
 | es6-error | 4.1.1 | MIT | [LICENSE.md](licenses/npm/es6-error@4.1.1/LICENSE.md) |
 | escape-string-regexp | 4.0.0 | MIT | [license](licenses/npm/escape-string-regexp@4.0.0/license) |
 | eventsource-parser | 3.1.1 | MIT | [LICENSE](licenses/npm/eventsource-parser@3.1.1/LICENSE) |
@@ -57,14 +63,20 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | fast-uri | 3.1.9 | BSD-3-Clause | [LICENSE](licenses/npm/fast-uri@3.1.9/LICENSE) |
 | fflate | 0.8.3 | MIT | [LICENSE](licenses/npm/fflate@0.8.3/LICENSE) |
 | fs-extra | 10.1.0 | MIT | [LICENSE](licenses/npm/fs-extra@10.1.0/LICENSE) |
+| function-bind | 1.1.2 | MIT | [LICENSE](licenses/npm/function-bind@1.1.2/LICENSE) |
+| get-intrinsic | 1.3.0 | MIT | [LICENSE](licenses/npm/get-intrinsic@1.3.0/LICENSE) |
+| get-proto | 1.0.1 | MIT | [LICENSE](licenses/npm/get-proto@1.0.1/LICENSE) |
 | global-agent | 3.0.0 | BSD-3-Clause | [LICENSE](licenses/npm/global-agent@3.0.0/LICENSE) |
 | globalthis | 1.0.4 | MIT | [LICENSE](licenses/npm/globalthis@1.0.4/LICENSE) |
 | gopd | 1.2.0 | MIT | [LICENSE](licenses/npm/gopd@1.2.0/LICENSE) |
 | graceful-fs | 4.2.11 | ISC | [LICENSE](licenses/npm/graceful-fs@4.2.11/LICENSE) |
 | has-property-descriptors | 1.0.2 | MIT | [LICENSE](licenses/npm/has-property-descriptors@1.0.2/LICENSE) |
+| has-symbols | 1.1.0 | MIT | [LICENSE](licenses/npm/has-symbols@1.1.0/LICENSE) |
+| hasown | 2.0.4 | MIT | [LICENSE](licenses/npm/hasown@2.0.4/LICENSE) |
 | highlight.js | 11.11.1 | BSD-3-Clause | [LICENSE](licenses/npm/highlight.js@11.11.1/LICENSE) |
 | html-parse-stringify | 3.0.1 | MIT | [HTML-PARSE-STRINGIFY.txt](licenses/source/HTML-PARSE-STRINGIFY.txt) |
 | i18next | 26.3.0 | MIT | [LICENSE](licenses/npm/i18next@26.3.0/LICENSE) |
+| inherits | 2.0.4 | ISC | [LICENSE](licenses/npm/inherits@2.0.4/LICENSE) |
 | isexe | 2.0.0 | ISC | [LICENSE](licenses/npm/isexe@2.0.0/LICENSE) |
 | jose | 6.2.12 | MIT | [LICENSE.md](licenses/npm/jose@6.2.12/LICENSE.md) |
 | js-tokens | 4.0.0 | MIT | [LICENSE](licenses/npm/js-tokens@4.0.0/LICENSE) |
@@ -83,10 +95,12 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | markdown-it-task-lists | 2.1.1 | ISC | [LICENSE](licenses/npm/markdown-it-task-lists@2.1.1/LICENSE) |
 | markdown-it | 14.3.3 | MIT | [LICENSE](licenses/npm/markdown-it@14.3.3/LICENSE) |
 | matcher | 3.0.0 | MIT | [license](licenses/npm/matcher@3.0.0/license) |
+| math-intrinsics | 1.1.0 | MIT | [LICENSE](licenses/npm/math-intrinsics@1.1.0/LICENSE) |
 | mdurl | 2.0.0 | MIT | [LICENSE](licenses/npm/mdurl@2.0.0/LICENSE) |
 | ms | 2.1.3 | MIT | [license.md](licenses/npm/ms@2.1.3/license.md) |
 | node-addon-api | 8.9.2 | MIT | [LICENSE.md](licenses/npm/node-addon-api@8.9.2/LICENSE.md) |
 | object-keys | 1.1.1 | MIT | [LICENSE](licenses/npm/object-keys@1.1.1/LICENSE) |
+| once | 1.4.0 | ISC | [LICENSE](licenses/npm/once@1.4.0/LICENSE) |
 | onnxruntime-common | 1.22.0 | MIT | [ONNX-RUNTIME-LICENSE.txt](ONNX-RUNTIME-LICENSE.txt) |
 | onnxruntime-node | 1.22.0 | MIT | [ONNX-RUNTIME-LICENSE.txt](ONNX-RUNTIME-LICENSE.txt) |
 | opencc-js | 1.4.2 | MIT AND Apache-2.0 | [LICENSE](licenses/npm/opencc-js@1.4.2/LICENSE) |
@@ -126,6 +140,7 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | use-sync-external-store | 1.6.0 | MIT | [LICENSE](licenses/npm/use-sync-external-store@1.6.0/LICENSE) |
 | void-elements | 3.1.0 | MIT | [LICENSE](licenses/npm/void-elements@3.1.0/LICENSE) |
 | which | 2.0.2 | ISC | [LICENSE](licenses/npm/which@2.0.2/LICENSE) |
+| wrappy | 1.0.2 | ISC | [LICENSE](licenses/npm/wrappy@1.0.2/LICENSE) |
 | ws | 8.21.0 | MIT | [LICENSE](licenses/npm/ws@8.21.0/LICENSE) |
 | zod | 4.6.7 | MIT | [LICENSE](licenses/npm/zod@4.6.7/LICENSE) |
 
