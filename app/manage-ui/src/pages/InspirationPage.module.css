@@ -48,7 +48,7 @@
 .capture textarea[data-inline-text] { min-height: 20px; }
 .capture textarea:disabled { background: transparent; }
 .capture textarea::placeholder { color: inherit; opacity: 1; }
-.capture textarea:focus, .capture textarea:focus-visible { outline: none; box-shadow: none; border: 0; }
+.capture textarea:focus, .capture textarea:focus-visible { background-color: transparent; outline: none; box-shadow: none; border: 0; }
 .capture textarea:focus::placeholder { opacity: .3; }
 .captureError { width: min(var(--typewriter-paper-width), 486px); margin: 18px auto 0; }
 .wall { flex: 1; padding-top: 64px; min-width: 0; }
