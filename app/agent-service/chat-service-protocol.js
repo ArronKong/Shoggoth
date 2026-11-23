@@ -1,5 +1,7 @@
 "use strict";
 
+const { validRuntimeModelSelection } = require("./runtime-model-selection");
+
 const crypto = require("node:crypto");
 const { validInteractiveApprovalChoice } = require("../core/shoggoth-interaction-contract");
 const { PUBLIC_MESSAGES: INSPIRATION_PUBLIC_MESSAGES } = require("./inspiration-service-protocol");
@@ -378,6 +380,10 @@ function validateChatServiceParams(method, params) {
       || !params.text.trimStart().startsWith("/")) failParams();
   } else if (method === "chat.send" || method === "chat.send.accept") {
     const fields = attachmentFields(params, ["operationId", "sessionKey", "prompt", "createdAt"]);
+    if (Object.hasOwn(params || {}, "expectedModel")) {
+      fields.push("expectedModel");
+      if (!validRuntimeModelSelection(params.expectedModel)) failParams();
+    }
     if (Object.hasOwn(params||{},"connectorSelection")) throw Object.assign(new Error("OpenConnector account selection is retired"),{code:"OPEN_CONNECTOR_RETIRED"});
     if (!validateOperationBase(params, fields)
       || !validUuid(params.sessionKey)

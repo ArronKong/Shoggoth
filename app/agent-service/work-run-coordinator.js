@@ -1,5 +1,7 @@
 "use strict";
 
+const { validRuntimeModelSelection, sameRuntimeModel } = require("./runtime-model-selection");
+
 const { nativeResponseMetadata, validResponseMetadata } = require("../chat-response-metadata");
 const { CRON_OUTPUT_VERSION, cronOutputDecision, isCronWatch, cronUnattendedCompletionError } = require("./cron-output-policy");
 const { validCronModelSelection, cronSessionHasModel } = require("./native-cron-model");
@@ -205,6 +207,7 @@ const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
   "RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED",
   "RUNTIME_MODEL_CATALOG_UNAVAILABLE",
   "RUNTIME_MODEL_CATALOG_INVALID",
+  "RUNTIME_MODEL_CATALOG_TOO_LARGE",
   "RUNTIME_MODEL_UNAVAILABLE",
   "RUNTIME_MODEL_SETTINGS_INVALID",
   "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE",
@@ -386,8 +389,8 @@ const CHAT_PREPARATION_REJECTIONS = new Set([
 // deterministic id, so a restart finds the same failure: it must reject only
 // the waiting input, never poison the Service. The source session is unchanged.
 const HANDOFF_SUMMARY_FAILURES = new Set([
-  "PRODUCT_COMPACTION_FAILED", "PRODUCT_COMPACTION_AUTH_REQUIRED", "PRODUCT_COMPACTION_MODEL_UNAVAILABLE",
-  "PRODUCT_COMPACTION_OUTPUT_INVALID", "PRODUCT_COMPACTION_OUTCOME_UNKNOWN", "COMPACTION_RECOVERY_UNAVAILABLE",
+  ...Object.keys(require("./product-context-protocol").MESSAGES).filter(code => code.startsWith("PRODUCT_COMPACTION_")),
+  "COMPACTION_RECOVERY_UNAVAILABLE",
   "CHECKPOINT_STALE", "CHECKPOINT_INVALID", "CHECKPOINT_SUMMARY_TOO_LARGE", "MODEL_ONLY_CANCELED",
 ]);
 
@@ -3620,6 +3623,8 @@ class WorkRunCoordinator {
       if (!active || active.operationId !== command.operationId
         || active.command.runId !== command.runId || active.command.sessionKey !== command.sessionKey
         || active.command.prompt !== command.prompt
+        || !sameRuntimeModel(active.command.expectedModel, command.expectedModel)
+        || (command.expectedModel && (command.expectedModel.model !== contract.defaultModel || command.expectedModel.bindingId !== contract.bindingId))
         || JSON.stringify(active.command.attachments || []) !== JSON.stringify(command.attachments || [])
         || JSON.stringify(active.command.connectorSelection ?? null) !== JSON.stringify(command.connectorSelection ?? null)) {
         throw coordinatorError("EXECUTION_BINDING_INVALID", "Chat command binding changed");
@@ -3983,12 +3988,17 @@ class WorkRunCoordinator {
         previousCoverage = coverage;
         const summary = await this.#prepareConversationCompaction(shadow, { requestPlan: request,
           currentOperationId: operationId, advisory, restorePolicy, memoryPrepared,
+          waitingRunId: pendingOperationId ? excludingRunId : null,
           force: !!restorePolicy && request.coverage === 0, assertHandoffCurrent: assertCurrent });
         if (!summary) throw coordinatorError("CONTEXT_COMPACTION_REQUIRED", "无法生成足够的迁移摘要");
         await this.waitForIdle(summary.id);
         assertCurrent();
         const completed = this.dispatcher.getRun(summary.id);
-        if (completed?.status !== "completed") throw coordinatorError(completed?.errorCode || "PRODUCT_COMPACTION_FAILED", "迁移摘要未完成，原会话已保留");
+        if (completed?.status !== "completed") {
+          const code = completed?.errorCode;
+          throw coordinatorError(["MODEL_ONLY_ACCEPTANCE_UNKNOWN", "COMPACTION_RECOVERY_UNAVAILABLE"].includes(code)
+            ? "PRODUCT_COMPACTION_OUTCOME_UNKNOWN" : code || "PRODUCT_COMPACTION_FAILED", "迁移摘要未完成，原会话已保留");
+        }
       }
       throw coordinatorError("PRODUCT_COMPACTION_FAILED", "迁移摘要未完成，原会话已保留");
     } catch (error) {
@@ -4150,11 +4160,16 @@ class WorkRunCoordinator {
     const legacyIdentity = [profile.id, session.id, plan.previousId, plan.throughSeq, plan.coveredHash, operationId];
     const hash = identity => `compaction-${crypto.createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
     const legacyId = hash(legacyIdentity);
-    const id = operationId ? legacyId : hash([...legacyIdentity, this.#summaryIdentity(session, profile)]);
-    const existing = this.dispatcher.getRun(id) || (id !== legacyId ? this.dispatcher.getRun(legacyId) : null);
-    // Preserve attempts written before route identity was tracked. An upgrade
-    // cannot authorize another model request for the same unchanged prefix.
-    // A configured new route or an explicit retry can create a new attempt.
+    const routeId = operationId ? legacyId : hash([...legacyIdentity, this.#summaryIdentity(session, profile)]);
+    const retrySummary = profile.runtime === "opencode" || (!!assertHandoffCurrent && !advisory && !restorePolicy)
+      || this.productStore.resolveAgentRuntimeProfile?.(session.profileId, session.runtimeBindingId)?.runtime === "opencode";
+    const previous = this.dispatcher.getRun(routeId) || (routeId !== legacyId ? this.dispatcher.getRun(legacyId) : null);
+    // A prior single-attempt build can leave this very prefix and model blocked.
+    // Only its confirmed failure on the same route has one attempt remaining.
+    if (previous && (!retrySummary || previous.id !== routeId || previous.status !== "failed"
+      || !require("./product-context-protocol").retryableSummaryFailure(previous.errorCode))) return previous;
+    const id = retrySummary ? hash([routeId, "automatic-summary-retry", currentOperationId]) : routeId;
+    const existing = this.dispatcher.getRun(id);
     if (existing) return existing;
     this.telemetry.record("runtime.compaction.requested", { sessionKey: session.sessionKey, runId: id });
     const run = this.dispatcher.enqueue({ id, source: "compaction", sourceId: session.sessionKey,
@@ -4162,6 +4177,7 @@ class WorkRunCoordinator {
     const command = Object.freeze({ kind: "domain", runId: id, operationId: id, prompt: plan.prompt,
       sessionKey: session.sessionKey, bindingId: profile.selectedBindingId ?? session.runtimeBindingId,
       summaryModel: this.#summaryModel(session, profile),
+      ...(retrySummary ? { retrySummary: !previous, sourceSessionRevision: session.revision, waitingRunId } : {}),
       sourceNativeSessionId: runtimeSessionIdOf(session), sourceBindingId: session.runtimeBindingId,
       createdAt: this.now(), plan });
     this.domainCommands.set(id, command);
@@ -4342,6 +4358,12 @@ class WorkRunCoordinator {
     }
     if (input && Object.hasOwn(input, "pluginSelection")) throw coordinatorError("PLUGIN_PLATFORM_RETIRED", "旧插件选择已停用，请重新选择连接器账号");
     const inputFields = attachmentFields(input, ["operationId", "sessionKey", "prompt"]);
+    if (Object.hasOwn(input || {}, "expectedModel")) {
+      inputFields.push("expectedModel");
+      if (!validRuntimeModelSelection(input.expectedModel)) {
+        throw coordinatorError("WORK_RUN_SEND_INVALID", "发送时的模型选择无效");
+      }
+    }
     if (input && Object.hasOwn(input, "connectorSelection")) throw coordinatorError("OPEN_CONNECTOR_RETIRED", "This request uses retired OpenConnector account selection; start a new request using MCP connectors");
     if (!exactObject(input, inputFields) || (input.attachments !== undefined && !validAttachments(input.attachments))) {
       throw coordinatorError("WORK_RUN_SEND_INVALID", "send 需要 operationId/sessionKey/prompt，可附带附件和连接器账号选择");
@@ -4468,6 +4490,7 @@ class WorkRunCoordinator {
         runId,
         sessionKey: input.sessionKey,
         prompt: input.prompt,
+        ...(input.expectedModel ? { expectedModel: input.expectedModel } : {}),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         ...(connectorSelection ? { connectorSelection } : {}),
         ...(acceptance || existingCommand?.acceptance ? { acceptance: acceptance || existingCommand.acceptance } : {}),
@@ -5574,7 +5597,10 @@ class WorkRunCoordinator {
       // Retain the legacy marker if an older recovery already persisted it.
       // appendEvent still verifies every other field and rejects real conflicts.
       const { recovered, ...terminalPayload } = payload;
-      let contextExcluded = payload.errorCode === "RUNTIME_REFUSED";
+      // The waiting chat owns the user-facing outcome. Keep its internal
+      // summary terminal in the journal without adding it to the conversation.
+      let contextExcluded = payload.errorCode === "RUNTIME_REFUSED"
+        || (run?.source === "compaction" && Boolean(this.domainCommands.get(runId)?.waitingRunId));
       if (recovered === true && this.transcriptStore?.getEvent) {
         const session = this.chatSessionStore.getSession(sessionKey);
         if (session?.profileId === run.profileId) {
@@ -8463,6 +8489,19 @@ class WorkRunCoordinator {
       }
       defaultModel = sessionModelOverride ?? defaultModel;
     }
+    const command = this.#commandForRun(run)?.command || null;
+    const expected = run.source === "inspiration" ? this.resolveRunSession(run)?.expectedModel : command?.expectedModel;
+    if (expected) {
+      const source = sessionProviderRef === undefined ? null
+        : codexSessionProvider.selectionForProviderRef(this.productStore, profile, sessionProviderRef);
+      if (profile.runtime !== "codex" || boundSession?.runtimeBindingId !== expected.bindingId
+        || (expected.modelProviderRef ?? null) !== source || (defaultModel != null && defaultModel !== expected.model)) {
+        throw coordinatorError("EXECUTION_CONTRACT_STALE", "输入框的模型选择已变化，请确认后重新发送");
+      }
+      // Preserve an inherited session default. Only this operation, including
+      // its recovery and its native thread and turn requests, pins the shown ID.
+      defaultModel = expected.model;
+    }
     if (run.source === "compaction") {
       // A model identifier from the chatting Runtime is not a route on the
       // separately authorized summary Runtime. Use that Runtime's default.
@@ -8502,7 +8541,6 @@ class WorkRunCoordinator {
         "writable WorkRun 必须绑定显式 execution workspace",
       );
     }
-    const command = this.#commandForRun(run)?.command || null;
     if (command?.pluginSelection !== undefined) throw coordinatorError("PLUGIN_PLATFORM_RETIRED", "原任务依赖已停用的插件选择，需要重新选择连接器账号");
     if (command?.connectorSelection !== undefined) throw coordinatorError("OPEN_CONNECTOR_RETIRED", "This saved task needs migration from OpenConnector to MCP connectors");
     this.mcpConnectorController?.captureRun(run);
@@ -9258,11 +9296,8 @@ class WorkRunCoordinator {
     this.dispatcher.transition(run.id, "running");
     this.startupGate?.release(run.id);
     this.#streamFor(run.id).append("status", { status: "running" });
-    let errorCode = null, summary = null;
+    let errorCode = null;
     try {
-      const authentication = await readRuntimeAuthenticationState(host, { allowDeferred: true });
-      this.#fence(token);
-      if (authentication.status === "unauthenticated") throw runtimeAuthRequiredError();
       // The prompt was frozen when the compaction Run was planned. A forget,
       // correction or newly appended source may have landed while it waited
       // for a model-only Runtime; reject before sending old source text.
@@ -9293,37 +9328,56 @@ class WorkRunCoordinator {
         const store = this.conversationCheckpointStore;
         return store.withFreshMemory ? store.withFreshMemory(run.profileId, read, signal) : read();
       };
-      const sourceProof = await withFreshSource(captureSource);
-      const assertCurrent = () => {
+      const generate = async operationId => {
+        const authentication = await readRuntimeAuthenticationState(host, { allowDeferred: true });
         this.#fenceRuntimeAccount(token);
-        if (sourceProof) sourceProof.read(checkSource);
-        else checkSource();
+        if (authentication.status === "unauthenticated") throw runtimeAuthRequiredError();
+        const sourceProof = await withFreshSource(captureSource);
+        const assertCurrent = () => {
+          this.#fenceRuntimeAccount(token);
+          if (command.sourceSessionRevision !== undefined
+            && this.chatSessionStore.getSession(command.sessionKey)?.revision !== command.sourceSessionRevision) throw sourceStale();
+          const waiting = command.waitingRunId && this.dispatcher.getRun(command.waitingRunId);
+          if (command.waitingRunId && (waiting?.status !== "queued" || this.#chatCancellationPending(waiting))) {
+            throw coordinatorError("MODEL_ONLY_CANCELED", "原请求已结束");
+          }
+          if (sourceProof) sourceProof.read(checkSource);
+          else checkSource();
+        };
+        assertCurrent();
+        const modelSecretScope = { profileId: run.profileId, sessionId: this.getRunSessionKey(run) || command.plan.sessionId };
+        const prompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, modelSecretScope, command.prompt) : command.prompt;
+        const output = await host.generateModelOnly({ prompt, model: contract.defaultModel, modelSecretScope,
+          operationId, signal: token.controller.signal, assertCurrent });
+        this.#fenceRuntimeAccount(token);
+        const profile = this.productStore.getAgentProfile(run.profileId);
+        if (output.usage && this.usageStore) this.usageStore.record({ profileId: run.profileId,
+          agentId: profile.agentId || profile.id, agentName: profile.name || profile.id,
+          runId: run.id, source: "compaction", sourceId: run.sourceId,
+          runtime: contract.runtime, runtimeAccountId: contract.runtimeAccountId,
+          threadId: `model-only:${run.id}`, turnId: operationId, responseId: operationId,
+          model: output.model || contract.defaultModel, provider: output.provider || null,
+          usage: output.usage, createdAt: this.now() });
+        return { summary: require("./conversation-compaction").parseConversationSummary(output.text), model: output.model };
       };
-      assertCurrent();
-      const modelPrompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, { profileId: run.profileId,
-        sessionId: this.getRunSessionKey(run) || command.plan.sessionId }, command.prompt) : command.prompt;
-      const output = await host.generateModelOnly({ prompt: modelPrompt, model: contract.defaultModel,
-        modelSecretScope: { profileId: run.profileId, sessionId: this.getRunSessionKey(run) || command.plan.sessionId },
-        operationId: command.operationId, signal: token.controller.signal, assertCurrent });
-      this.#fenceRuntimeAccount(token);
-      const profile = this.productStore.getAgentProfile(run.profileId);
-      if (output.usage && this.usageStore) this.usageStore.record({ profileId: run.profileId,
-        agentId: profile.agentId || profile.id, agentName: profile.name || profile.id,
-        runId: run.id, source: "compaction", sourceId: run.sourceId,
-        runtime: contract.runtime, runtimeAccountId: contract.runtimeAccountId,
-        threadId: `model-only:${run.id}`, turnId: run.id, responseId: command.operationId,
-        model: output.model || contract.defaultModel, provider: output.provider || null,
-        usage: output.usage, createdAt: this.now() });
-      summary = require("./conversation-compaction").parseConversationSummary(output.text);
+      let generated;
+      try { generated = await generate(command.operationId); } catch (firstError) {
+        if (!command.retrySummary || !require("./product-context-protocol").retryableSummaryFailure(ownDataErrorCode(firstError))) throw firstError;
+        // Keep the same running WorkRun while retrying the model call. Chat,
+        // history and the waiting business operation observe only its final result.
+        await require("node:timers/promises").setTimeout(500, undefined, { signal: token.controller.signal });
+        this.#fenceRuntimeAccount(token);
+        generated = await generate(`${command.operationId}-retry`);
+      }
       const { prompt: _prompt, targetThroughSeq: _target, windowTokens, ...coverage } = command.plan;
       const publish = view => {
         this.#fenceRuntimeAccount(token);
         const session = this.chatSessionStore.getSession(command.sessionKey);
         this.hookService?.observeSession(session, "context.checkpoint.before", command.operationId, { checkpointOperationId: command.operationId });
         view?.assertFilesCurrent?.();
-        const checkpoint = this.conversationCheckpointStore.commit({ ...coverage, summary, provenance: {
+        const checkpoint = this.conversationCheckpointStore.commit({ ...coverage, summary: generated.summary, provenance: {
           runId: run.id, bindingId: contract.bindingId, runtime: contract.runtime,
-          model: output.model || contract.defaultModel, method: "model",
+          model: generated.model || contract.defaultModel, method: "model",
           ...(windowTokens ? { contextWindow: windowTokens } : {}),
           ...(command.sourceBindingId ? { sourceNativeSessionId: command.sourceNativeSessionId, sourceBindingId: command.sourceBindingId } : {}),
         } });

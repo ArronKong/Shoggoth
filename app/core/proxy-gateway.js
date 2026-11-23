@@ -1025,7 +1025,7 @@ function startProxyGateway({
     };
 
     const startSendObserver = (
-      backend, sessionKey, message, runId, hooks, promptOwner, attachments, inputProvenance,
+      backend, sessionKey, message, runId, hooks, promptOwner, attachments, inputProvenance, expectedModel,
     ) => {
       // A new send takes over this client's session stream. Invalidate queued
       // history watchers and locally cancel/await any previous send observer;
@@ -1062,6 +1062,7 @@ function startProxyGateway({
           runId,
           hooks,
           { attachments, inputProvenance,
+            ...(expectedModel !== undefined ? { expectedModel } : {}),
             signal: controller.signal,
             onAccepted: hooks.accepted },
         );
@@ -1908,6 +1909,7 @@ function startProxyGateway({
                 promptOwner,
                 attachments,
                 inputProvenance,
+                frame.params?.expectedModel,
               );
             }
             return; // do NOT forward

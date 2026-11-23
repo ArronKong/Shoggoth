@@ -1171,7 +1171,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 34);
+  assert.equal(PROTOCOL_VERSION, 37);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {

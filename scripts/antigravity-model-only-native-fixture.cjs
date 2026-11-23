@@ -157,13 +157,15 @@ async function verifyWatch(adapter, setResponse) {
     runtimeAccountResolver: { resolve: () => runtimeEnvironment }, hostOptions });
   const adapter = new (require("../app/agent-service/antigravity-runtime-adapter").AntigravityRuntimeAdapter)({ runtimePool: pool });
   const setResponse = value => { response = value; };
-  const closure = process.argv.includes("--watch-only") ? null : await require("./helpers/proactive-native-closure.cjs").verifyProactiveNativeClosure({
-    root, adapter, runtime: "antigravity", model: "gemini-3.1-pro-high", setResponse });
+  const beforeReadiness = requests.length;
+  const readiness = await require("./helpers/proactive-native-closure.cjs").verifyProactiveRuntimeReadiness({
+    root, adapter, runtime: "antigravity", model: "gemini-3.1-pro-high" });
+  assert.equal(requests.length, beforeReadiness, "the proactive readiness check sends no model request");
   const watch = await verifyWatch(adapter, setResponse);
   if (fixtureError) throw fixtureError;
   console.log(JSON.stringify({ verified: true, runtime: "Antigravity", runtimeVersion: server.version, signedNativeHarness: true,
     provider: "synthetic-loopback", actualProviderCalls: 0, nativeTools: 0, modelRequests: requests.length,
-    totalTokens: result.usage.totalTokens, processStopped: true, closure, watch }));
+    totalTokens: result.usage.totalTokens, processStopped: true, readiness, watch }));
 })().catch(error => { console.error(JSON.stringify({ verified: false, code: error.code || error.message, stack: error.stack,
   fixtureError: fixtureError?.message, urls, requests: requests.length, diagnostic })); process.exitCode = 1; }).finally(async () => {
   await pool?.stopAll(); await host?.stop(); for (const socket of sockets) socket.destroy();

@@ -658,19 +658,19 @@ test("runtime catalog/provider stays bound to each visible Agent", async () => {
   const codexCaps = backend.getChatCapabilities(codex.agentId);
   assert.deepEqual({ ...codexCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
-    nativeUiArtifactsV1: false,
+    nativeUiArtifactsV1: false, backgroundTasks: true, prewarm: true,
     maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: true, modelProvider: "codex", modelScope: codex.id, permissions: undefined,
   });
   const codexOtherCaps = backend.getChatCapabilities(codexOther.agentId);
   assert.deepEqual({ ...codexOtherCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
-    nativeUiArtifactsV1: false,
+    nativeUiArtifactsV1: false, backgroundTasks: true, prewarm: true,
     maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: true, modelProvider: "codex", modelScope: codexOther.id, permissions: undefined,
   });
   const grokCaps = backend.getChatCapabilities(grok.agentId);
   assert.deepEqual({ ...grokCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
-    nativeUiArtifactsV1: false,
+    nativeUiArtifactsV1: false, backgroundTasks: true, prewarm: true,
     maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: false, modelProvider: "grok-build", modelScope: grok.id, permissions: undefined,
   });
   assert.deepEqual(codexCaps.permissions.options.map((option) => option.id), ["request-approval", "auto-review", "full-access"]);
@@ -1790,6 +1790,7 @@ test("user-installed native Skills use a global registry revision through the ba
     version: "1.0.0",
     source: "user",
     globalEnabled: true,
+    globalSettingRevision: undefined,
     contentHash: "a".repeat(64),
     requiredTools: [],
     requiredRuntimeCapabilities: ["filesystem"],
@@ -2436,6 +2437,7 @@ test("start paginates profiles and sessions, uses a fresh token per request, the
       sessionId: SESSION_A,
       agentId: "shoggoth-default",
       agentName: "Shoggoth",
+      runtime: "codex",
       model: "openai/gpt-5",
       permissionMode: "ask",
       provider: "openrouter",
@@ -3041,9 +3043,10 @@ test("Service event epoch change reconciles stale approvals before replaying equ
     assert.deepEqual(activityEvents.map((event) => event.activity.kind), [
       "federation.chat.interaction",
       "federation.chat.interaction.reset",
+      "background.tasks.approvals.changed",
       "federation.chat.terminal",
     ]);
-    assert.equal(activityEvents[2].activity.errorCode, "SERVICE_RESTARTED");
+    assert.equal(activityEvents[3].activity.errorCode, "SERVICE_RESTARTED");
     assert.deepEqual(
       calls.filter(({ request }) => request.method === "events.subscribe")
         .slice(0, 3).map(({ request }) => request.params.afterSeq),
@@ -3196,6 +3199,7 @@ test("Service cursor gap atomically replaces lost resolutions with authoritative
       `federation.chat.interaction:${staleRequestId}`,
       "federation.chat.interaction.reset",
       `federation.chat.interaction:${currentRequestId}`,
+      "background.tasks.approvals.changed",
     ]);
     assert.equal(
       calls.filter(({ request }) => request.method === "events.subscribe"
@@ -4295,12 +4299,14 @@ test("send streams cumulative hooks, preserves cursor over a transient failure, 
     throw new Error(`unexpected ${request.method}`);
   }, { delay: async (ms) => { delays.push(ms); } });
   const seen = { delta: [], thinking: [], final: [], error: [] };
+  const expectedModel = { bindingId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", model: "gpt-6.1-terra" };
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", undefined, {
     delta: (value) => seen.delta.push(value),
     thinking: (value) => seen.thinking.push(value),
     final: (...args) => seen.final.push(args),
     error: (value) => seen.error.push(value),
-  });
+  }, { expectedModel });
+  assert.deepEqual(calls.find(entry => entry.request.method === "chat.send").request.params.expectedModel, expectedModel);
   assert.deepEqual(seen, {
     delta: ["Hel", "Hello"],
     thinking: ["why"],
@@ -5430,11 +5436,13 @@ test("completed text does not duplicate a delta and commentary seals before the 
   });
   const seen = { delta: [], interim: [], final: [] };
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
-    delta: (value) => seen.delta.push(value),
+    delta: (value, meta) => seen.delta.push(meta?.replyPhase ? [value, meta.replyPhase] : value),
     interim: (value, meta) => { assert.equal(meta.activityId, "progress-note"); seen.interim.push(value); },
     final: (value) => seen.final.push(value),
   });
-  assert.deepEqual(seen, { delta: ["note", "answer"], interim: ["note"], final: ["answer"] });
+  // The final_answer completion repeats the same full text once, tagged, so an
+  // unmarked streamed segment can switch to the final reply; it never appends.
+  assert.deepEqual(seen, { delta: ["note", "answer", ["answer", "final_answer"]], interim: ["note"], final: ["answer"] });
 });
 
 test("a sealed native text identity ignores replay without dropping identical later messages", async () => {
@@ -5581,13 +5589,13 @@ test("native Codex commentary closes live before the final answer starts", async
   });
   const seen = [];
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
-    delta: (text) => seen.push(["delta", text]),
+    delta: (text, meta) => seen.push(meta?.replyPhase ? ["delta", text, meta.replyPhase] : ["delta", text]),
     interim: (text) => seen.push(["interim", text]),
     final: (text) => seen.push(["final", text]),
   });
   assert.deepEqual(seen, [
     ["delta", "Checking sources."], ["interim", "Checking sources."],
-    ["delta", "The **answer**."], ["final", "The **answer**."],
+    ["delta", "The **answer**."], ["delta", "The **answer**.", "final_answer"], ["final", "The **answer**."],
   ], "the first bubble must finish before any final-answer text is displayed");
 });
 
@@ -6099,6 +6107,8 @@ test("a busy inspiration rejects the chat send as not admitted instead of an unc
 test("public runtime failures reach both live chat and canonical history", async () => {
   const messages = require("../app/agent-service/product-context-protocol").MESSAGES;
   for (const code of ["PRODUCT_COMPACTION_FAILED", "PRODUCT_COMPACTION_AUTH_REQUIRED",
+    "PRODUCT_COMPACTION_QUOTA_EXHAUSTED", "PRODUCT_COMPACTION_RATE_LIMITED", "PRODUCT_COMPACTION_CONNECTION_LOST",
+    "PRODUCT_COMPACTION_UPSTREAM_UNAVAILABLE", "PRODUCT_COMPACTION_TIMEOUT", "RUNTIME_FACTS_UNKNOWN",
     "PRODUCT_COMPACTION_MODEL_UNAVAILABLE", "PRODUCT_COMPACTION_OUTPUT_INVALID", "PRODUCT_COMPACTION_OUTCOME_UNKNOWN",
     "RUNTIME_HOST_RESTARTED", "RUNTIME_UPSTREAM_UNAVAILABLE"]) {
     const message = code === "RUNTIME_UPSTREAM_UNAVAILABLE"
@@ -6115,7 +6125,9 @@ test("public runtime failures reach both live chat and canonical history", async
       run: run(), hooks: { error: value => errors.push(value) }, poll: { cancelled: false }, generation: backend._generation },
     { text: "", reasoning: "", settled: false, lastStatus: "running" }, run("failed", { errorCode: code }));
     assert.deepEqual(errors, [message]);
-    assert.equal((await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`)).messages[0].content[0].text, `错误：${message}`);
+    const historical = (await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`)).messages[0];
+    assert.equal(historical.content[0].text, `错误：${message}`);
+    if (code.startsWith("PRODUCT_COMPACTION_")) assert.equal(historical.errorCode, code);
   }
 });
 

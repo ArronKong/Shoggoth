@@ -18,12 +18,19 @@ const ordinaryRecovery = scenario.startsWith("ordinary-recovery-");
 const nativeActiveRecovery = scenario.startsWith("native-active-");
 const nativeStop = scenario.startsWith("native-stop-");
 const groupContinuation = scenario.startsWith("group-continuation");
+const modelHandoff = scenario.startsWith("model-handoff-");
+const summaryHistory = scenario.startsWith("model-handoff-history");
+const codexComposer = scenario.startsWith("codex-composer-model");
+const unresolvedCodex = scenario.startsWith("codex-composer-model-unresolved");
+let releaseCodexCatalog: (() => void) | undefined;
+const bindingId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+let contextWrites = 0;
 const nativeRejection = ["native-rejected", "native-rejected-immersive"].includes(scenario);
 const storageRejection = scenario.startsWith("storage-rejected-");
 const inspirationBuffered = ["inspiration-buffered", "inspiration-buffered-immersive"].includes(scenario);
 if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive", "upstream-error", "upstream-error-immersive", "uncertain", "restored", "rejected", "ordinary", "newer", "started", "accepted-error", "accepted-uncertain", "stale-query", "reselect", "terminal-race", "terminal-timeout", "terminal-reload", "ordinary-upstream", "ordinary-receipt", "ordinary-buffered", "ordinary-buffered-immersive", "observer-idle", "observer-idle-pending", "native-approval", "native-approval-immersive", "observer-idle-terminal", "runtime-abort", "runtime-abort-immersive", "runtime-snapshot", "runtime-abort-pending", "silent-queue", "silent-queue-immersive"].includes(scenario)
   && !["observer-idle-immersive", "observer-idle-failed", "observer-idle-failed-immersive"].includes(scenario)
-  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !nativeStop && !groupContinuation && !ordinaryRecovery && !inspirationBuffered && !storageRejection
+  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !nativeStop && !groupContinuation && !ordinaryRecovery && !inspirationBuffered && !storageRejection && !modelHandoff && !codexComposer
   || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
 const key = `agent:${backend}-recovery-fixture:${inspirationBuffered ? "dashboard:inspiration-fixture" : "11111111-1111-4111-8111-111111111111"}`;
 const agentId = key.split(":")[1];
@@ -34,6 +41,12 @@ const storageKey = "shoggoth.chat.pending-native-sends.v1", selectedKey = "shogg
 const stopKey = "shoggoth.chat.pending-native-stops.v1", stopRunId = "native-stop-exact-run";
 const stops: any[] = [];
 const sessions = [{ key, agentId, agentName: `${backend} recovery fixture`, backendId: backend, model: "fixture-model", updatedAt: Date.now(),
+  ...(codexComposer ? { runtime: "codex", model: undefined } : {}),
+  ...(modelHandoff ? { productContext: { automatic: "enabled", reason: null, summaryBindingId: bindingId, summaryRuntime: "opencode",
+    summaryModel: "opencode/free", checkpointId: null, coveredThroughSeq: 0, pendingRunId: summaryHistory ? null : "summary-run", lastError: summaryHistory ? "PRODUCT_COMPACTION_RATE_LIMITED" : null,
+    measurement: "missing", nativeAuto: "unknown", budget: { tokens: 64_000, source: "catalog", triggerTokens: 50_000, retainedTokens: 8000 },
+    transfer: { state: summaryHistory ? "failed" : "preparing", targetBindingId: bindingId, model: "opencode/free", sourceRevision: 41,
+      sourceSessionRevision: 2, snapshotId: null, mode: "summary", errorCode: summaryHistory ? "PRODUCT_COMPACTION_RATE_LIMITED" : null, updatedAt: Date.now() } } } : {}),
   ...(nativeRejection || legacyRecovery ? { kind: "cron" } : inspirationBuffered ? { kind: "inspiration" } : {}) }];
 const sent: Array<any> = [], observed: Array<any> = [], sockets = new Set<FixtureSocket>();
 let lookup: any = scenario === "restored" ? { status: "found", admissionAccepted: true, run: { status: "needs_verification" } }
@@ -45,6 +58,13 @@ if (legacyRecovery) lookup = { status: "unresolved", run: null, canReconcile: tr
 if (scenario.startsWith("ordinary-recovery-reload")) lookup = { status: "found", stateAuthority: "openclaw",
   admissionAccepted: true, run: { id: originalOperation, sessionKey: key, status: "completed" } };
 let history: Array<any> = [], releaseLookup: (() => void) | null = null, historyReads = 0, lookupUnavailable = false;
+const finalSummaryCode = "PRODUCT_COMPACTION_RATE_LIMITED";
+const finalSummaryReason = () => i18n.t("chatErrors:productContext.PRODUCT_COMPACTION_RATE_LIMITED");
+const summaryErrorHistory = () => [
+  { role: "user", content: originalText, timestamp: Date.now() - 1000 },
+  { role: "system", errorCode: finalSummaryCode, content: `错误：${finalSummaryReason()}`, timestamp: Date.now() },
+];
+if (summaryHistory) history = summaryErrorHistory();
 const continuationTarget = { groupId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerScope: "ga1:aaaaaaaa-aaaa-4aaa-8aaa-bbbbbbbbbbbb",
   sourceEventId: "original-group-evidence" };
 const groupAnswerId = "group-continuation-answer";
@@ -73,7 +93,7 @@ const nativeApproval = scenario.startsWith("native-approval");
 const runtimeTerminal = scenario.startsWith("runtime-");
 const silentQueue = scenario.startsWith("silent-queue");
 const slashOrder = scenario.startsWith("slash-order");
-const fixtureHasSelection = !scenario.startsWith("ordinary") && !inspirationBuffered && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery && !storageRejection;
+const fixtureHasSelection = !scenario.startsWith("ordinary") && !inspirationBuffered && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery && !storageRejection && !modelHandoff && !codexComposer;
 const storageError = { code: "SECRET_PROCESSING_UNAVAILABLE", message: "Private fixture error",
   systemIssue: "STORAGE_FULL", admissionAccepted: false };
 let failStorage = storageRejection;
@@ -224,6 +244,16 @@ class FixtureSocket {
 Object.assign(window, { WebSocket: FixtureSocket });
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.href); let payload: unknown = {};
+  if (modelHandoff && url.pathname === `/__api/agents/${agentId}/context` && init?.method === "POST") {
+    contextWrites++;
+    throw Error("summary retries must be owned by the backend");
+  }
+  if (codexComposer && url.pathname.endsWith("/runtime-models")) {
+    if (unresolvedCodex && !releaseCodexCatalog) await new Promise<void>(resolve => { releaseCodexCatalog = resolve; });
+    return Response.json({ selection: { sessionKey: key, revision: 1, bindingId, runtime: "codex", model: null, contextUsage: null, candidates: [], canSwitch: true },
+      models: [{ id: "gpt-6.1-terra", name: "GPT-6.1 Terra", provider: "openai", bindingId, runtime: "codex", runtimeName: "Codex", isDefault: !unresolvedCodex }],
+      runtimes: [], capabilities: { attachments: {}, slash: false, maxPromptBytes: 61440 } });
+  }
   if (groupContinuation && url.pathname.endsWith("/group-continuation")) {
     groupRequests.push("verify");
     check(url.searchParams.get("sessionKey") === key && url.searchParams.get("answerEventId") === groupAnswerId,
@@ -266,7 +296,7 @@ window.fetch = async (input, init) => {
   if (url.pathname === "/__api/status") payload = { backends: ["shoggoth", "openclaw", "hermes"].map(id =>
     ({ id, connected: true, info: { readyAgentIds: [agentId] } })) };
   if (url.pathname === "/__api/backends") payload = { backends: ["shoggoth", "openclaw", "hermes"].map(id =>
-    ({ id, surfaces: { agentHarness: true, chat: true, durableChatStop: id === "shoggoth" } })) };
+    ({ id, surfaces: { agentHarness: true, chat: true, durableChatStop: id === "shoggoth", sessionRuntimeSwitch: codexComposer && id === "shoggoth" } })) };
   if (url.pathname === "/__api/models") payload = { models: [{ id: "fixture-model", name: "Fixture", provider: "fixture", backendId: backend }] };
   if (url.pathname === "/__api/chat/capabilities") payload = { attachments: {}, slash: slashOrder, maxPromptBytes: 61440 };
   if (url.pathname === "/__api/chat/slash") payload = { supported: slashOrder, commands: slashOrder
@@ -295,6 +325,59 @@ const clickVerify = () => document.querySelector<HTMLButtonElement>(".chat-verif
 Object.assign(window, { runChatSendRecoveryFixture: async () => {
   await wait(() => input() && sockets.size > 0, "actual ChatPage composer");
   await new Promise(resolve => setTimeout(resolve, 120));
+  if (modelHandoff) {
+    const surface = () => document.querySelector<HTMLElement>(immersive ? '[data-testid="immersive-chat"]' : ".chat-thread");
+    const noRecoveryUi = () => !/继续使用原模型|重试摘要|正在准备切换模型/.test(document.body.innerText)
+      && !surface()?.querySelector(`button[title="${i18n.t("chat.retry")}"]`);
+    const outcome = scenario.startsWith("model-handoff-success") ? "success" : "failure";
+    const reply = "The original request completed once.";
+    if (!summaryHistory) {
+      await setInput(originalText); enter();
+      await wait(() => sent.length === 1 && document.querySelector(".chat-stop"), "original operation accepted");
+      const runId = sent[0].idempotencyKey;
+      check(noRecoveryUi() && !document.body.innerText.includes(finalSummaryReason()), "preparing a summary adds no chat notice or control");
+      const ok = outcome === "success";
+      lookup = { status: "found", admissionAccepted: true, run: { status: ok ? "completed" : "failed", ...(ok ? {} : { errorCode: finalSummaryCode }) } };
+      const product = sessions[0].productContext!;
+      product.pendingRunId = null;
+      product.lastError = ok ? null : finalSummaryCode;
+      product.transfer.state = ok ? "accepted" : "failed";
+      product.transfer.errorCode = ok ? null : finalSummaryCode;
+      history = ok ? [{ role: "user", content: originalText, timestamp: Date.now() - 1000 },
+        { role: "assistant", content: reply, timestamp: Date.now() }] : summaryErrorHistory();
+      emit(ok ? { runId, state: "final", message: history[1] }
+        : { runId, agentId, backendId: backend, state: "error", errorCode: finalSummaryCode, errorMessage: finalSummaryReason() });
+    }
+    const expected = outcome === "success" ? reply : finalSummaryReason();
+    await wait(() => surface()?.innerText.includes(expected) && !document.querySelector(".chat-stop"), "only final outcome is shown");
+    check(noRecoveryUi() && !surface()?.innerText.includes("额度已用尽") && surface()!.innerText.split(expected).length === 2,
+      "no first failure, repeated final error or action controls in live chat or its history");
+    check(contextWrites === 0 && sent.length === (summaryHistory ? 0 : 1), "UI never initiates a summary retry or replays the message");
+    return { scenario, immersive, outcome, contextWrites, sends: sent.length };
+  }
+  if (codexComposer) {
+    if (unresolvedCodex) {
+      await wait(() => releaseCodexCatalog, "model list is being loaded");
+      await setInput("Keep this draft"); enter();
+      const notice = () => document.body.textContent?.includes(i18n.t("chat.selectCodexModelBeforeSend"));
+      await wait(notice, "cold Codex composer retains the draft and explains why");
+      check(input().value === "Keep this draft" && sent.length === 0, "no CLI fallback while the catalog loads");
+      releaseCodexCatalog!();
+      await wait(() => !notice(), "first notice dismissed");
+      enter();
+      await wait(notice, "catalog without a default still requires an explicit model");
+      check(input().value === "Keep this draft" && sent.length === 0, "no hidden CLI fallback or lost draft");
+      return { scenario, immersive, composerDraftPreserved: true, sends: sent.length };
+    }
+    const pill = () => Array.from(document.querySelectorAll("button")).find(button =>
+      button.getBoundingClientRect().height > 0 && button.textContent?.trim() === "GPT-6.1 Terra");
+    await wait(pill, "visible composer catalog default");
+    await setInput("Reply with OK"); enter();
+    await wait(() => sent.length > 0, "one submitted Codex chat operation");
+    check(sent.length === 1 && sent[0].expectedModel?.bindingId === bindingId && sent[0].expectedModel.model === "gpt-6.1-terra",
+      "the submitted chat operation must carry the ID of the displayed model");
+    return { scenario, immersive, displayedModel: pill()?.textContent, sentModel: sent[0].expectedModel.model };
+  }
   if (groupContinuation) {
     const buttons = () => document.querySelectorAll<HTMLButtonElement>(".chat-continuation-action");
     const composer = () => document.querySelector<HTMLElement>(`[aria-label="${i18n.t("groupChat.composer.message")}"]`);

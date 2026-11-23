@@ -131,7 +131,7 @@ async function generateOpenCodeModelOnly(host, input) {
           requested = modelRef(config?.model);
         }
         if (!requested) throw fail("MODEL_ONLY_SETTINGS_UNAVAILABLE");
-        const catalog = (await worker.client.request("GET", "/provider", undefined, { signal })).data;
+        const catalog = await worker.readConfiguredProviderCatalog(signal);
         const provider = catalog?.all?.find(item => item.id === requested.providerID);
         const model = provider?.models?.[requested.id];
         if (!catalog?.connected?.includes(requested.providerID) || !model) throw fail("RUNTIME_MODEL_UNAVAILABLE");

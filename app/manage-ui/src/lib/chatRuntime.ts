@@ -89,17 +89,34 @@ export function buildOpenClawAttachment(attachment: ChatAttachment): Record<stri
   };
 }
 
+export interface ComposerModelSelection { bindingId: string; model: string; modelProviderRef?: string }
+
+/** The pill and the outgoing operation must use the same catalog row, including an inherited default. */
+export function runtimeComposerChoice(data?: import("../types").SessionRuntimeModels, pending?: import("../types").SessionRuntimeModel) {
+  const selection = data?.selection;
+  const row = pending ?? data?.models.find(model => model.bindingId === selection?.bindingId
+    && model.modelProviderRef === selection.modelProviderRef && (selection.model ? model.id === selection.model : model.isDefault));
+  const model = row?.id ?? selection?.model ?? "";
+  const bindingId = row?.bindingId ?? selection?.bindingId;
+  const modelProviderRef = row ? row.modelProviderRef : selection?.modelProviderRef;
+  const expectedModel = (row?.runtime ?? selection?.runtime) === "codex" && model && bindingId
+    ? { bindingId, model, ...(modelProviderRef ? { modelProviderRef } : {}) } : undefined;
+  return { row, model, bindingId, modelProviderRef, expectedModel };
+}
+
 /** Build the shared chat.send params used by OpenClaw and the proxy-routed backends. */
 export function buildChatSendParams(
   sessionKey: string,
   message: string,
   idempotencyKey: string,
   attachments: readonly ChatAttachment[],
+  expectedModel?: ComposerModelSelection,
 ): Record<string, unknown> {
   return {
     sessionKey,
     message,
     idempotencyKey,
+    ...(expectedModel ? { expectedModel } : {}),
     ...(attachments.length ? { attachments: attachments.map(buildOpenClawAttachment) } : {}),
   };
 }

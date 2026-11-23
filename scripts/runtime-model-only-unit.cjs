@@ -3,12 +3,12 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const { runBoundedModelOnly, validateModelOnlyInput } = require("../app/agent-service/runtime-model-only");
 const { observeCryptoBroker, RuntimeTelemetry } = require("../app/agent-service/runtime-telemetry");
 const input = { prompt: "Summarize", model: null, operationId: "summary-operation" };
-test("the expanded model-only input budget is limited to proactive context", () => {
+test("every model-only purpose shares the 128 KiB input budget", () => {
   const large = { ...input, prompt: "a".repeat(128 * 1024 + 1) };
+  assert.doesNotThrow(() => validateModelOnlyInput({ ...input, prompt: "a".repeat(128 * 1024) }));
   assert.throws(() => validateModelOnlyInput(large), { code: "MODEL_ONLY_INVALID" });
-  assert.doesNotThrow(() => validateModelOnlyInput({ ...large, purpose: "proactive" }));
-  assert.throws(() => validateModelOnlyInput({ ...large, purpose: "proactive", prompt: "a".repeat(256 * 1024 + 1) }),
-    { code: "MODEL_ONLY_INVALID" });
+  // Proactive checks are ordinary Main-session turns and no longer get a larger model-only budget.
+  assert.throws(() => validateModelOnlyInput({ ...large, purpose: "proactive" }), { code: "MODEL_ONLY_INVALID" });
 });
 test("canceling a model-only task waits for child cleanup before returning capacity", async () => {
   const controller = new AbortController(); let cleaned = false, started;

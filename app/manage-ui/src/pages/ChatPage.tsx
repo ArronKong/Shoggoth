@@ -79,6 +79,7 @@ import { translateGatewayError, translateProductError } from "../lib/gatewayErro
 import { createExecApprovalController, isOpenClawExecApproval } from "../lib/openclawExecApprovals";
 import {
   buildChatSendParams,
+  runtimeComposerChoice, type ComposerModelSelection,
   nativeChatMedia,
   buildCompactParams,
   clearLiveTurnState,
@@ -302,6 +303,7 @@ interface SessionRow {
   agentId?: string;
   agentName?: string;
   updatedAt?: number;
+  runtime?: string;
   model?: string;
   modelProvider?: string;
   thinkingDefault?: string;
@@ -657,6 +659,7 @@ interface ChatMsg {
   responseMetadata?: ResponseMetadata;
   stopReason?: string;
   errorMessage?: string;
+  errorCode?: string;
   toolName?: string;
   isError?: boolean;
   images?: string[];
@@ -749,6 +752,7 @@ const CHAT_SEND_IDEMPOTENCY_SAMPLE = "00000000-0000-4000-8000-000000000000";
 const QUEUE_FLUSH_DELAY_MS = 400;
 // 待发队列条目（R357）：生成中回车的消息排队，回合终结后按 FIFO 链式补发。
 type QueuedMsg = { id: string; text: string; atts: ChatAttachment[];
+  expectedModel?: ComposerModelSelection;
   recovery?: { backendId: string; isSlash: boolean; displayText: string } };
 // First text part of a normalized message (user/system/assistant-text live there).
 function msgText(m: ChatMsg): string {
@@ -1302,6 +1306,7 @@ function normalize(raw: any): ChatMsg {
     : undefined;
   const base: ChatMsg = {
     role,
+    errorCode: typeof raw?.errorCode === "string" ? raw.errorCode : undefined,
     openclawPreambleIds: preambleIds.length ? preambleIds : undefined,
     openclawPreambleKey: preambleIds.length === 1 ? openClawPreambleKey(raw.__openclaw.runId, preambleIds[0]) : undefined,
     parts: [],
@@ -2965,7 +2970,7 @@ function ChatThreadView({
               </>
             ) : null}
             <ChatResponseMetadata metadata={metadata} fallbackModel={last.model} />
-            {!last.pending && last.automation !== "cron" && isErrorTurn(last) && retryErrorGroup && (
+            {!last.pending && last.automation !== "cron" && !last.errorCode?.startsWith("PRODUCT_COMPACTION_") && isErrorTurn(last) && retryErrorGroup && (
               <button
                 type="button"
                 className="chat-copybtn chat-retrybtn"
@@ -3732,7 +3737,8 @@ function ChatPageApp() {
   // composed message again with a fresh idempotencyKey and the gateway appends two
   // identical user turns. Reusing the key inside DUP_SEND_WINDOW_MS lets the gateway
   // collapse the duplicate (findTranscriptMessageByIdempotencyKey) into one.
-  const recentSendRef = useRef<Map<string, { text: string; idem: string; at: number }>>(new Map());
+  const recentSendRef = useRef<Map<string, { text: string; idem: string; at: number; modelKey?: string }>>(new Map());
+  const inFlightModelRef = useRef(new Map<string, string>());
   const markInFlight = useCallback((key: string, on: boolean) => {
     // Terminal observation ends the generation UI, while the persisted pending
     // record still blocks every send/queue path until its exact receipt settles.
@@ -3764,6 +3770,7 @@ function ChatPageApp() {
       // 于是界面对每次回车毫无反应。注意：reconnect 那条路径是直接清 inFlightRef、绕开
       // 这里的（见 ws onopen），所以「重连后重发」的折叠保护不受影响。
       recentSendRef.current.delete(key);
+      inFlightModelRef.current.delete(key);
       // 回合终结（final/error/aborted/send-reject 全路径收敛于此）→ 延迟补发该会话的
       // 待发队首。用户定案：无论回合怎么终结都链式续发。flush 自校验（活跃会话/不
       // inFlight/队列非空）。reconnect 直清 inFlightRef 不走这里——故意不自动补发
@@ -3875,6 +3882,17 @@ function ChatPageApp() {
     activeKey, usesRuntimeModelPicker,
     connected && (connectedBackends === null || connectedBackends.has(runtimeModelsBackend)), runtimeModelsEpoch);
   const runtimeModelsRef = useRef({ key: activeKey, data: runtimeModels.data });
+  const composerChoice = runtimeComposerChoice(runtimeModels.data, runtimeModels.pendingModel);
+  const requireComposerModel = (expectedModel: ComposerModelSelection | undefined) => {
+    const runtime = runtimeModels.pendingModel?.runtime ?? runtimeModels.data?.selection.runtime
+      ?? sessionsRef.current.find(row => row.key === activeKey)?.runtime;
+    if (runtime !== "codex" || expectedModel) return true;
+    const notice = { text: t("chat.selectCodexModelBeforeSend"), kind: "error" as const };
+    setToast(notice);
+    setTimeout(() => setToast(current => current === notice ? null : current), 3200);
+    void runtimeModels.refresh();
+    return false;
+  };
   runtimeModelsRef.current = { key: activeKey, data: runtimeModels.data };
   const refreshModelMenu = useCallback(() => {
     if (usesRuntimeModelPicker) void runtimeModels.refreshIfStale();
@@ -4005,9 +4023,10 @@ function ChatPageApp() {
       return runtimeModelsRef.current.key === key ? runtimeModelsRef.current.data?.capabilities : undefined;
     return capabilitiesForSession(key);
   };
-  const canSteerSession = (key: string, attachmentCount: number) => {
+  const canSteerSession = (key: string, attachmentCount: number, expected = composerChoice.expectedModel) => {
     if (!inFlightRef.current.has(key) || nativeStopsRef.current.has(key)
       || chatPromptAttentionOf(pendingPromptsRef.current.get(key) ?? [])) return false;
+    if ((expected || inFlightModelRef.current.has(key)) && inFlightModelRef.current.get(key) !== JSON.stringify(expected)) return false;
     return canSteerActiveChat(steeringCapabilitiesForSession(key), runStatusBySessionRef.current.get(key), attachmentCount);
   };
   // Reactive projection of pendingPromptsRef for the left agent list. The ref
@@ -5800,8 +5819,8 @@ function ChatPageApp() {
           // Store the RAW gateway error; render-time wraps it with errPrefix +
           // translateGatewayError so the bubble follows live language switches.
           if (sk) updateSessionMessages(sk, (prev) => [
-            ...settlePendingAssistant(prev, liveTimelinesRef.current.get(sk)?.steps),
-            { role: "system", parts: [{ type: "text", text: p.errorMessage || "" }], errPrefix: "chat.errorPrefix" },
+            ...settlePendingAssistant(prev, p.errorCode?.startsWith("PRODUCT_COMPACTION_") ? undefined : liveTimelinesRef.current.get(sk)?.steps),
+            { role: "system", parts: [{ type: "text", text: p.errorMessage || "" }], errorCode: p.errorCode, errPrefix: "chat.errorPrefix" },
           ]);
           if (isActive) {
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
@@ -6868,7 +6887,7 @@ function ChatPageApp() {
       ?? caps?.maxPayloadBytes;
   };
   const inspectChatSendPayload = (key: string, text: string, atts: readonly ChatAttachment[],
-    ) => {
+    expectedModel = composerChoice.expectedModel) => {
     const maxPromptBytes = capabilitiesForSession(key)?.maxPromptBytes;
     const promptBytes = new TextEncoder().encode(JSON.stringify(text)).byteLength;
     if (maxPromptBytes && promptBytes > maxPromptBytes) {
@@ -6877,7 +6896,7 @@ function ChatPageApp() {
     return gatewayRequestPayloadBudget(
       String(reqId.current),
       "chat.send",
-      buildChatSendParams(key, text, CHAT_SEND_IDEMPOTENCY_SAMPLE, atts),
+      buildChatSendParams(key, text, CHAT_SEND_IDEMPOTENCY_SAMPLE, atts, expectedModel),
       maxPayloadForSession(key),
     );
   };
@@ -6941,8 +6960,14 @@ function ChatPageApp() {
       setQueueTick(value => value + 1);
     };
     const originalBackend = backendOfSession(key);
+    const expectedModel = queued && !queued.recovery ? queued.expectedModel : composerChoice.expectedModel;
+    if (!requireComposerModel(expectedModel)) {
+      if (!queued) restoreSendDraft(key, text, atts);
+      return;
+    }
+    const modelKey = JSON.stringify(expectedModel);
     const trackedSend = shouldTrackChatSend(originalBackend);
-    const inputBudget = inspectChatSendPayload(key, text, atts);
+    const inputBudget = inspectChatSendPayload(key, text, atts, expectedModel);
     if (!inputBudget.allowed) {
       showPayloadLimit("chat.sendPayloadTooLarge", inputBudget.payloadBytes, inputBudget.maxPayload);
       return;
@@ -6957,8 +6982,8 @@ function ChatPageApp() {
     // still gets delivered. Attachment sends opt out (richer payload, own key).
     const nowTs = Date.now();
     const recent = atts.length ? undefined : recentSendRef.current.get(key);
-    if (recent && recent.text === text && nowTs - recent.at < DUP_SEND_WINDOW_MS) {
-      const recentParams = buildChatSendParams(key, text, recent.idem, atts);
+    if (recent && recent.text === text && recent.modelKey === modelKey && nowTs - recent.at < DUP_SEND_WINDOW_MS) {
+      const recentParams = buildChatSendParams(key, text, recent.idem, atts, expectedModel);
       const payloadBudget = gatewayRequestPayloadBudget(
         String(reqId.current),
         "chat.send",
@@ -7024,7 +7049,7 @@ function ChatPageApp() {
       }
     }
 
-    const params = buildChatSendParams(key, text, idem, atts);
+    const params = buildChatSendParams(key, text, idem, atts, expectedModel);
     const payloadBudget = gatewayRequestPayloadBudget(
       String(reqId.current),
       "chat.send",
@@ -7046,7 +7071,8 @@ function ChatPageApp() {
       return;
     }
     takeInput();
-    if (!atts.length) recentSendRef.current.set(key, { text, idem, at: nowTs });
+    if (modelKey) inFlightModelRef.current.set(key, modelKey);
+    if (!atts.length) recentSendRef.current.set(key, { text, idem, at: nowTs, modelKey });
 
     // Send straight into the active session, INCLUDING a ":main" tail. "main" is a
     // real, persistent session: the gateway canonicalizes it (resolveMainSessionKey)
@@ -7259,7 +7285,7 @@ function ChatPageApp() {
     const q = sendQueueRef.current.get(key) ?? [];
     const id = crypto.randomUUID();
     retainTelemetryOperation(telemetrySends, `queue:${id}`, startTelemetryOperation("chat_send", backendOfSession(key)));
-    q.push({ id, text, atts });
+    q.push({ id, text, atts, expectedModel: composerChoice.expectedModel });
     sendQueueRef.current.set(key, q);
     bumpQueue();
   };
@@ -7271,7 +7297,7 @@ function ChatPageApp() {
     if (!q?.length) return;
     const item = q[0]!;
     if (item.recovery && item.recovery.backendId !== backendOfSession(key)) return;
-    const payloadBudget = inspectChatSendPayload(key, item.text, item.atts);
+    const payloadBudget = inspectChatSendPayload(key, item.text, item.atts, item.expectedModel);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.queuedPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
       return;
@@ -7310,7 +7336,7 @@ function ChatPageApp() {
     bumpQueue();
   };
   const canSteerQueued = (key: string, item: QueuedMsg) => !item.recovery && !item.text.trimStart().startsWith("/")
-    && queueSendable(key) && sendController.canSend(key) && !verificationKeys.has(key) && canSteerSession(key, item.atts.length);
+    && queueSendable(key) && sendController.canSend(key) && !verificationKeys.has(key) && canSteerSession(key, item.atts.length, item.expectedModel);
   const steerQueued = (key: string, item: QueuedMsg) => {
     if (activeKeyRef.current !== key || !sendQueueRef.current.get(key)?.includes(item) || !canSteerQueued(key, item)) return;
     void sendSteeringMessage(key, item.text, () => removeQueued(item.id));
@@ -7980,6 +8006,7 @@ function ChatPageApp() {
       setTimeout(() => setToast(current => current === notice ? null : current), 2600);
       return;
     }
+    if (!requireComposerModel(composerChoice.expectedModel)) return;
     const shouldSteer = !isContinuation && canSteerSession(key, atts.length);
     const payloadBudget = shouldSteer
       ? inspectChatSteerPayload(key, outgoing)
@@ -9498,17 +9525,11 @@ function ChatPageApp() {
     [active?.model, activeCaps?.modelScope, selectableModels],
   );
   // 优先级：用户刚手动选的 > 最近回答的实际模型 > 会话配置模型 > 原生运行时默认模型。
-  const selectedRuntimeModel = runtimeModels.data?.models.find(model => model.bindingId === runtimeModels.data?.selection.bindingId
-    && model.modelProviderRef === runtimeModels.data.selection.modelProviderRef
-    && (runtimeModels.data.selection.model ? model.id === runtimeModels.data.selection.model : model.isDefault));
-  const displayedRuntimeModel = runtimeModels.pendingModel ?? selectedRuntimeModel;
   const displayModel = usesRuntimeModelPicker
-    ? displayedRuntimeModel?.id ?? runtimeModels.data?.selection.model ?? active?.model ?? ""
+    ? composerChoice.model
     : pickedModel ?? lastAssistantModel ?? active?.model ?? inheritedRuntimeDefault?.id ?? "";
   const displayModelProvider = active?.modelProvider ?? inheritedRuntimeDefault?.provider;
-  const displayBindingId = displayedRuntimeModel?.bindingId ?? runtimeModels.data?.selection.bindingId;
-  const displayModelProviderRef = displayedRuntimeModel
-    ? displayedRuntimeModel.modelProviderRef : runtimeModels.data?.selection.modelProviderRef;
+  const { row: displayedRuntimeModel, bindingId: displayBindingId, modelProviderRef: displayModelProviderRef } = composerChoice;
   // 新回答回来后让位给实际模型；切换会话时重置手动选择。
   useEffect(() => {
     setPickedModel(null);
@@ -10135,7 +10156,7 @@ function ChatPageApp() {
             errorText: m0.errPrefix ? t(m0.errPrefix, { msg: translated || t("chat.unknown") }) : translated,
             errorRaw: translated !== segText && segText ? segText : undefined,
             errorRepeat: m0.repeat,
-            onRetry: m0.automation === "cron" ? undefined : () => retryErrorGroup(g),
+            onRetry: m0.automation === "cron" || m0.errorCode?.startsWith("PRODUCT_COMPACTION_") ? undefined : () => retryErrorGroup(g),
             onCopy: segText ? () => copyText(segText) : undefined,
             onQuote: segText ? () => quoteGroup(g) : undefined,
             onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
@@ -10637,9 +10658,11 @@ function ChatPageApp() {
     () => agents.find((g) => g.agentId === activeAgentId)?.sessions ?? [],
     [agents, activeAgentId],
   );
+  const mainSessionKey = activeAgentSessions.find((s) => s.mainSession)?.key;
   // 会话切换器（普通 header 的 ChatSessionMenu + 沉浸模式的浮层）共用的一份行数据。
   // 时间口径与 agent 行一致：选中会话用线程底部可见的最后一条（含错误泡），其余按已学到
   // 的 preview/真实时间 —— 行、头部、菜单三处永不互相矛盾。
+  // 主会话排首位，其余按行上显示的时间倒序排列。
   const sessionMenuRows = useMemo(
     () =>
       activeAgentSessions.map((s) => {
@@ -10662,8 +10685,8 @@ function ChatPageApp() {
           ts: ts ?? 0,
           unread: showSessionUnread(s),
         };
-      }),
-    [activeAgentSessions, activeKey, activeRealPreview, activeRealTime, previewTimes, realTimes, showSessionUnread, t],
+      }).sort((a, b) => Number(b.key === mainSessionKey) - Number(a.key === mainSessionKey) || b.ts - a.ts),
+    [activeAgentSessions, mainSessionKey, activeKey, activeRealPreview, activeRealTime, previewTimes, realTimes, showSessionUnread, t],
   );
   // Missing session metadata means an unknown window. The list-level default
   // can be a generic 200k fallback or belong to another model/backend.
@@ -11390,10 +11413,11 @@ function ChatPageApp() {
                     <span className="chat-status__label">{t(activeRecoveryRequired ? "settings.serviceRecoveryRequired" : `chat.liveStatus.${activeHeaderStatus}`)}</span>
                   </span>
                 )}
-                {activeAgentSessions.length > 1 ? (
+                {activeAgentSessions.length > 1 || mainSessionKey ? (
                   <ChatSessionMenu
                     sessions={sessionMenuRows}
                     activeKey={activeKey || ""}
+                    mainSessionKey={mainSessionKey}
                     onSelect={openSession}
                   />
                 ) : (

@@ -34,7 +34,7 @@ async function main() {
   const scope = { profileId: "dsh-fixture", sessionId: "dsh-session-a" };
   fs.writeFileSync(path.join(workspace, "fixture.cjs"), `const fs=require('fs');fs.appendFileSync('count','1');console.log('password: ${nativeSecret}');console.log('Public receipt: receipt-17');`);
   let failure, noTool = false, followup = false, adapter, runtime, verified = false, expectInstructions = true;
-  let instructionChecks = 0, response;
+  let instructionChecks = 0;
   const provider = http.createServer(async (req, res) => {
     try {
       assert.equal(req.url, "/v1/chat/completions");
@@ -58,12 +58,10 @@ async function main() {
       res.writeHead(200, { "content-type": "text/event-stream" });
       const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
         model: "fixture", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-      send(done ? { role: "assistant", content: response ? response(body) : "Saved operation complete." }
+      send(done ? { role: "assistant", content: "Saved operation complete." }
         : { role: "assistant", tool_calls: [{ index: 0, id: "native-once", type: "function", function: { name: "bash",
           arguments: JSON.stringify({ command: `${JSON.stringify(process.execPath)} fixture.cjs`, description: "Run the local credential fixture once" }) } }] });
       send({}, done ? "stop" : "tool_calls");
-      if (response) res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
-        model: "fixture", choices: [], usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 } })}\n\n`);
       res.end("data: [DONE]\n\n");
     } catch (error) { failure = error; res.writeHead(500); res.end("fixture request rejected"); }
   });
@@ -127,12 +125,14 @@ async function main() {
     await turn(session.id, "No request may leave without a live scope.", "failed");
     assert.equal(requests.length, before); assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "1");
     assert(instructionChecks >= 5, "verify literal instructions on native requests, resumed turns and fallback");
-    const closure = await require("./helpers/proactive-native-closure.cjs").verifyProactiveNativeClosure({
-      root, adapter, runtime: "deepseek-harness", model, setResponse: value => { response = value; } });
+    const beforeReadiness = requests.length;
+    const readiness = await require("./helpers/proactive-native-closure.cjs").verifyProactiveRuntimeReadiness({
+      root, adapter, runtime: "deepseek-harness", model });
     if (failure) throw failure;
+    assert.equal(requests.length, beforeReadiness, "the proactive readiness check sends no model request");
     verified = true;
     console.log(JSON.stringify({ verified, modelRequests: requests.length, nativeExecutions: 1, restartResume: true, separateScopes: true, instructionChecks,
-      modelOnly: true, literalStableAndTurnInstructions: true, silentOriginalFallbackOnce: true, failureProviderCalls: 0, closure }));
+      modelOnly: true, literalStableAndTurnInstructions: true, silentOriginalFallbackOnce: true, failureProviderCalls: 0, readiness }));
   } finally {
     fs.writeFileSync(path.join(root, "synthetic-model-requests.json"), JSON.stringify(requests, null, 2), { mode: 0o600 });
     if (!verified) console.error(JSON.stringify({ retainedFailure: root, requests: requests.length, childError: runtime?.host.process?.stderr?.slice(-1800) }));

@@ -59,7 +59,7 @@ assert.equal(isRetryablePreTurnStageError(unavailableWorkspace), false, "a missi
 for (const code of ["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN",
   ...Object.keys(require("../app/core/chat-secret-contract").SECRET_MESSAGES),
   "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "RUNTIME_SESSION_BUSY", "RUNTIME_MODEL_UNAVAILABLE",
-  "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED", "RUNTIME_MODEL_SETTINGS_INVALID",
+  "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED", "RUNTIME_MODEL_SETTINGS_INVALID", "RUNTIME_MODEL_CATALOG_TOO_LARGE",
   "CODEX_ACCOUNT_PROTOCOL_INVALID", "CODEX_SCHEMA_ERROR", "RUNTIME_PROTOCOL_ERROR", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"]) {
   const cause = Object.assign(new Error("private"), { code });
   assert.equal(isRetryablePreTurnStageError(runtimeStageError("session_start_or_resume", cause)), false, code);

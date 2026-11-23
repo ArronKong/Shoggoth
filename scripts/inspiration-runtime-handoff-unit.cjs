@@ -66,6 +66,7 @@ for (const [from, to] of [["codex", "antigravity"], ["antigravity", "codex"]]) {
       const defaultBindingId = f.service.productStore.getAgentProfile(f.profile.id).defaultBindingId;
       await f.setModel(f.sessionKey, to);
       const input = { sessionKey: f.sessionKey, operationId: crypto.randomUUID(),
+        ...(to === "codex" ? { expectedModel: { bindingId: f.binding(to).id, model: models[to] } } : {}),
         prompt: "Continue in the selected runtime", createdAt: Date.now() };
       const ack = await f.ipc("chat.send", input);
       const run = await f.settledStart(ack.run.id);
@@ -81,12 +82,18 @@ for (const [from, to] of [["codex", "antigravity"], ["antigravity", "codex"]]) {
       await f.complete(run, "PRESERVED SWITCHED ANSWER");
       const replay = await f.ipc("chat.send", input);
       assert.equal(replay.run.id, run.id);
+      if (input.expectedModel) {
+        assert.deepEqual(f.service.inspirationStore.executionForRun(run.id).expectedModel, input.expectedModel);
+        await assert.rejects(f.ipc("chat.send", { ...input, expectedModel: { ...input.expectedModel, model: "different-model" } }),
+          { code: "INSPIRATION_OPERATION_CONFLICT" });
+      }
       assert.equal(f.transport.hosts.get(to).turnStartCalls, 1, "replaying the operation must not duplicate a turn");
       const events = f.service.transcriptStore.listEvents(f.profile.id, original.id);
       assert.ok(events.some(event => event.content.text === "PRESERVED INITIAL ANSWER"));
       assert.ok(events.some(event => event.content.text === "PRESERVED SWITCHED ANSWER"));
       await f.setModel(f.sessionKey, from);
-      const back = await f.ipc("chat.send", { ...input, operationId: crypto.randomUUID(), prompt: "Switch back" });
+      const back = await f.ipc("chat.send", { sessionKey: f.sessionKey, operationId: crypto.randomUUID(), prompt: "Switch back", createdAt: Date.now(),
+        ...(from === "codex" ? { expectedModel: { bindingId: f.binding(from).id, model: models[from] } } : {}) });
       const returned = await f.settledStart(back.run.id);
       assert.equal(returned.status, "running", returned.resultSummary || returned.errorCode);
       assert.equal(returned.runtimeSessionRef.runtime, from);

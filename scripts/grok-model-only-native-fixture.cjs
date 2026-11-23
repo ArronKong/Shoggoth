@@ -8,7 +8,7 @@ const { GrokBuildRuntimeAdapter } = require("../app/agent-service/grok-build-run
 const { NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
 const root = fs.mkdtempSync("/private/tmp/sg-grok-heartbeat-"), home = path.join(root, "home");
 const grokHome = path.join(home, ".grok"), requests = [], sockets = new Set(), events = [], urls = [];
-let providerError = null, pendingRequest = null, response;
+let providerError = null, pendingRequest = null;
 fs.mkdirSync(grokHome, { recursive: true, mode: 0o700 });
 const server = http.createServer(async (req, res) => {
   try {
@@ -23,9 +23,9 @@ const server = http.createServer(async (req, res) => {
     requests.push(body);
     assert.equal(req.url, "/v1/chat/completions"); assert.equal(body.model, "fixture-model");
     assert.equal((body.tools || []).length, 0, `tools exposed: ${(body.tools || []).map(tool => tool.function?.name || tool.type).join(",")}`);
-    assert.ok(requests.length <= (response ? 6 : 3), "no title, summary or additional model turns");
+    assert.ok(requests.length <= 3, "no title, summary or additional model turns");
     if (pendingRequest) { pendingRequest(); return; }
-    const text = response ? response(body) : JSON.stringify({ outcome: "silent", scratch: "Native Grok checked" });
+    const text = JSON.stringify({ outcome: "silent", scratch: "Native Grok checked" });
     const chunk = (delta, finish_reason = null) => ({ id: "fixture-response", object: "chat.completion.chunk",
       created: 1, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] });
     res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -81,13 +81,17 @@ let pool, diagnostic = "";
   assert.equal(providerError, null);
   assert.equal(requests.length, 3);
   pendingRequest = null;
-  const closure = await require("./helpers/proactive-native-closure.cjs").verifyProactiveNativeClosure({
-    root, adapter, runtime: "grok-build", model: "fixture", setResponse: value => { response = value; } });
+  assert.equal(fs.readFileSync(path.join(grokHome, "config.toml"), "utf8"), config, "model-only work never edits the account config");
+  const readiness = await require("./helpers/proactive-native-closure.cjs").verifyProactiveRuntimeReadiness({
+    root, adapter, runtime: "grok-build", model: "fixture" });
   assert.equal(providerError, null);
-  assert.equal(fs.readFileSync(path.join(grokHome, "config.toml"), "utf8"), config);
+  assert.equal(requests.length, 3, "the proactive readiness check sends no model request");
+  // The readiness host is an ordinary one on the account's own GROK_HOME. The
+  // CLI may append its own state there; the user's settings stay as written.
+  assert.ok(fs.readFileSync(path.join(grokHome, "config.toml"), "utf8").startsWith(config), "account settings preserved");
   console.log(JSON.stringify({ verified: true, runtimeVersion: "1.0.73", provider: "synthetic-loopback",
     actualProviderCalls: 0, modelRequests: requests.length, model: "fixture-model", nativeTools: 0,
-    totalTokensPerCompletedTurn: 20, defaultAndExplicitModel: true, cancellation: true, processStopped: true, closure }));
+    totalTokensPerCompletedTurn: 20, defaultAndExplicitModel: true, cancellation: true, processStopped: true, readiness }));
 })().catch(error => { console.error(JSON.stringify({ verified: false, code: error.code || error.message, message: error.message, stack: error.stack,
   providerError, urls, modelRequests: requests.map(body => ({ model: body.model, tools: body.tools?.length || 0,
     input: JSON.stringify(body.input || body.messages)?.slice(0, 400) })), events, diagnostic,

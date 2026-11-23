@@ -32,8 +32,10 @@ const provider = http.createServer((req, res) => {
       activeCase.providerRequests = (activeCase.providerRequests || 0) + 1;
       activeCase.modelTools = tools.map(tool => tool.name);
       if (activeCase.proactive) {
-        assert.ok(tools.every(tool => ["request_user_input", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"].includes(tool.name)
-          || tool.name?.endsWith("proactive_respond")), "Proactive model must have no shell, file, browser or other product tools: " + JSON.stringify(tools.map(tool => tool.name)));
+        // A check is an ordinary Main-session turn with Main's own tools; chat
+        // UI tools and notification_send are refused when called.
+        assert.ok(tools.some(tool => tool.name?.endsWith("proactive_respond")),
+          "Proactive check must offer proactive_respond: " + JSON.stringify(tools.map(tool => tool.name)));
       }
       if (!activeCase.toolSent) {
         const textForRole = role => body.input.filter(row => row.role === role)
@@ -56,13 +58,10 @@ const provider = http.createServer((req, res) => {
             assert.ok(snapshot.notes.some(note => note.title === "本轮新增的未归档便签"));
             activeCase.checkedNotes = snapshot.checked;
           }
-          const run = service.workDispatcher.listRuns({ source: "proactive" }).find(row => row.status === "running");
-          const snapshot = service.contextCompiler.snapshotStore.get(run.profileId, run.contextSnapshotId);
-          const main = snapshot.blocks.find(block => block.id === "proactive-conversation");
-          assert.ok(main, "The check receives verified main-conversation context");
-          assert.ok(user.includes(main.content));
-          assert.match(main.content, /Synthetic transport acceptance ask/u);
-          assert.doesNotMatch(main.content, /Synthetic transport acceptance full/u);
+          // The check runs on Main's own native thread, so Main's earlier turn
+          // reaches the model and another session's turn does not.
+          assert.match(user, /Synthetic transport acceptance ask/u, "The check continues the main conversation");
+          assert.doesNotMatch(user, /Synthetic transport acceptance full/u);
         } else {
           assert.ok(developer.includes(activeCase.soul), `Full SOUL.md must reach the model in ${activeCase.mode} chat`);
           assert.ok(developer.includes(activeCase.identity), `Full IDENTITY.md must reach the model in ${activeCase.mode} chat`);
@@ -98,6 +97,9 @@ const provider = http.createServer((req, res) => {
   });
 });
 const id = () => crypto.randomUUID();
+// One call can bind twice: after the fixture clock jumps past the MCP session
+// lifetime, the helper refreshes its session and rebinds the same call.
+const toolCalls = () => new Set(bindings.map(item => item.callId)).size;
 async function until(predicate) {
   const deadline = Date.now() + 45000;
   while (Date.now() < deadline) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 25)); }
@@ -106,6 +108,9 @@ async function until(predicate) {
 (async () => {
   await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
   const binary = resolveCodexRuntimeLayout({ repoRoot: process.env.SHOGGOTH_FIXTURE_RUNTIME_ROOT || repo }).runtimePath;
+  // macOS assesses a freshly cloned binary on its first run (about 12 s here),
+  // longer than the Host's 5-second version probe. Run it once beforehand.
+  require("node:child_process").execFileSync(binary, ["--version"], { timeout: 120_000, stdio: "ignore" });
   const parentEnv = { HOME: root, PATH: process.env.PATH, TMPDIR: root, NO_PROXY: "127.0.0.1,localhost",
     HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9", ALL_PROXY: "http://127.0.0.1:9" };
   pool = new CodexRuntimePool({ paths, parentEnv,
@@ -125,7 +130,8 @@ async function until(predicate) {
             const end = buffered.indexOf("\n"); if (end < 0) break;
             const line = buffered.slice(0, end); buffered = buffered.slice(end + 1);
             try { const request = JSON.parse(line); if (request.params?._meta?.["shoggoth/runtime-call-binding"]) bindings.push({
-              threadId: request.params.threadId, turnId: request.params.turnId }); } catch {}
+              threadId: request.params.threadId, turnId: request.params.turnId,
+              callId: request.params._meta["shoggoth/runtime-call-binding"].callId }); } catch {}
           } }); return child;
         } });
       for (const method of ["threadStart", "threadResume", "turnStart"]) {
@@ -191,9 +197,17 @@ async function until(predicate) {
     const calls = starts.filter(item => item.mode === mode);
     assert.ok(calls.every(item => item.approvalPolicy === "on-request"));
     assert.ok(calls.some(item => item.method !== "turnStart" && item.sandbox === (mode.startsWith("full") ? "danger-full-access" : "workspace-write")));
-    cases.push({ mode, bindingForwarded: bindings.length === cases.length + 1, toolSucceeded: true, fullSoul: true, fullIdentity: true, fullUser: true });
+    cases.push({ mode, bindingForwarded: toolCalls() === cases.length + 1, toolSucceeded: true, fullSoul: true, fullIdentity: true, fullUser: true });
   }
   const mainHistoryIds = new Set(service.transcriptStore.listEvents(profile.id, main.id).map(item => item.id));
+  // Main keeps each check's trigger for provenance only; that record is never
+  // displayed, recalled or replayed. Public history gains just the notices.
+  const newMainEvents = () => service.transcriptStore.listEvents(profile.id, main.id)
+    .filter(item => !mainHistoryIds.has(item.id) && item.content?.transcriptType !== "proactive.trigger");
+  const visibleMain = async () => JSON.stringify((await ipc("chat.history", { sessionKey: mainKey, cursor: null, limit: 50 })).messages);
+  const replyCount = text => text.match(/Fixture complete/gu)?.length ?? 0;
+  const mainRepliesBefore = replyCount(await visibleMain());
+  assert.ok(mainRepliesBefore > 0, "Main's own chat reply is visible before the checks");
   activeCase = { mode: "SparkNotes", proactive: true, toolSent: false };
   service.inspirationStore.create({ operationId: id(), body: "可回顾的灵感种子" });
   clock.value += 2 * DAY_MS;
@@ -205,13 +219,16 @@ async function until(predicate) {
   const result = await service.proactiveService.check(occurrence);
   assert.equal(result.state, "published", JSON.stringify(result));
   assert.ok(activeCase.output.includes('accepted')); assert.ok(!activeCase.output.includes("mcp_session_invalid"));
-  assert.equal(bindings.length, 5); assert.ok(bindings.every(item => item.threadId && item.turnId));
+  assert.equal(toolCalls(), 5); assert.ok(bindings.every(item => item.threadId && item.turnId));
   const notice = service.proactiveStore.noticeForOccurrence(occurrence.id);
   assert.equal(notice.title, "SparkNotes"); assert.equal(notice.items[0].group, "seed");
   assert.equal(notice.sessionKey, mainKey);
-  const history = service.transcriptStore.listEvents(profile.id, main.id).filter(item => !mainHistoryIds.has(item.id));
+  const history = newMainEvents();
   assert.deepEqual(history.map(item => item.kind), ["assistant"]);
   assert.doesNotMatch(JSON.stringify(history), /SYSTEM-INITIATED CHECK/u);
+  const visibleAfterReview = await visibleMain();
+  assert.doesNotMatch(visibleAfterReview, /SYSTEM-INITIATED CHECK/u);
+  assert.equal(replyCount(visibleAfterReview), mainRepliesBefore, "the check's own reply stays out of Main's visible history");
   const event = history.find(item => item.content?.proactiveNotice?.id === notice.id);
   assert.ok(event.content.text.includes("#/inspirations?id="));
   const dailyActivity = (await ipc("proactive.notice.activity", { id: notice.id, sessionKey: mainKey })).activity;
@@ -248,11 +265,14 @@ async function until(predicate) {
   assert.ok(activity.messages.some(message => message.content[0].type === "toolResult"));
   assert.doesNotMatch(JSON.stringify(activity), /SYSTEM-INITIATED CHECK|Verified native heartbeat|本轮新增的未归档便签/u);
   await assert.rejects(() => ipc("proactive.notice.activity", { ...activityParams, sessionKey: fullSession.sessionKey }), { code: "PROACTIVE_NOT_FOUND" });
-  const newHistory = service.transcriptStore.listEvents(profile.id, main.id).filter(item => !mainHistoryIds.has(item.id));
+  const newHistory = newMainEvents();
   assert.deepEqual(newHistory.map(item => item.content?.proactiveNotice?.kind), ["inspiration", "heartbeat"]);
   assert.doesNotMatch(JSON.stringify(newHistory), /SYSTEM-INITIATED CHECK|Verified native heartbeat|Fixture complete/u);
+  const visibleAfterHeartbeat = await visibleMain();
+  assert.doesNotMatch(visibleAfterHeartbeat, /SYSTEM-INITIATED CHECK|Verified native heartbeat/u);
+  assert.equal(replyCount(visibleAfterHeartbeat), mainRepliesBefore, "check replies stay out of Main's visible history");
   assert.equal(service.proactiveStore.heartbeatScratch(profile.id).content, "Verified native heartbeat.");
-  assert.equal(bindings.length, 6);
+  assert.equal(toolCalls(), 6);
   cases.push({ mode: "HEARTBEAT", schedulerTriggered: true, bindingForwarded: true, toolSucceeded: true,
     notesChecked: activity.inspiration.checked, trajectorySteps: activity.messages.length, noticePublished: true, scratchPersisted: true });
   assert.ok(cases.every(item => item.bindingForwarded));

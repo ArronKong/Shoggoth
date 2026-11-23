@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import "../i18n/chatContextResources";
 import { useState } from "react";
 import type { RuntimeContextCapabilities, RuntimeContextUsage, ProductContextState } from "../types";
 import styles from "./ChatContextUsage.module.css";
@@ -45,7 +46,7 @@ export default function ChatContextUsage({ usage, capabilities, product, busy, o
     {product && <span className={styles.quality} title={t("chat.productContextHint", {
       runtime: product.summaryRuntime || "—", model: product.summaryModel || t("chat.contextDefaultModel"), seq: product.coveredThroughSeq })
       + " " + t("chat.contextBudgetHint", { trigger: number(product.budget.triggerTokens), retained: number(product.budget.retainedTokens) })
-      + (failure ? " " + failure + " " + t("chat.productContextRetryHint", { runtime: product.summaryRuntime || "—" }) : "")}>
+      + (failure ? " " + failure : "")}>
       {product.pendingRunId ? t("chat.productContextPending") : failure || t(`chat.productContextAutomatic.${product.automatic}`)}</span>}
     {compact && <button type="button" className={styles.compact} disabled={busy || pending || !!product?.pendingRunId}
       onClick={() => { setPending(true); Promise.resolve().then(onCompact).catch(() => {}).finally(() => setPending(false)); }}

@@ -949,7 +949,9 @@ class AgentBackend {
    *        Stages describe observed startup work, never a predicted completion time.
    * @param {{ attachments?: Array<{type: string, mimeType?: string, fileName?: string,
    *          content?: string, source?: {type: string, media_type?: string, data?: string}}>,
+   *          expectedModel?: {bindingId: string, model: string, modelProviderRef?: string},
    *          inputProvenance?: {kind: "inter_session", sourceTool: string} }} [opts]
+   *        A native chat carrying a composer model must execute that selection or report a conflict.
    *        attachments use the chat.send wire shape (top-level content in
    *        OpenClaw 2026.8.1; legacy source is accepted by compatible backends); a backend
    *        that can't deliver them must surface an error instead of dropping. Federated sends

@@ -511,9 +511,22 @@ class OpenCodeRuntimeHost {
     for (const [turnId, owner] of live || []) if (owner === this) live.delete(turnId);
   }
 
-  async authenticationState() {
+  async readConfiguredProviderCatalog(signal) {
     this.#assertReady();
-    const provider = (await this.client.request("GET", "/provider")).data;
+    if (!this.protocolFeatures?.configuredProviders) {
+      return (await this.client.request("GET", "/provider", undefined, { signal })).data;
+    }
+    // V1 config.providers contains only active providers, including free ones.
+    // The global provider.list additionally expands every disconnected model.
+    const { data } = await this.client.request("GET", "/config/providers", undefined, { signal });
+    if (!Array.isArray(data?.providers) || data.providers.some(provider => typeof provider?.id !== "string")) {
+      throw error("RUNTIME_MODEL_CATALOG_INVALID", "OpenCode configured provider catalog is invalid");
+    }
+    return { all: data.providers, connected: data.providers.map(provider => provider.id), default: data.default };
+  }
+
+  async authenticationState() {
+    const provider = await this.readConfiguredProviderCatalog();
     if (!Array.isArray(provider?.connected) || provider.connected.some(id => typeof id !== "string")) {
       throw error("OPENCODE_PROTOCOL_UNSUPPORTED", "OpenCode provider status protocol is unavailable");
     }
@@ -529,7 +542,7 @@ class OpenCodeRuntimeHost {
   async modelsList(input = {}) {
     this.#assertReady();
     const [result, configuration] = await Promise.all([
-      this.client.request("GET", "/provider").then(response => response.data),
+      this.readConfiguredProviderCatalog(),
       this.client.request("GET", "/config").then(response => response.data),
     ]);
     if (!Array.isArray(result?.all) || !Array.isArray(result.connected)) {
@@ -650,7 +663,7 @@ class OpenCodeRuntimeHost {
   async #assertModelAvailable(value) {
     const reference = modelRef(value);
     if (!reference) return;
-    const provider = (await this.client.request("GET", "/provider")).data;
+    const provider = await this.readConfiguredProviderCatalog();
     const entry = Array.isArray(provider?.all) ? provider.all.find(item => item?.id === reference.providerID) : null;
     if (!Array.isArray(provider?.connected) || !provider.connected.includes(reference.providerID)
       || !entry || !Object.hasOwn(entry.models || {}, reference.id)) {
@@ -1652,7 +1665,8 @@ class OpenCodeRuntimeHost {
         const summarize = doc.data.paths["/session/{sessionID}/summarize"]?.post;
         this.protocolFeatures = Object.freeze({ nativeCompact: !!summarize
           && typeof summarize === "object" && !Array.isArray(summarize),
-        sessionEvents: Boolean(doc.data.paths["/event"]?.get) });
+        sessionEvents: Boolean(doc.data.paths["/event"]?.get),
+        configuredProviders: Boolean(doc.data.paths["/config/providers"]?.get) });
         this.effectivePermissionsVerified = true;
         this.client = client;
         return;

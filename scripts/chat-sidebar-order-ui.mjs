@@ -49,6 +49,7 @@ try {
       try {
         const results = [];
         for (const test of scenario ? scenario.split(",") : ["session", "restored", "mixed", "unread", "unread-running", "unread-baseline", "background-approval",
+          "native-session-menu", "native-session-menu-immersive",
           "cron-results-openclaw", "cron-results-hermes", "cron-results-shoggoth",
           "cron-results-openclaw-immersive", "cron-results-hermes-immersive", "cron-results-shoggoth-immersive",
           "sending-openclaw", "sending-hermes", "sending-shoggoth", "sending-shoggoth-main", "sending-shoggoth-main-immersive",
