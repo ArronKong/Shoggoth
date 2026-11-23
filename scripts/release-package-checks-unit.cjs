@@ -72,6 +72,52 @@ const writeJson = (file, value) => {
     await asar.createPackage(staging, path.join(completeResources, "app.asar"));
     assert.deepEqual(checkPackagedDependencies(path.join(scratch, "Complete.app"), { repo, arch: "arm64" }), []);
 
+    const sdk = "@anthropic-ai/claude-agent-sdk";
+    const sdkVersion = "0.3.329";
+    const sdkRepo = path.join(scratch, "sdk-repo");
+    const cliPackages = [`${sdk}-darwin-arm64`, `${sdk}-darwin-x64`];
+    const lockedPackages = {
+      "": { dependencies: { [sdk]: sdkVersion, consumer: "1.0.0" } },
+      [`node_modules/${sdk}`]: {
+        version: sdkVersion,
+        peerDependencies: { "@anthropic-ai/sdk": "1.0.0" },
+        optionalDependencies: Object.fromEntries(cliPackages.map(name => [name, sdkVersion])),
+      },
+      "node_modules/@anthropic-ai/sdk": {
+        version: "1.0.0", peer: true, dependencies: { shared: "1.0.0", "peer-leaf": "1.0.0" },
+      },
+      "node_modules/consumer": { version: "1.0.0", dependencies: { shared: "1.0.0" } },
+      "node_modules/shared": { version: "1.0.0" },
+      "node_modules/peer-leaf": { version: "1.0.0" },
+    };
+    for (const [index, arch] of ["arm64", "x64"].entries()) {
+      lockedPackages[`node_modules/${cliPackages[index]}`] = {
+        version: sdkVersion, optional: true, os: ["darwin"], cpu: [arch],
+      };
+    }
+    writeJson(path.join(sdkRepo, "package-lock.json"), { packages: lockedPackages });
+    const sdkStaging = path.join(scratch, "sdk-staging");
+    writeJson(path.join(sdkStaging, "node_modules", sdk, "package.json"), { version: sdkVersion });
+    writeJson(path.join(sdkStaging, "node_modules/consumer/package.json"), { version: "1.0.0" });
+    const missingSharedApp = path.join(scratch, "MissingShared.app");
+    const missingSharedResources = path.join(missingSharedApp, "Contents/Resources");
+    await asar.createPackage(sdkStaging, path.join(missingSharedResources, "app.asar"));
+    assert.deepEqual(checkPackagedDependencies(missingSharedApp, { repo: sdkRepo, arch: "arm64" }),
+      ["shared@1.0.0 (node_modules/shared) is missing from the App"]);
+    const sdkApp = path.join(scratch, "ClaudeSdk.app");
+    const sdkResources = path.join(sdkApp, "Contents/Resources");
+    writeJson(path.join(sdkStaging, "node_modules/shared/package.json"), { version: "1.0.0" });
+    await asar.createPackage(sdkStaging, path.join(sdkResources, "app.asar"));
+    for (const arch of ["arm64", "x64"]) {
+      assert.deepEqual(checkPackagedDependencies(sdkApp, { repo: sdkRepo, arch }), []);
+    }
+    const leakedCli = cliPackages[1];
+    const unpacked = path.join(sdkResources, "app.asar.unpacked/node_modules");
+    writeJson(path.join(unpacked, leakedCli, "package.json"), { version: sdkVersion });
+    writeJson(path.join(unpacked, "peer-leaf/package.json"), { version: "1.0.0" });
+    assert.deepEqual(checkPackagedDependencies(sdkApp, { repo: sdkRepo, arch: "arm64" }),
+      [`${leakedCli}@${sdkVersion} must be excluded from the App`, "peer-leaf@1.0.0 must be excluded from the App"]);
+
     // The former sidecar gate now proves retired resources cannot re-enter a build.
     const inputs = path.join(scratch, "inputs");
     fs.mkdirSync(path.join(inputs,"schemas"),{recursive:true});

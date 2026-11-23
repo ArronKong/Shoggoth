@@ -8,6 +8,7 @@
 // either can leave an App that fails at runtime.
 const fs = require("node:fs");
 const path = require("node:path");
+const { excludedClaudeSdkPaths, isClaudeSdkCliPackage } = require("./claude-sdk-distribution.cjs");
 
 const REPO = path.resolve(__dirname, "..");
 const NODE_MODULES = "node_modules/";
@@ -22,14 +23,18 @@ function allows(list, value) {
   return !list.includes(`!${value}`) && (positive.length === 0 || positive.includes(value));
 }
 
+function packageName(key) {
+  return key.slice(key.lastIndexOf(NODE_MODULES) + NODE_MODULES.length);
+}
+
 /** Production packages for one platform/arch; other platforms' optional packages are skipped. */
-function productionPackages(repo, { platform = "darwin", arch }) {
-  return Object.entries(lockPackages(repo))
+function productionPackages(repo, { platform = "darwin", arch }, packages = lockPackages(repo)) {
+  return Object.entries(packages)
     .filter(([key, entry]) => key.startsWith(NODE_MODULES) && !entry.dev && !entry.devOptional
       && (!entry.optional || (allows(entry.os, platform) && allows(entry.cpu, arch))))
     .map(([key, entry]) => ({
       key,
-      name: key.slice(key.lastIndexOf(NODE_MODULES) + NODE_MODULES.length),
+      name: packageName(key),
       version: entry.version,
       optional: Boolean(entry.optional),
     }));
@@ -94,12 +99,21 @@ function packagedVersions(appPath) {
   return found;
 }
 
-/** afterPack: every production package for the target arch is in the App at its locked version. */
+/** afterPack: check the distribution closure at locked versions. */
 function checkPackagedDependencies(appPath, { repo = REPO, arch }) {
+  const packages = lockPackages(repo);
+  const excluded = excludedClaudeSdkPaths(packages);
+  const required = productionPackages(repo, { arch }, packages).filter(pkg => !excluded.has(pkg.key));
+  const requiredVersions = new Set(required.map(pkg => `${pkg.name}@${pkg.version}`));
+  const excludedVersions = new Set([...excluded].map(key => `${packageName(key)}@${packages[key].version}`));
   const found = packagedVersions(appPath);
-  return productionPackages(repo, { arch })
+  const missing = required
     .filter((pkg) => !found.has(`${pkg.name}@${pkg.version}`))
     .map((pkg) => `${pkg.name}@${pkg.version} (${pkg.key}) is missing from the App`);
+  const unexpected = [...found]
+    .filter(id => isClaudeSdkCliPackage(id) || (excludedVersions.has(id) && !requiredVersions.has(id)))
+    .map(id => `${id} must be excluded from the App`);
+  return [...missing, ...unexpected];
 }
 
 /** Preflight: repository content the App ships passes the release gates. */

@@ -370,9 +370,7 @@
     },
     {
       "names": [
-        "@anthropic-ai/claude-agent-sdk",
-        "@anthropic-ai/claude-agent-sdk-darwin-arm64",
-        "@anthropic-ai/claude-agent-sdk-darwin-x64"
+        "@anthropic-ai/claude-agent-sdk"
       ],
       "version": "0.3.329",
       "licenseFiles": [

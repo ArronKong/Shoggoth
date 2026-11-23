@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.374",
+      "version": "0.8.375",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.374",
-      "purl": "pkg:generic/shoggoth@0.8.374",
+      "bom-ref": "pkg:generic/shoggoth@0.8.375",
+      "purl": "pkg:generic/shoggoth@0.8.375",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -187,7 +187,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -217,7 +217,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -5061,7 +5061,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -6321,7 +6321,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -6895,7 +6895,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -7829,7 +7829,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -7889,7 +7889,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -7919,7 +7919,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -8249,7 +8249,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -8309,7 +8309,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -8699,7 +8699,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -10259,7 +10259,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -11219,7 +11219,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -15177,7 +15177,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -15863,7 +15863,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.374",
+      "ref": "pkg:generic/shoggoth@0.8.375",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
