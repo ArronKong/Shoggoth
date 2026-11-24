@@ -140,3 +140,38 @@ test("clearing facts retains the bound on unfinished discovery", async () => {
   finish(facts);
   assert.equal((await reading).installed, "unknown");
 });
+
+test("runtime support reads catalogs beyond 256 models and stops on duplicate cursors", async () => {
+  const all = Array.from({ length: 600 }, (_, index) => ({
+    model: `provider/model-${index}`,
+    isDefault: index === 0,
+    contextWindow: 128_000 + index,
+  }));
+  const host = {
+    authenticationState: async () => ({ authenticated: true }),
+    modelsList: async ({ cursor, limit }) => {
+      const offset = cursor === null ? 0 : Number(cursor);
+      const slice = all.slice(offset, offset + limit);
+      const next = offset + slice.length;
+      return { data: slice, nextCursor: next < all.length ? String(next) : null };
+    },
+  };
+  const profile = { permissionPolicy: requirements.permissionPolicy };
+  const cache = createRuntimeSupportFacts({ runtimeManager: { acquire: async () => host } });
+  const observed = await cache.read(binding, profile);
+  assert.equal(observed.models.length, 600);
+  assert.equal(observed.modelWindows["provider/model-599"], 128_599);
+  assert.equal(cache.contextWindow(binding, profile, "provider/model-599"), 128_599);
+
+  let stuckCalls = 0;
+  const stuckHost = {
+    authenticationState: async () => ({ authenticated: true }),
+    modelsList: async () => {
+      stuckCalls += 1;
+      return { data: [{ model: "provider/stuck" }], nextCursor: "same-cursor" };
+    },
+  };
+  const stuck = createRuntimeSupportFacts({ runtimeManager: { acquire: async () => stuckHost } });
+  await stuck.read(binding, profile);
+  assert.equal(stuckCalls, 2);
+});

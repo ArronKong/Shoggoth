@@ -27,6 +27,7 @@ const {
   resolveGrokBuildExecutable,
 } = require("./grok-build-runtime-paths");
 const { validateRegisteredSecrets } = require("./codex-rpc-safety");
+const { effortId } = require("./model-reasoning-catalog");
 const { runtimeBinding, validRuntimeProfileId } = require("./runtime-adapter");
 const {
   normalizeRuntimeCommands,
@@ -199,6 +200,7 @@ function inputFingerprint(input, attachments, images) {
   fields.push(attachments, images);
   if (input.turnDeveloperInstructions != null) fields.push(
     require("./native-instruction-delivery").turnInstructionFingerprint(input));
+  if (input.thinkingLevel != null) fields.push({ thinkingLevel: input.thinkingLevel });
   return crypto.createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 }
 
@@ -368,6 +370,83 @@ function validateMcpServer(value, fileSystem = fs) {
   });
 }
 
+const EFFORT_ORDER = new Map([
+  "off", "none", "minimal", "low", "medium", "high", "xhigh", "extra_high", "max", "ultra",
+].map((id, index) => [id, index]));
+
+const EMPTY_MODEL_CAPABILITIES = Object.freeze({
+  thinkingOptions: Object.freeze([]),
+  thinkingDefault: null,
+  fastTier: null,
+});
+
+function sortEffortOptions(values) {
+  return [...values].sort((left, right) => {
+    const leftRank = EFFORT_ORDER.get(left);
+    const rightRank = EFFORT_ORDER.get(right);
+    if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
+    if (leftRank !== undefined) return -1;
+    if (rightRank !== undefined) return 1;
+    return 0;
+  });
+}
+
+function modelCapabilitiesFromMeta(meta) {
+  if (!plain(meta) || meta.supportsReasoningEffort === false || !Array.isArray(meta.reasoningEfforts)) {
+    return EMPTY_MODEL_CAPABILITIES;
+  }
+  const seen = new Set();
+  const options = [];
+  let explicitDefault = null;
+  for (const entry of meta.reasoningEfforts) {
+    const id = plain(entry) ? (entry.value ?? entry.id) : entry;
+    if (!effortId(id) || seen.has(id)) continue;
+    seen.add(id);
+    options.push(id);
+    if (plain(entry) && entry.default === true && explicitDefault === null) explicitDefault = id;
+    if (options.length >= 16) break;
+  }
+  if (options.length === 0) return EMPTY_MODEL_CAPABILITIES;
+  const sorted = Object.freeze(sortEffortOptions(options));
+  const fallbackDefault = effortId(meta.reasoningEffort) && seen.has(meta.reasoningEffort)
+    ? meta.reasoningEffort : null;
+  return Object.freeze({
+    thinkingOptions: sorted,
+    thinkingDefault: explicitDefault ?? fallbackDefault,
+    fastTier: null,
+  });
+}
+
+function thinkingConfigFromOptions(configOptions) {
+  if (!Array.isArray(configOptions)) return null;
+  const option = configOptions.find((entry) => plain(entry)
+    && (entry.id === "reasoning_effort" || entry.category === "thought_level")
+    && safeString(entry.id, 128) && Array.isArray(entry.options));
+  if (!option) return null;
+  const seen = new Set();
+  const options = [];
+  for (const entry of option.options) {
+    const value = plain(entry) ? entry.value : null;
+    if (!effortId(value) || seen.has(value)) continue;
+    seen.add(value);
+    options.push(value);
+    if (options.length >= 16) break;
+  }
+  const currentValue = effortId(option.currentValue) && seen.has(option.currentValue)
+    ? option.currentValue : null;
+  return Object.freeze({
+    configId: option.id,
+    currentValue,
+    options: Object.freeze(sortEffortOptions(options)),
+  });
+}
+
+function validateThinkingLevel(value) {
+  if (value === undefined || value === null) return value;
+  if (!effortId(value)) throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "Grok Build thinking level is invalid");
+  return value;
+}
+
 function modelCatalogFromInitialize(response) {
   const state = response?._meta?.modelState;
   if (!plain(state) || !Array.isArray(state.availableModels)) return Object.freeze({ current: null, models: [] });
@@ -380,8 +459,9 @@ function modelCatalogFromInitialize(response) {
     const description = typeof item.description === "string" && item.description.isWellFormed()
       && !item.description.includes("\0") && Buffer.byteLength(item.description, "utf8") <= 4096
       ? item.description : "";
+    const capabilities = modelCapabilitiesFromMeta(item?._meta);
     seen.add(model);
-    models.push(Object.freeze({ model, displayName, description }));
+    models.push(Object.freeze({ model, displayName, description, capabilities }));
   }
   const current = safeString(state.currentModelId, 512) && seen.has(state.currentModelId)
     ? state.currentModelId : null;
@@ -1333,6 +1413,77 @@ class GrokBuildRuntimeHost {
     return model;
   }
 
+  _rememberSessionConfigOptions(sessionId, configOptions) {
+    if (!Array.isArray(configOptions)) return;
+    const config = this.sessionConfigs.get(sessionId) || {};
+    const thought = thinkingConfigFromOptions(configOptions);
+    const modelOption = configOptions.find((entry) => plain(entry)
+      && (entry.id === "model" || entry.category === "model") && safeString(entry.currentValue, 512));
+    this.sessionConfigs.set(sessionId, {
+      ...config,
+      ...(modelOption ? { currentModel: modelOption.currentValue } : {}),
+      thinkingConfigId: thought?.configId ?? config.thinkingConfigId ?? null,
+      currentThinkingLevel: thought ? thought.currentValue : null,
+      thinkingOptions: thought ? thought.options : [],
+    });
+  }
+
+  async _applySessionThinking(sessionId, { model, thinkingLevel }) {
+    const config = this.sessionConfigs.get(sessionId) || {};
+    let activeModel = config.currentModel ?? config.model ?? this.modelCatalog.current ?? null;
+    if (model !== undefined && model !== null && model !== activeModel) {
+      const modelRequest = this._startAuthBoundRequest("session/set_model", {
+        sessionId,
+        modelId: model,
+      }, { timeoutMs: this.requestTimeoutMs });
+      await modelRequest.promise;
+      this._markRuntimeAuthenticated(modelRequest.authFingerprint);
+      activeModel = model;
+      this.sessionConfigs.set(sessionId, {
+        ...(this.sessionConfigs.get(sessionId) || {}),
+        model,
+        currentModel: model,
+        currentThinkingLevel: null,
+        thinkingOptions: null,
+      });
+    }
+    if (thinkingLevel === undefined) return;
+    const latest = this.sessionConfigs.get(sessionId) || {};
+    const catalogEntry = this.modelCatalog.models.find((entry) => entry.model === activeModel) ?? null;
+    const allowedOptions = Array.isArray(latest.thinkingOptions) && latest.thinkingOptions.length > 0
+      ? latest.thinkingOptions
+      : (catalogEntry?.capabilities?.thinkingOptions ?? []);
+    const defaultLevel = catalogEntry?.capabilities?.thinkingDefault ?? null;
+    const configId = latest.thinkingConfigId || "reasoning_effort";
+    let targetLevel = null;
+    if (thinkingLevel !== null) {
+      if (!allowedOptions.includes(thinkingLevel)) {
+        throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "Grok Build thinking level is unavailable for this model");
+      }
+      if (latest.currentThinkingLevel !== thinkingLevel) targetLevel = thinkingLevel;
+    } else if (defaultLevel && latest.currentThinkingLevel !== null && latest.currentThinkingLevel !== undefined
+      && latest.currentThinkingLevel !== defaultLevel) {
+      targetLevel = defaultLevel;
+    }
+    if (!targetLevel) return;
+    const request = this._startAuthBoundRequest("session/set_config_option", {
+      sessionId,
+      configId,
+      value: targetLevel,
+    }, { timeoutMs: this.requestTimeoutMs });
+    const response = await request.promise;
+    this._markRuntimeAuthenticated(request.authFingerprint);
+    if (Array.isArray(response?.configOptions)) {
+      this._rememberSessionConfigOptions(sessionId, response.configOptions);
+    } else {
+      this.sessionConfigs.set(sessionId, {
+        ...(this.sessionConfigs.get(sessionId) || {}),
+        thinkingConfigId: configId,
+        currentThinkingLevel: targetLevel,
+      });
+    }
+  }
+
   _bindModelSecretScope(input) {
     if (!this.secretGateway) return;
     const scope = input?.modelSecretScope;
@@ -1359,6 +1510,7 @@ class GrokBuildRuntimeHost {
     const permissionMode = normalizePermissionMode(input.permissionMode);
     const cwd = this._startCwd(input.cwd);
     const model = this._validateModel(input.model);
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const current = this.ledger.snapshot();
     const existing = current.sessions.find((session) => session.source === input.source);
     if (existing) {
@@ -1461,8 +1613,13 @@ class GrokBuildRuntimeHost {
       developerInstructions: typeof input.developerInstructions === "string"
         ? input.developerInstructions : "",
       model,
+      currentModel: model ?? this.modelCatalog.current ?? null,
       permissionMode,
     });
+    this._rememberSessionConfigOptions(session.id, response?.configOptions);
+    if (thinkingLevel !== undefined) {
+      await this._applySessionThinking(session.id, { thinkingLevel });
+    }
     return { session: this._projectSession(session) };
   }
 
@@ -1478,6 +1635,7 @@ class GrokBuildRuntimeHost {
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = normalizePermissionMode(input.permissionMode);
     const model = this._validateModel(input.model);
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const snapshot = this.ledger.snapshot();
     const session = sessionById(snapshot, input.sessionId);
     if (!session || session.archived) {
@@ -1510,7 +1668,7 @@ class GrokBuildRuntimeHost {
       } else {
         throw hostError("RUNTIME_CAPABILITY_UNSUPPORTED", "Grok Build cannot resume sessions");
       }
-      await request.promise;
+      const resumeResponse = await request.promise;
       this._markRuntimeAuthenticated(request.authFingerprint);
       if (model !== null) {
         const modelRequest = this._startAuthBoundRequest("session/set_model", {
@@ -1529,17 +1687,22 @@ class GrokBuildRuntimeHost {
         await modeRequest.promise;
         this._markRuntimeAuthenticated(modeRequest.authFingerprint);
       }
+      this.sessionConfigs.set(session.id, {
+        nativeRules,
+        cwd,
+        developerInstructions: typeof input.developerInstructions === "string"
+          ? input.developerInstructions : "",
+        model,
+        currentModel: model ?? this.modelCatalog.current ?? null,
+        permissionMode,
+      });
+      if (model === null) this._rememberSessionConfigOptions(session.id, resumeResponse?.configOptions);
+      if (thinkingLevel !== undefined) {
+        await this._applySessionThinking(session.id, { thinkingLevel });
+      }
     } catch (error) {
       throw error;
     }
-    this.sessionConfigs.set(session.id, {
-      nativeRules,
-      cwd,
-      developerInstructions: typeof input.developerInstructions === "string"
-        ? input.developerInstructions : "",
-      model,
-      permissionMode,
-    });
     return { session: this._projectSession(session) };
   }
 
@@ -1680,6 +1843,8 @@ class GrokBuildRuntimeHost {
     const permissionPolicy = this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = normalizePermissionMode(input.permissionMode
       ?? this.sessionConfigs.get(input.sessionId)?.permissionMode);
+    const model = this._validateModel(input.model);
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const session = this._requireSession(input.sessionId);
     this._assertTurnCwd(input.cwd, session);
     if (session.archived) throw hostError("RUNTIME_SESSION_ARCHIVED", "Grok Build session is archived");
@@ -1708,6 +1873,9 @@ class GrokBuildRuntimeHost {
       }
       return { turn: { id: existing.id, status: existing.status, items: [] } };
     }
+    // Apply model/thinking settings before any turn receipt exists so a
+    // validation or config error never creates a partial turn record.
+    await this._applySessionThinking(session.id, { model, thinkingLevel });
     // Read attachments and validate the whole encoded frame before creating a
     // receipt. Text limits alone do not cover base64 expansion or JSON overhead.
     const promptParts = this._promptParts(session.id, input);
@@ -1884,9 +2052,20 @@ class GrokBuildRuntimeHost {
       return Promise.reject(hostError("RUNTIME_MODEL_CURSOR_INVALID", "Grok Build model cursor is invalid"));
     }
     const page = this.modelCatalog.models.slice(offset, offset + limit).map((model) => ({
-      ...model,
+      model: model.model,
+      displayName: model.displayName,
+      description: model.description,
       isDefault: model.model === this.modelCatalog.current,
       hidden: false,
+      ...(model.capabilities && (model.capabilities.thinkingOptions.length > 0 || model.capabilities.fastTier !== null)
+        ? {
+          capabilities: {
+            thinkingOptions: [...model.capabilities.thinkingOptions],
+            thinkingDefault: model.capabilities.thinkingDefault,
+            fastTier: model.capabilities.fastTier,
+          },
+        }
+        : {}),
     }));
     const next = offset + page.length;
     return Promise.resolve({
@@ -2050,6 +2229,10 @@ class GrokBuildRuntimeHost {
         errorMessage: "Grok Build command catalog format changed",
       });
       this.commandCatalogs.set(sessionId, commands);
+      return;
+    }
+    if (update.sessionUpdate === "config_option_update") {
+      this._rememberSessionConfigOptions(sessionId, update.configOptions);
       return;
     }
     const active = this.activeTurns.get(sessionId);

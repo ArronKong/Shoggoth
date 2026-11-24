@@ -1373,3 +1373,64 @@ test("file credential storage rejects unverified versions before any keychain or
   assert.equal(f.spawns.length, 0);
   assert.throws(() => f.create({ credentialStorage: "unknown" }), { code: "ANTIGRAVITY_HOST_OPTIONS_INVALID" });
 });
+
+test("grouped ACP models discover per-family thinking_level options and apply them on turns", async (t) => {
+  const f = fixture(t, { env: { FAKE_ACP_GROUPED_THINKING: "1" } });
+  const control = f.create({ workspace: undefined, controlInstance: true });
+  await control.initialize();
+  const models = await control.modelsList();
+  assert.deepEqual(models.data.map((m) => ({
+    model: m.model,
+    isDefault: m.isDefault,
+    capabilities: m.capabilities,
+  })), [
+    { model: "gemini-4-carbon", isDefault: true, capabilities: { thinkingOptions: ["low", "medium", "high"], thinkingDefault: "medium", fastTier: null } },
+    { model: "gemini-4-hydrogen", isDefault: false, capabilities: { thinkingOptions: ["low", "medium", "high", "xhigh"], thinkingDefault: null, fastTier: null } },
+    { model: "claude-plain", isDefault: false, capabilities: { thinkingOptions: [], thinkingDefault: null, fastTier: null } },
+  ]);
+  const probeCalls = f.records().filter((entry) => entry.method === "session/set_config_option");
+  assert.deepEqual(probeCalls.map((entry) => [entry.params.configId, entry.params.value]), [
+    ["model", "gemini-4-hydrogen"],
+    ["model", "gemini-4-carbon"],
+  ], "probes only grouped families outside concrete model IDs and restores the catalog session");
+
+  const execHost = f.create({ profileState: control.profileState });
+  await execHost.initialize();
+  const { session } = await execHost.sessionStart({
+    source: "grouped-thinking-session",
+    cwd: f.workspace,
+    model: "gemini-4-hydrogen",
+    permissionMode: "accept-edits",
+    developerInstructions: "RULES",
+  });
+  await assert.rejects(execHost.turnStart({
+    sessionId: session.id,
+    operationId: "op-bad-level",
+    prompt: "hello",
+    cwd: f.workspace,
+    model: "gemini-4-hydrogen",
+    thinkingLevel: "ultra",
+  }), { code: "RUNTIME_MODEL_SETTINGS_INVALID" });
+  const events = [];
+  execHost.subscribe((event) => events.push(event));
+  const turn = await execHost.turnStart({
+    sessionId: session.id,
+    operationId: "op-xhigh",
+    prompt: "hello",
+    cwd: f.workspace,
+    model: "gemini-4-hydrogen",
+    thinkingLevel: "xhigh",
+  });
+  await until(() => events.some((event) => event.type === "complete" && event.turnId === turn.turn.id), "turn complete");
+  const promptRecord = f.records().find((entry) => entry.method === "session/prompt" && entry.sessionId === session.id);
+  assert.equal(promptRecord.model, "gemini-4-hydrogen");
+  assert.equal(promptRecord.thinking_level, "xhigh");
+  await assert.rejects(execHost.turnStart({
+    sessionId: session.id,
+    operationId: "op-xhigh",
+    prompt: "hello",
+    cwd: f.workspace,
+    model: "gemini-4-hydrogen",
+    thinkingLevel: "low",
+  }), { code: "RUNTIME_OPERATION_CONFLICT" });
+});

@@ -148,6 +148,7 @@ function runtimeFixture(behavior = {}) {
         else success(child, message, { models: behavior.noModels ? [] : [{
           model: MODEL, displayName: "DeepSeek V4 Flash", description: "official fixture",
           input: ["text"], isDefault: true, contextWindow: 1_000_000,
+          ...(behavior.modelCapabilities ? { capabilities: behavior.modelCapabilities } : {}),
         }] });
       };
       if (behavior.holdCatalog) (behavior.catalogReplies ||= []).push(reply);
@@ -859,6 +860,77 @@ async function main() {
     value.cleanup();
   }
   console.log("PASS DeepSeek runtime: profile/jsonl/process/session/turn/models/auth/MCP");
+  await testDeepSeekThinkingLevelForwarding();
+}
+
+async function testDeepSeekThinkingLevelForwarding() {
+  const capabilities = { thinkingOptions: ["off", "low", "high", "max"], thinkingDefault: "high", fastTier: null };
+  const value = runtimeFixture({ modelCapabilities: capabilities });
+  const adapter = new DeepSeekHarnessRuntimeAdapter({ runtimePool: value.pool });
+  try {
+    const runtime = await adapter.acquire({
+      runtime: "deepseek-harness",
+      runtimeProfileId: "dsh-thinking",
+      runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
+    }, {
+      workspace: value.workspace,
+      permissionPolicy: POLICY,
+    });
+    const catalog = await runtime.modelsList();
+    assert.deepEqual(catalog.data[0].capabilities, capabilities);
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    runtime.registerServerRequestHandler(
+      "item/commandExecution/requestApproval",
+      () => ({ decision: "accept" }),
+    );
+    const { session } = await runtime.sessionStart({
+      source: "thinking-session",
+      cwd: value.workspace,
+      developerInstructions: "RULES",
+      model: MODEL,
+      permissionPolicy: POLICY,
+    });
+    await assert.rejects(runtime.turnStart({
+      sessionId: session.id,
+      operationId: "op-bad-effort",
+      prompt: "finish",
+      cwd: value.workspace,
+      model: MODEL,
+      thinkingLevel: "ultra",
+      permissionPolicy: POLICY,
+    }), { code: "RUNTIME_MODEL_SETTINGS_INVALID" });
+    assert.equal(value.bridgeMessages.filter((msg) => msg.command === "turn/start").length, 0);
+
+    const turn = await runtime.turnStart({
+      sessionId: session.id,
+      operationId: "operation-complete",
+      prompt: "finish",
+      cwd: value.workspace,
+      model: MODEL,
+      thinkingLevel: "max",
+      permissionPolicy: POLICY,
+    });
+    await waitFor(
+      () => events.some((event) => event.type === "complete" && event.turnId === turn.turn.id),
+      "thinking turn completed",
+    );
+    const dispatched = value.bridgeMessages.find((msg) => msg.command === "turn/start");
+    assert.equal(dispatched.params.reasoningEffort, "max");
+    await assert.rejects(runtime.turnStart({
+      sessionId: session.id,
+      operationId: "operation-complete",
+      prompt: "finish",
+      cwd: value.workspace,
+      model: MODEL,
+      thinkingLevel: "low",
+      permissionPolicy: POLICY,
+    }), { code: "RUNTIME_OPERATION_CONFLICT" });
+  } finally {
+    await adapter.stopAll().catch(() => {});
+    value.cleanup();
+  }
+  console.log("PASS DeepSeek thinking level catalog, validation, and forwarding");
 }
 
 module.exports = { runtimeFixture, MODEL, POLICY };

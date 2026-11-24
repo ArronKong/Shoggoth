@@ -105,7 +105,7 @@ async function generateOpenCodeModelOnly(host, input) {
     let requested = modelRef(input.model);
     const worker = new OpenCodeRuntimeHost({ paths: host.paths, runtimeBinding: host.binding,
       runtimeEnvironment: host.runtimeEnvironment, parentEnv: host.parentEnv, fs: host.fs,
-      spawnProcess: host.spawnProcess, controlInstance: true, modelOnlyInstance: true,
+      fetch: host.fetch, spawnProcess: host.spawnProcess, controlInstance: true, modelOnlyInstance: true,
       secretGateway: host.secretGateway, modelProjectionPluginPath: host.modelProjectionPluginPath,
       permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
     let sessionId = null, stopError = null, originalError = null;

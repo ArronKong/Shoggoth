@@ -14,6 +14,8 @@ const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-com
 const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
+const { validModelCapabilities } = require("./chat-model-settings");
+const { effortId } = require("./model-reasoning-catalog");
 const { DeepSeekHarnessProcess } = require("./deepseek-harness-process");
 const { guardRuntimeTurnSubmission } = require("./runtime-turn-send-guard");
 const { DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./interactive-timeouts");
@@ -116,6 +118,7 @@ function inputFingerprint(input) {
     cwd: input.cwd ?? null,
     permissionPolicy: input.permissionPolicy ?? null,
     permissionMode: input.permissionMode ?? null,
+    ...(input.thinkingLevel != null ? { thinkingLevel: input.thinkingLevel } : {}),
   })).digest("hex");
 }
 
@@ -153,6 +156,18 @@ function validateUsage(value) {
   return plain(value) && keys.every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0);
 }
 
+const EMPTY_MODEL_CAPABILITIES = Object.freeze({
+  thinkingOptions: Object.freeze([]),
+  thinkingDefault: null,
+  fastTier: null,
+});
+
+function validateThinkingLevel(value) {
+  if (value === undefined || value === null) return value;
+  if (!effortId(value)) throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "DeepSeek thinking level is invalid");
+  return value;
+}
+
 function validateCatalog(payload) {
   if (!plain(payload) || !Array.isArray(payload.models)
     || payload.models.length === 0 || payload.models.length > MAX_MODELS) {
@@ -166,6 +181,8 @@ function validateCatalog(payload) {
     if (!plain(model) || !safeString(model.model, 640) || !parseModelRef(model.model)
       || !safeString(model.displayName, 512)
       || (model.description !== undefined && !safeString(model.description, 2048, { empty: true }))
+      || (model.capabilities !== undefined && (!validModelCapabilities(model.capabilities)
+        || model.capabilities.fastTier !== null))
       || typeof model.isDefault !== "boolean" || seen.has(model.model)) {
       throw hostError(
         "RUNTIME_MODEL_CATALOG_INVALID",
@@ -173,6 +190,13 @@ function validateCatalog(payload) {
       );
     }
     seen.add(model.model);
+    const capabilities = model.capabilities
+      ? Object.freeze({
+        thinkingOptions: Object.freeze([...model.capabilities.thinkingOptions]),
+        thinkingDefault: model.capabilities.thinkingDefault,
+        fastTier: null,
+      })
+      : EMPTY_MODEL_CAPABILITIES;
     return Object.freeze({
       model: model.model,
       displayName: model.displayName,
@@ -180,6 +204,7 @@ function validateCatalog(payload) {
       isDefault: model.isDefault,
       input: Array.isArray(model.input) ? Object.freeze([...model.input]) : Object.freeze(["text"]),
       contextWindow: Number.isSafeInteger(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : null,
+      capabilities,
     });
   });
   if (!models.some((model) => model.isDefault)) {
@@ -678,7 +703,8 @@ class DeepSeekHarnessRuntimeHost {
       );
     }
     const model = this._validateModel(requestedModel, models);
-    const fingerprint = inputFingerprint({ ...input, model });
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
+    const fingerprint = inputFingerprint({ ...input, model, thinkingLevel });
     const existing = turnByOperation(session, input.operationId);
     if (existing && existing.fingerprint !== fingerprint) {
       throw hostError(
@@ -696,6 +722,12 @@ class DeepSeekHarnessRuntimeHost {
     }
     if (existing && existing.acceptance === "accepted" && TERMINAL_STATUSES.has(existing.status)) {
       return { turn: { id: existing.id, status: existing.status, items: [] } };
+    }
+    if (thinkingLevel != null) {
+      const targetModel = (model ? models.find((entry) => entry.model === model) : models.find((entry) => entry.isDefault)) ?? null;
+      if (!targetModel?.capabilities?.thinkingOptions?.includes(thinkingLevel)) {
+        throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "DeepSeek thinking level is unavailable for this model");
+      }
     }
     // Native commands can mutate state without creating a model user/message.
     // Never replay an ambiguous dispatch against a restarted bridge.
@@ -733,6 +765,7 @@ class DeepSeekHarnessRuntimeHost {
       turnId,
       operationId: input.operationId,
       model,
+      thinkingLevel,
       acceptance: makeDeferred(),
       terminal: makeDeferred(),
       accepted: false,
@@ -927,6 +960,13 @@ class DeepSeekHarnessRuntimeHost {
       isDefault: model.isDefault,
       hidden: false,
       contextWindow: model.contextWindow,
+      capabilities: model.capabilities
+        ? {
+          thinkingOptions: [...model.capabilities.thinkingOptions],
+          thinkingDefault: model.capabilities.thinkingDefault,
+          fastTier: model.capabilities.fastTier,
+        }
+        : { thinkingOptions: [], thinkingDefault: null, fastTier: null },
     }));
     const next = offset + page.length;
     return { data: page, nextCursor: next < models.length ? String(next) : null };
@@ -1022,6 +1062,7 @@ class DeepSeekHarnessRuntimeHost {
         prompt: input.prompt,
         context: context.blocks.join("\n\n"),
         turnDeveloperInstructions: turn.rules,
+        ...(active.thinkingLevel !== undefined ? { reasoningEffort: active.thinkingLevel } : {}),
       }, { timeoutMs: this.startupTimeoutMs });
     });
     this._acceptActive(active);

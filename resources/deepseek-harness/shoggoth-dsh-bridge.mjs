@@ -126,6 +126,25 @@ function normalizeUsage(value) {
   };
 }
 
+const EFFORT_ID_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/u;
+
+function capabilitiesFromReasoning(reasoning) {
+  if (reasoning === undefined) {
+    return { thinkingOptions: [], thinkingDefault: null, fastTier: null };
+  }
+  const options = reasoning?.efforts?.map((effort) => effort?.id);
+  if (!Array.isArray(options) || options.length > 16 || new Set(options).size !== options.length
+    || options.some((id) => typeof id !== "string" || !EFFORT_ID_PATTERN.test(id))
+    || (reasoning?.defaultEffort !== undefined && !options.includes(reasoning.defaultEffort))) {
+    return null;
+  }
+  return {
+    thinkingOptions: options,
+    thinkingDefault: reasoning?.defaultEffort ?? null,
+    fastTier: null,
+  };
+}
+
 function modelRef(selection) {
   return `${selection.provider}/${selection.model}`;
 }
@@ -358,14 +377,9 @@ export class BridgeRuntime {
     try {
       const info = await this.ctx.llm.resolveModelInfo(selection.provider, selection.model, AbortSignal.timeout(4_000));
       if (info?.id !== selection.model) throw new Error();
-      const reasoning = info?.reasoning;
-      const options = reasoning === undefined ? [] : reasoning?.efforts?.map(effort => effort?.id);
-      if (!Array.isArray(options) || options.length > 16 || new Set(options).size !== options.length
-        || options.some(id => typeof id !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/u.test(id))
-        || reasoning?.defaultEffort !== undefined && !options.includes(reasoning.defaultEffort)) throw new Error();
-      return { model: modelRef(selection), provider: selection.provider, capabilities: {
-        thinkingOptions: options, thinkingDefault: reasoning?.defaultEffort ?? null, fastTier: null,
-      } };
+      const capabilities = capabilitiesFromReasoning(info?.reasoning);
+      if (!capabilities) throw new Error();
+      return { model: modelRef(selection), provider: selection.provider, capabilities };
     } catch { throw bridgeError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable"); }
   }
 
@@ -427,13 +441,35 @@ export class BridgeRuntime {
     } finally { clearTimeout(timer); controller.abort(); this.modelRequests.delete(params.operationId); }
   }
 
+  async resolveModelDetails(providerId, modelId, fallbackReasoning) {
+    let info = null;
+    if (typeof this.ctx.llm.resolveModelInfo === "function") {
+      try {
+        const resolved = await this.ctx.llm.resolveModelInfo(providerId, modelId, AbortSignal.timeout(4_000));
+        if (resolved?.id === modelId) info = resolved;
+      } catch { /* Fall back to catalog entry metadata when exact lookup is unavailable. */ }
+    }
+    const capabilities = capabilitiesFromReasoning(info?.reasoning ?? fallbackReasoning)
+      ?? { thinkingOptions: [], thinkingDefault: null, fastTier: null };
+    const contextWindow = Number.isSafeInteger(info?.context?.contextWindow) && info.context.contextWindow > 0
+      ? info.context.contextWindow : null;
+    return { capabilities, contextWindow };
+  }
+
   async modelsList() {
     const providers = this.ctx.llm.listProviders();
     const selected = this.ctx.agentDefaultModel.currentSelection();
     const models = [];
     for (const provider of providers) {
       const listed = await this.ctx.llm.listModels(provider.id);
-      for (const model of listed) {
+      const details = await Promise.all(
+        listed.map((model) => this.resolveModelDetails(provider.id, model.id, model.reasoning)),
+      );
+      for (let index = 0; index < listed.length; index += 1) {
+        const model = listed[index];
+        const detail = details[index];
+        const contextWindow = Number.isSafeInteger(model.context?.contextWindow) && model.context.contextWindow > 0
+          ? model.context.contextWindow : detail.contextWindow;
         models.push({
           model: `${provider.id}/${model.id}`,
           provider: provider.id,
@@ -442,12 +478,13 @@ export class BridgeRuntime {
           description: model.description || provider.name || provider.id,
           input: Array.isArray(model.inputModalities) ? [...model.inputModalities] : ["text"],
           isDefault: provider.id === selected.provider && model.id === selected.model,
-          contextWindow: Number.isSafeInteger(model.context?.contextWindow) && model.context.contextWindow > 0
-            ? model.context.contextWindow : null,
+          contextWindow,
+          capabilities: detail.capabilities,
         });
       }
     }
     if (!models.some((model) => model.isDefault)) {
+      const detail = await this.resolveModelDetails(selected.provider, selected.model, undefined);
       models.unshift({
         model: modelRef(selected),
         provider: selected.provider,
@@ -456,6 +493,8 @@ export class BridgeRuntime {
         description: selected.provider,
         input: ["text"],
         isDefault: true,
+        contextWindow: detail.contextWindow,
+        capabilities: detail.capabilities,
       });
     }
     return { models };
@@ -615,6 +654,7 @@ export class BridgeRuntime {
       );
     }
     let turnInstructions = "";
+    let turnReasoningEffort;
     // DSH expands section templates, but never scans a substituted value again.
     // Host rules and credential references are literal text, not DSH variables.
     agentCtx.systemPrompt.variable("shoggoth_developer_instructions", () =>
@@ -627,12 +667,29 @@ export class BridgeRuntime {
       text: "{{shoggoth_developer_instructions}}",
       complete: true,
     });
-    return (text) => { turnInstructions = text; };
+    if (typeof agentCtx.on === "function") {
+      // Apply the current turn's explicit reasoningEffort, or clear any
+      // persisted effort on `null` so the adapter resolves its own default.
+      agentCtx.on("agent/request", async (_payload, next) => {
+        const resolved = await next();
+        if (turnReasoningEffort === undefined) return resolved;
+        const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved;
+        return {
+          ...withoutInheritedEffort,
+          ...(turnReasoningEffort === null ? {} : { reasoningEffort: turnReasoningEffort }),
+        };
+      });
+    }
+    return {
+      setTurnInstructions: (text) => { turnInstructions = text; },
+      setTurnReasoningEffort: (effort) => { turnReasoningEffort = effort; },
+    };
   }
 
   async createHandle(config, resume) {
     const agentOptions = { provider: config.selection.provider, model: config.selection.model };
     let setTurnInstructions;
+    let setTurnReasoningEffort;
     const setup = (agentCtx) => {
       if (this.workspaceExecution) {
         if (typeof agentCtx.tools?.restrict !== "function" || typeof agentCtx.tools?.schemas !== "function"
@@ -647,7 +704,7 @@ export class BridgeRuntime {
         }
         agentCtx.tools.restrict({ allow: names });
       }
-      setTurnInstructions = this.setupAgent(agentCtx, config.developerInstructions);
+      ({ setTurnInstructions, setTurnReasoningEffort } = this.setupAgent(agentCtx, config.developerInstructions));
     };
     const handle = resume
       ? await this.ctx.agents.resume({
@@ -665,6 +722,7 @@ export class BridgeRuntime {
       handle,
       agent: handle.agent,
       setTurnInstructions,
+      setTurnReasoningEffort,
       config,
       key: JSON.stringify([config.cwd, config.developerInstructions, config.selection]),
     };
@@ -806,7 +864,9 @@ export class BridgeRuntime {
       || !safeString(params.turnId, 512) || !safeString(params.operationId, 512)
       || !safeString(params.prompt, 1024 * 1024, true)
       || !safeString(params.context ?? "", 4 * 1024 * 1024, true)
-      || !safeString(params.turnDeveloperInstructions ?? "", 1024 * 1024, true)) {
+      || !safeString(params.turnDeveloperInstructions ?? "", 1024 * 1024, true)
+      || (params.reasoningEffort !== undefined && params.reasoningEffort !== null
+        && (typeof params.reasoningEffort !== "string" || !EFFORT_ID_PATTERN.test(params.reasoningEffort)))) {
       throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek turn input is invalid");
     }
     const record = this.sessions.get(params.remoteSessionId);
@@ -815,6 +875,7 @@ export class BridgeRuntime {
       throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
     record.setTurnInstructions(params.turnDeveloperInstructions || "");
+    record.setTurnReasoningEffort?.(params.reasoningEffort);
     if (params.prompt.trimStart().startsWith("/")) {
       return this.commandTurnStart(record, params);
     }

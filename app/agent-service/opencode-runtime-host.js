@@ -281,12 +281,16 @@ function answersShoggothToolPrompts(configuration) {
   return servers.includes("shoggoth") && servers.every((name) => name === "shoggoth" || !/^shoggoth/iu.test(name));
 }
 
-function modelConnectionConfig(content) {
+const MODEL_CONNECTION_KEYS = Object.freeze(["provider", "model", "small_model", "enabled_providers", "disabled_providers"]);
+const PROVIDER_DISCOVERY_TIMEOUT_MS = 3_000;
+const PROVIDER_DISCOVERY_MAX_BYTES = 4 * 1024 * 1024;
+const PROVIDER_DISCOVERY_MAX_PROVIDERS = 16;
+const FORBIDDEN_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function parseOpenCodeConfig(content) {
   // OpenCode accepts JSON with comments and trailing commas. Preserve string
   // bytes (URLs, escaped quotes and credential placeholders included) while
-  // removing only JSONC syntax, then retain the model connection fields. Native
-  // MCP, hooks/plugins, shell commands and file-based instructions are not part
-  // of the model connection and must not execute before the tool guard exists.
+  // removing only JSONC syntax.
   const text = content.toString("utf8").replace(/^\uFEFF/u, "");
   let json = "", quoted = false, escaped = false;
   for (let index = 0; index < text.length; index++) {
@@ -317,11 +321,207 @@ function modelConnectionConfig(content) {
   let parsed;
   try { parsed = JSON.parse(prepared); } catch { throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config is malformed"); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config must be an object");
-  return JSON.stringify(Object.fromEntries(["provider", "model", "small_model", "enabled_providers", "disabled_providers"]
+  return parsed;
+}
+
+function modelConnectionConfig(content) {
+  // Native MCP, hooks/plugins, shell commands and file-based instructions are
+  // not part of the model connection and must not execute before the tool guard exists.
+  const parsed = parseOpenCodeConfig(content);
+  return JSON.stringify(Object.fromEntries(MODEL_CONNECTION_KEYS
     .filter(key => Object.hasOwn(parsed, key)).map(key => [key, parsed[key]]))) + "\n";
 }
 
-function preparePrivateOpenCodeConfig(fileSystem, sourceHome, privateConfig, trustedRoot, workspaceExecutionVersion = null) {
+function readSafeOwnedFile(fileSystem, original, maxBytes = 1024 * 1024) {
+  let file;
+  try { file = fileSystem.openSync(original, fileSystem.constants.O_RDONLY | fileSystem.constants.O_NOFOLLOW); }
+  catch (cause) {
+    if (cause?.code === "ENOENT") return null;
+    throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config file is unsafe");
+  }
+  try {
+    const stat = fileSystem.fstatSync(file);
+    if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || stat.size > maxBytes) {
+      throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config file is unsafe or too large");
+    }
+    return fileSystem.readFileSync(file);
+  } finally { fileSystem.closeSync(file); }
+}
+
+function readNativeAuthApiKey(fileSystem, dataHome, providerId) {
+  if (!safe(dataHome, 4096) || !safe(providerId, 128)) return null;
+  try {
+    const raw = readSafeOwnedFile(fileSystem, path.join(dataHome, "opencode", "auth.json"));
+    if (!raw) return null;
+    const auth = JSON.parse(raw.toString("utf8"));
+    const entry = auth && typeof auth === "object" && !Array.isArray(auth) && Object.hasOwn(auth, providerId)
+      ? auth[providerId] : null;
+    return entry?.type === "api" && safe(entry.key, 8192) ? entry.key : null;
+  } catch { return null; }
+}
+
+function parseDiscoveredModelsPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const models = Object.create(null);
+  let count = 0;
+  if (Array.isArray(payload.models)) {
+    for (const item of payload.models) {
+      if (count >= MODEL_LIMIT) break;
+      const id = item?.id;
+      if (!safe(id, 384) || FORBIDDEN_OBJECT_KEYS.has(id)) continue;
+      if (item.entry && typeof item.entry === "object" && !Array.isArray(item.entry)) {
+        models[id] = item.entry;
+      } else {
+        const name = safe(item?.name, 512) ? item.name : id;
+        models[id] = { name };
+      }
+      count += 1;
+    }
+  } else if (Array.isArray(payload.data)) {
+    for (const item of payload.data) {
+      if (count >= MODEL_LIMIT) break;
+      const id = item?.id;
+      if (!safe(id, 384) || FORBIDDEN_OBJECT_KEYS.has(id)) continue;
+      const name = safe(item?.name, 512) ? item.name : id;
+      const context = Number.isSafeInteger(item?.context_length) && item.context_length > 0 ? item.context_length
+        : Number.isSafeInteger(item?.max_model_len) && item.max_model_len > 0 ? item.max_model_len : null;
+      models[id] = { name, ...(context ? { limit: { context } } : {}) };
+      count += 1;
+    }
+  }
+  return count > 0 ? models : null;
+}
+
+async function fetchBoundedJson(fetchImpl, targetUrl, headers, timeoutMs, maxBytes) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
+  let response;
+  try {
+    response = await fetchImpl(targetUrl, { method: "GET", redirect: "error", signal: controller.signal, headers });
+    if (!response?.ok) return { ok: false, status: response?.status ?? 0, data: null };
+    const reader = response.body?.getReader?.();
+    let buffer;
+    if (reader) {
+      const chunks = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxBytes) { controller.abort(); return { ok: false, status: response.status, data: null }; }
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+      buffer = Buffer.concat(chunks, size);
+    } else {
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > maxBytes) return { ok: false, status: response.status, data: null };
+      buffer = Buffer.from(text, "utf8");
+    }
+    return { ok: true, status: response.status, data: JSON.parse(buffer.toString("utf8")) };
+  } catch {
+    return { ok: false, status: 0, data: null };
+  } finally {
+    clearTimeout(timer);
+    try { await response?.body?.cancel?.(); } catch {}
+  }
+}
+
+// Custom OpenAI-compatible providers in opencode.json(c) may leave `models`
+// empty because a native OpenCode plugin populates them via a config hook.
+// Shoggoth keeps `--pure` / plugin isolation intact and queries those
+// configured baseURLs directly so their models appear without running plugins.
+async function discoverOpenCodeProviderModels(fileSystem, sourceHome, dataHome = null, options = {}) {
+  const discovered = new Map();
+  if (!safe(sourceHome, 4096)) return discovered;
+  const source = path.join(sourceHome, "opencode");
+  let sourceStat;
+  try { sourceStat = fileSystem.lstatSync(source); } catch { return discovered; }
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()
+    || (typeof process.getuid === "function" && sourceStat.uid !== process.getuid())) return discovered;
+  let disabledProviders = null, enabledProviders = null;
+  const providers = new Map();
+  for (const name of ["opencode.json", "opencode.jsonc"]) {
+    let parsed;
+    try {
+      const content = readSafeOwnedFile(fileSystem, path.join(source, name));
+      if (!content) continue;
+      parsed = parseOpenCodeConfig(content);
+    } catch { continue; }
+    if (Array.isArray(parsed.disabled_providers)) disabledProviders = parsed.disabled_providers;
+    if (Array.isArray(parsed.enabled_providers)) enabledProviders = parsed.enabled_providers;
+    if (parsed.provider && typeof parsed.provider === "object" && !Array.isArray(parsed.provider)) {
+      for (const [id, entry] of Object.entries(parsed.provider)) {
+        if (!safe(id, 128) || FORBIDDEN_OBJECT_KEYS.has(id)) continue;
+        const previous = providers.get(id);
+        providers.set(id, previous && entry && typeof entry === "object" && !Array.isArray(entry)
+          ? { ...previous, ...entry,
+            options: { ...(previous.options || {}), ...(entry.options || {}) },
+            models: entry.models !== undefined ? entry.models : previous.models }
+          : entry);
+      }
+    }
+  }
+  const candidates = [];
+  for (const [id, entry] of providers) {
+    if (candidates.length >= PROVIDER_DISCOVERY_MAX_PROVIDERS) break;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (Array.isArray(disabledProviders) && disabledProviders.includes(id)) continue;
+    if (Array.isArray(enabledProviders) && !enabledProviders.includes(id)) continue;
+    if (entry.models && typeof entry.models === "object" && !Array.isArray(entry.models)
+      && Object.keys(entry.models).length > 0) continue;
+    if (entry.npm !== undefined && entry.npm !== "@ai-sdk/openai-compatible") continue;
+    const rawBaseUrl = entry.options?.baseURL;
+    if (!safe(rawBaseUrl, 2048)) continue;
+    let parsedUrl;
+    try { parsedUrl = new URL(rawBaseUrl); } catch { continue; }
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) continue;
+    const rawKey = entry.options?.apiKey;
+    const inlineKey = safe(rawKey, 8192) && !/^\{(?:env|file):/u.test(rawKey.trim()) ? rawKey : null;
+    const apiKey = inlineKey ?? readNativeAuthApiKey(fileSystem, dataHome, id);
+    candidates.push({ id, baseUrl: rawBaseUrl.replace(/\/+$/u, ""), apiKey });
+  }
+  if (!candidates.length) return discovered;
+  const fetchImpl = options.fetch || globalThis.fetch;
+  if (typeof fetchImpl !== "function") return discovered;
+  const timeoutMs = options.timeoutMs ?? PROVIDER_DISCOVERY_TIMEOUT_MS;
+  const maxBytes = options.maxBytes ?? PROVIDER_DISCOVERY_MAX_BYTES;
+  await Promise.all(candidates.map(async ({ id, baseUrl, apiKey }) => {
+    const headers = { Accept: "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) };
+    const first = await fetchBoundedJson(fetchImpl, `${baseUrl}/models?format=opencode`, headers, timeoutMs, maxBytes);
+    let models = first.ok ? parseDiscoveredModelsPayload(first.data) : null;
+    if (!models && [400, 404, 422].includes(first.status)) {
+      const fallback = await fetchBoundedJson(fetchImpl, `${baseUrl}/models`, headers, timeoutMs, maxBytes);
+      models = fallback.ok ? parseDiscoveredModelsPayload(fallback.data) : null;
+    }
+    if (models) discovered.set(id, models);
+  }));
+  return discovered;
+}
+
+function injectDiscoveredProviderModels(parsed, discoveredProviderModels) {
+  if (!discoveredProviderModels || discoveredProviderModels.size === 0
+    || !parsed?.provider || typeof parsed.provider !== "object" || Array.isArray(parsed.provider)) {
+    return false;
+  }
+  let changed = false;
+  for (const [providerId, models] of discoveredProviderModels) {
+    if (!Object.hasOwn(parsed.provider, providerId)) continue;
+    const entry = parsed.provider[providerId];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (entry.models && typeof entry.models === "object" && !Array.isArray(entry.models)
+      && Object.keys(entry.models).length > 0) continue;
+    parsed.provider[providerId] = { ...entry, models };
+    changed = true;
+  }
+  return changed;
+}
+
+function preparePrivateOpenCodeConfig(fileSystem, sourceHome, privateConfig, trustedRoot,
+  workspaceExecutionVersion = null, discoveredProviderModels = null) {
   const destination = path.join(privateConfig, "config", "opencode");
   ensurePrivateDirectoryTree(destination, trustedRoot);
   const source = path.join(sourceHome, "opencode");
@@ -336,27 +536,26 @@ function preparePrivateOpenCodeConfig(fileSystem, sourceHome, privateConfig, tru
   for (const name of ["opencode.json", "opencode.jsonc"]) {
     const target = path.join(destination, name);
     const original = path.join(source, name);
-    let file;
-    try { file = fileSystem.openSync(original, fileSystem.constants.O_RDONLY | fileSystem.constants.O_NOFOLLOW); }
-    catch (cause) {
-      if (cause?.code !== "ENOENT") throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config file is unsafe");
-    }
-    if (file === undefined) {
+    let content = readSafeOwnedFile(fileSystem, original);
+    if (content === null) {
       try { fileSystem.unlinkSync(target); } catch (cause) {
         if (cause?.code !== "ENOENT") throw error("OPENCODE_PRIVATE_CONFIG_INVALID", "Private OpenCode config cannot be updated");
       }
       continue;
     }
-    let content;
-    try {
-      const stat = fileSystem.fstatSync(file);
-      if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-        || stat.size > 1024 * 1024) {
-        throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config file is unsafe or too large");
+    const hasDiscovered = discoveredProviderModels instanceof Map && discoveredProviderModels.size > 0;
+    if (workspaceExecutionVersion === 1) {
+      const parsed = parseOpenCodeConfig(content);
+      const filtered = Object.fromEntries(MODEL_CONNECTION_KEYS
+        .filter(key => Object.hasOwn(parsed, key)).map(key => [key, parsed[key]]));
+      if (hasDiscovered) injectDiscoveredProviderModels(filtered, discoveredProviderModels);
+      content = JSON.stringify(filtered) + "\n";
+    } else if (hasDiscovered) {
+      const parsed = parseOpenCodeConfig(content);
+      if (injectDiscoveredProviderModels(parsed, discoveredProviderModels)) {
+        content = JSON.stringify(parsed) + "\n";
       }
-      content = fileSystem.readFileSync(file);
-    } finally { fileSystem.closeSync(file); }
-    if (workspaceExecutionVersion === 1) content = modelConnectionConfig(content);
+    }
     const temporary = path.join(destination, `.${name}.${crypto.randomBytes(8).toString("hex")}.tmp`);
     try {
       fileSystem.writeFileSync(temporary, content, { flag: "wx", mode: 0o600 });
@@ -395,6 +594,7 @@ class OpenCodeRuntimeHost {
     this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.parentEnv = options.parentEnv || process.env;
     this.fs = options.fs || fs;
+    this.fetch = options.fetch || globalThis.fetch;
     this.spawnProcess = options.spawnProcess || spawn;
     this.now = options.now || Date.now;
     this.promptTimeoutMs = executionTimeoutMs(options.promptTimeoutMs);
@@ -1548,8 +1748,15 @@ class OpenCodeRuntimeHost {
     }
     const protectedModel = this.secretGateway && (!this.controlInstance || this.modelOnlyInstance);
     const protectionPlugin = protectedModel ? require("node:url").pathToFileURL(this.modelProjectionPluginPath).href : null;
+    const discoveredProviderModels = await discoverOpenCodeProviderModels(
+      this.fs,
+      this.runtimeEnvironment.configSourceHome,
+      this.runtimeEnvironment.spawnEnv.XDG_DATA_HOME,
+      { fetch: this.fetch },
+    );
     preparePrivateOpenCodeConfig(this.fs, this.runtimeEnvironment.configSourceHome,
-      privateConfig, this.paths.trustedRoot, this.modelOnlyInstance || protectedModel ? 1 : this.workspaceExecutionVersion);
+      privateConfig, this.paths.trustedRoot, this.modelOnlyInstance || protectedModel ? 1 : this.workspaceExecutionVersion,
+      discoveredProviderModels);
     const password = crypto.randomBytes(32).toString("hex");
     let gate = null;
     if (!this.controlInstance && !this.modelOnlyInstance && this.mcpGateIssuer) {
@@ -1678,5 +1885,5 @@ class OpenCodeRuntimeHost {
 }
 
 module.exports = { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
-  usageFromTokens, preparePrivateOpenCodeConfig, nativePermissionRules, modelConnectionConfig, openCodeFailureCode,
-  openCodeRetryLimit };
+  usageFromTokens, preparePrivateOpenCodeConfig, discoverOpenCodeProviderModels, nativePermissionRules,
+  modelConnectionConfig, openCodeFailureCode, openCodeRetryLimit };
