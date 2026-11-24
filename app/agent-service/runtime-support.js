@@ -121,12 +121,13 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
     const models = [], modelWindows = Object.create(null), modelLimits = Object.create(null);
     let defaultModel = null;
     let cursor = null;
+    const seenCursors = new Set();
     let catalogState = typeof host.modelsList === "function" ? "verified" : "unverified";
-    try { for (let page = 0; page < 4 && typeof host.modelsList === "function"; page++) {
+    try { for (let page = 0; page < 32 && typeof host.modelsList === "function"; page++) {
       const result = await host.modelsList({ cursor, limit: 64 });
       for (const model of result?.data || result?.models || []) {
         const id = model.model ?? model.id;
-        if (typeof id === "string" && models.length < 256) {
+        if (typeof id === "string" && models.length < 2048) {
           models.push(id);
           if (model.isDefault === true) defaultModel = id;
           // Only the operational context window; advertised maximum/upgrade
@@ -140,8 +141,10 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
               ? model.configuredOutputTokens : null };
         }
       }
-      cursor = result?.nextCursor ?? null;
-      if (!cursor) break;
+      const next = result?.nextCursor ?? null;
+      if (!next || typeof next !== "string" || seenCursors.has(next)) break;
+      seenCursors.add(next);
+      cursor = next;
     } } catch (error) {
       if (isRuntimeIncompatible(error)) throw error;
       catalogState = "unverified";

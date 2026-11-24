@@ -10,7 +10,8 @@ const { test } = require("node:test");
 const { OpenCodeHttpClient } = require("../app/agent-service/opencode-http-client");
 const { OpenCodeRuntimeLedger } = require("../app/agent-service/opencode-runtime-ledger");
 const { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
-  usageFromTokens, nativePermissionRules } = require("../app/agent-service/opencode-runtime-host");
+  usageFromTokens, nativePermissionRules, preparePrivateOpenCodeConfig,
+  discoverOpenCodeProviderModels } = require("../app/agent-service/opencode-runtime-host");
 const { parseOpenCodeVersion, normalizeOpenCodeWorkspace } = require("../app/agent-service/opencode-runtime-paths");
 const { attachmentPrompt } = require("../app/agent-service/chat-attachments");
 
@@ -294,6 +295,117 @@ test("configured providers alone supply sign-in, menu defaults and available mod
     "an unrepresentable provider ID must not hide other connected models");
   providers = [{}];
   await assert.rejects(host.authenticationState(), { code: "RUNTIME_MODEL_CATALOG_INVALID" });
+});
+
+test("custom OpenCode providers without static models discover models without loading plugins", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-opencode-discover-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "config");
+  const dataHome = path.join(root, "data");
+  const privateStandard = path.join(root, "private-standard");
+  const privateManaged = path.join(root, "private-managed");
+  fs.mkdirSync(path.join(source, "opencode"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(dataHome, "opencode"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dataHome, "opencode/auth.json"),
+    JSON.stringify({ openaiCompat: { type: "api", key: "auth-file-key" } }), { mode: 0o600 });
+  const originalConfig = `{
+    // Dynamic gateway configured without static models
+    "model": "magpie/workbuddy/hy4flash-free",
+    "disabled_providers": ["disabledGw"],
+    "plugin": ["should-not-survive-managed"],
+    "provider": {
+      "magpie": {
+        "name": "magpie",
+        "npm": "@ai-sdk/openai-compatible",
+        "options": { "apiKey": "magpie-key", "baseURL": "http://127.0.0.1:3425/v1/" }
+      },
+      "openaiCompat": {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": { "baseURL": "http://127.0.0.1:8080/v1" }
+      },
+      "envPlaceholder": {
+        "options": { "apiKey": "{env:SECRET_KEY}", "baseURL": "http://127.0.0.1:9090/v1" }
+      },
+      "staticOnly": {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": { "baseURL": "http://127.0.0.1:7070/v1" },
+        "models": { "pinned": { "name": "Pinned" } }
+      },
+      "disabledGw": {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": { "baseURL": "http://127.0.0.1:6060/v1" }
+      },
+      "nonCompat": {
+        "npm": "@ai-sdk/anthropic",
+        "options": { "baseURL": "http://127.0.0.1:5050/v1" }
+      },
+      "offlineGw": {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": { "baseURL": "http://127.0.0.1:4040/v1" }
+      },
+    }
+  }`;
+  const configFile = path.join(source, "opencode/opencode.jsonc");
+  fs.writeFileSync(configFile, originalConfig, { mode: 0o600 });
+
+  const requested = [];
+  const discovered = await discoverOpenCodeProviderModels(fs, source, dataHome, {
+    fetch: async (url, init) => {
+      requested.push({ url, auth: init.headers.Authorization ?? null, redirect: init.redirect });
+      if (url === "http://127.0.0.1:3425/v1/models?format=opencode") {
+        return new Response(JSON.stringify({
+          models: [{
+            id: "workbuddy/hy4flash-free",
+            entry: {
+              name: "Hy4 flash",
+              limit: { context: 960000, output: 64000 },
+              variants: { high: { reasoningEffort: "high" } },
+            },
+          }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "http://127.0.0.1:8080/v1/models?format=opencode") {
+        return new Response("unknown query param", { status: 400 });
+      }
+      if (url === "http://127.0.0.1:8080/v1/models") {
+        return new Response(JSON.stringify({
+          data: [{ id: "local-qwen", context_length: 131072 }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "http://127.0.0.1:9090/v1/models?format=opencode") {
+        return new Response(JSON.stringify({ data: [{ id: "open-model" }] }), { status: 200 });
+      }
+      throw new Error("connection refused");
+    },
+  });
+
+  assert.deepEqual(requested.map(r => r.url).sort(), [
+    "http://127.0.0.1:3425/v1/models?format=opencode",
+    "http://127.0.0.1:4040/v1/models?format=opencode",
+    "http://127.0.0.1:8080/v1/models",
+    "http://127.0.0.1:8080/v1/models?format=opencode",
+    "http://127.0.0.1:9090/v1/models?format=opencode",
+  ], "static, disabled and non-openai-compatible providers must not be queried");
+  assert.ok(requested.every(r => r.redirect === "error"));
+  assert.equal(requested.find(r => r.url.includes(":3425")).auth, "Bearer magpie-key");
+  assert.equal(requested.find(r => r.url.includes(":8080/v1/models?")).auth, "Bearer auth-file-key");
+  assert.equal(requested.find(r => r.url.includes(":9090")).auth, null, "placeholder apiKey must not be sent literally");
+  assert.deepEqual([...discovered.keys()].sort(), ["envPlaceholder", "magpie", "openaiCompat"]);
+  assert.deepEqual(discovered.get("magpie")["workbuddy/hy4flash-free"].limit, { context: 960000, output: 64000 });
+  assert.deepEqual(discovered.get("openaiCompat")["local-qwen"], { name: "local-qwen", limit: { context: 131072 } });
+
+  preparePrivateOpenCodeConfig(fs, source, privateStandard, root, null, discovered);
+  preparePrivateOpenCodeConfig(fs, source, privateManaged, root, 1, discovered);
+  assert.equal(fs.readFileSync(configFile, "utf8"), originalConfig, "native config is never modified");
+
+  const standardCopy = JSON.parse(fs.readFileSync(path.join(privateStandard, "config/opencode/opencode.jsonc"), "utf8"));
+  assert.equal(standardCopy.provider.magpie.models["workbuddy/hy4flash-free"].name, "Hy4 flash");
+  assert.deepEqual(standardCopy.provider.staticOnly.models, { pinned: { name: "Pinned" } });
+
+  const managedCopy = JSON.parse(fs.readFileSync(path.join(privateManaged, "config/opencode/opencode.jsonc"), "utf8"));
+  assert.equal(managedCopy.plugin, undefined, "managed config still strips plugins");
+  assert.equal(managedCopy.provider.magpie.models["workbuddy/hy4flash-free"].name, "Hy4 flash");
+  assert.equal(managedCopy.provider.openaiCompat.models["local-qwen"].limit.context, 131072);
 });
 
 test("pending tool arguments are published when filled and retained on completion", async (t) => {

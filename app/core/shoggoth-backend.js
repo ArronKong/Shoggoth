@@ -3220,7 +3220,7 @@ class ShoggothBackend extends AgentBackend {
     catch { features = require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null); }
     let unavailableSource;
     const read = input => this._page("profile.binding.models.list", input, "models", {
-      maxBytes: MAX_HISTORY_BYTES, maxItems: 512,
+      maxBytes: MAX_HISTORY_BYTES, maxItems: 2048,
       onPage: page => { if (page.unavailableSource) unavailableSource = page.unavailableSource; },
     });
     try {

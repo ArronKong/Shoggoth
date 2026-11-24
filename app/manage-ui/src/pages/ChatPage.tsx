@@ -1055,7 +1055,7 @@ function fmtTokens(n?: number): string {
 // 与 gateway 的 /think <off|low|medium|high|xhigh> 协议词一致。
 const THINK_LEVEL_LABELS: Record<string, string> = {
   off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High",
-  xhigh: "Extra high", maximum: "Maximum", adaptive: "Adaptive", on: "On",
+  xhigh: "Extra high", extra_high: "Extra high", maximum: "Maximum", adaptive: "Adaptive", on: "On",
   // Hermes reasoning-effort vocabulary (none = thinking off sentinel)
   none: "Off", max: "Max", ultra: "Ultra",
 };

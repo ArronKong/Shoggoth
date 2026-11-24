@@ -10,7 +10,14 @@ const logFile = process.env.FAKE_ACP_LOG;
 const record = (entry) => { if (logFile) fs.appendFileSync(logFile, `${JSON.stringify(entry)}\n`); };
 const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const update = (sessionId, value) => send({ method: "session/update", params: { sessionId, update: value } });
-const models = ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-pro-agent"];
+const groupedThinking = process.env.FAKE_ACP_GROUPED_THINKING === "1";
+const groupedFamilies = new Map([
+  ["gemini-4-carbon", { name: "Gemini 4 Carbon", defaultLevel: "medium", levels: ["low", "medium", "high"] }],
+  ["gemini-4-hydrogen", { name: "Gemini 4 Hydrogen", defaultLevel: "high", levels: ["low", "medium", "high", "xhigh"] }],
+]);
+const models = groupedThinking
+  ? ["gemini-4-carbon", "gemini-4-hydrogen", "claude-plain"]
+  : ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-pro-agent"];
 const sessions = new Map();
 let nextRequestId = 0;
 const pendingReverse = new Map();
@@ -18,19 +25,37 @@ let pendingPrompt = null;
 let resumeAttempts = 0;
 
 function configOptions(state) {
+  const family = groupedThinking ? groupedFamilies.get(state.model) : null;
   return [
     { id: "model", name: "Model", category: "model", type: "select", currentValue: state.model,
-      options: models.map((value) => ({ value, name: value.toUpperCase(), description: value })) },
+      options: models.map((value) => ({ value, name: groupedFamilies.get(value)?.name || value.toUpperCase(), description: value })) },
+    ...(family ? [{
+      id: "thinking_level", name: "Thinking Level", category: "thought_level", type: "select",
+      currentValue: state.thinking_level || family.defaultLevel,
+      options: family.levels.map((value) => ({ value, name: value.toUpperCase() })),
+    }] : []),
     { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: state.mode,
       options: ["default", "auto_edit", "yolo"].map((value) => ({ value, name: value, description: value })) },
   ];
 }
 
 function sessionResult(state) {
+  const availableModels = groupedThinking
+    ? models.flatMap((value) => {
+      const family = groupedFamilies.get(value);
+      return family
+        ? family.levels.map((level) => ({ modelId: `${value}-${level}`, name: `${family.name} (${level})` }))
+        : [{ modelId: value, name: value }];
+    })
+    : models.map((modelId) => ({ modelId, name: modelId }));
+  const currentFamily = groupedThinking ? groupedFamilies.get(state.model) : null;
   return {
     modes: { currentModeId: state.mode, availableModes: [] },
     configOptions: configOptions(state),
-    models: { availableModels: models.map((modelId) => ({ modelId, name: modelId })), currentModelId: state.model },
+    models: {
+      availableModels,
+      currentModelId: currentFamily ? `${state.model}-${state.thinking_level || currentFamily.defaultLevel}` : state.model,
+    },
   };
 }
 
@@ -53,7 +78,7 @@ async function prompt(message) {
   const { sessionId } = message.params;
   const text = message.params.prompt.find((block) => block.type === "text")?.text || "";
   const images = message.params.prompt.filter((block) => block.type === "image").length;
-  record({ method: "session/prompt", sessionId, text, images, mode: sessions.get(sessionId)?.mode, model: sessions.get(sessionId)?.model });
+  record({ method: "session/prompt", sessionId, text, images, mode: sessions.get(sessionId)?.mode, model: sessions.get(sessionId)?.model, thinking_level: sessions.get(sessionId)?.thinking_level ?? null });
   const directive = /DIRECTIVE:([A-Z_]+)/u.exec(text)?.[1] || "PLAIN";
   if (directive === "REMOTE_ERROR") {
     send({ id: message.id, error: { code: -32603, message: "Internal error", data: {
@@ -209,7 +234,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return;
     }
     const sessionId = `00000000-0000-4000-8000-${String(sessions.size + 1).padStart(12, "0")}`;
-    sessions.set(sessionId, { model: models[0], mode: "default" });
+    const defaultFamily = groupedThinking ? groupedFamilies.get(models[0]) : null;
+    sessions.set(sessionId, { model: models[0], mode: "default", ...(defaultFamily ? { thinking_level: defaultFamily.defaultLevel } : {}) });
     send({ id: message.id, result: { sessionId, ...sessionResult(sessions.get(sessionId)) } });
     update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: [
       { name: "plan", description: "Plan carefully before executing a task." },
@@ -246,7 +272,23 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       send({ id: message.id, error: { code: -32602, message: "Unknown model" } });
       return;
     }
-    state[message.params.configId] = message.params.value;
+    if (message.params.configId === "thinking_level") {
+      const family = groupedFamilies.get(state.model);
+      if (!family || !family.levels.includes(message.params.value)) {
+        send({ id: message.id, error: { code: -32602, message: "Unknown thinking level" } });
+        return;
+      }
+      state.thinking_level = message.params.value;
+    } else if (message.params.configId === "model") {
+      const prevLevel = state.thinking_level;
+      state.model = message.params.value;
+      const nextFamily = groupedFamilies.get(state.model);
+      state.thinking_level = nextFamily
+        ? (prevLevel && nextFamily.levels.includes(prevLevel) ? prevLevel : nextFamily.defaultLevel)
+        : undefined;
+    } else {
+      state[message.params.configId] = message.params.value;
+    }
     send({ id: message.id, result: { configOptions: configOptions(state) } });
   } else if (message.method === "session/prompt") {
     void prompt(message);

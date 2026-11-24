@@ -288,3 +288,121 @@ test("accepted operation replay reads native events without running the agent ag
   assert.equal(f.dispatches, 1);
   assert.equal(f.bridge.activeTurns.size, 0);
 });
+
+test("models/list resolves per-model reasoning capabilities and turn/start applies reasoningEffort on agent/request", async () => {
+  let requestListener = null;
+  const resolvedConfigs = [];
+  let persistedEffort;
+  const session = { id: "session-reasoning", header: { cwd: "/tmp", createdAt: 1 } };
+  const events = [];
+  const bridge = new BridgeRuntime({
+    agentDefaultModel: { currentSelection: () => ({ provider: "deepseek-official", model: "deepseek-v4-flash" }) },
+    llm: {
+      listProviders: () => [{ id: "deepseek-official", name: "DeepSeek" }],
+      listModels: async () => [{ id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash" }],
+      resolveModelInfo: async (provider, model) => ({
+        provider,
+        id: model,
+        name: "DeepSeek-V4-Flash",
+        context: { contextWindow: 1_000_000 },
+        reasoning: {
+          efforts: [{ id: "off" }, { id: "low" }, { id: "high" }, { id: "max" }],
+          defaultEffort: "high",
+        },
+      }),
+    },
+    agents: {
+      create: async (options) => {
+        const registry = promptRegistry();
+        options.setup({
+          systemPrompt: registry,
+          on(name, fn) {
+            if (name === "agent/request") requestListener = fn;
+            return () => { if (requestListener === fn) requestListener = null; };
+          },
+        });
+        let idle = Promise.resolve();
+        return {
+          agent: {
+            session,
+            followup(message) {
+              idle = Promise.resolve().then(async () => {
+                const seed = {
+                  provider: "deepseek-official",
+                  model: "deepseek-v4-flash",
+                  ...(persistedEffort !== undefined ? { reasoningEffort: persistedEffort } : {}),
+                };
+                const config = requestListener ? await requestListener({}, () => Promise.resolve(seed)) : seed;
+                resolvedConfigs.push(config);
+                persistedEffort = config.reasoningEffort;
+                for (const event of [
+                  { type: "turn/start", data: { turn: resolvedConfigs.length }, seq: events.length },
+                  { type: "user/message", data: message, seq: events.length + 1 },
+                  { type: "assistant/message", data: { message: { content: [{ type: "text", text: "ok" }] } }, seq: events.length + 2 },
+                  { type: "turn/end", data: { reason: { kind: "completed" } }, seq: events.length + 3 },
+                ]) {
+                  events.push(event);
+                  bridge.onSessionEvent(session, event);
+                }
+              });
+            },
+            whenIdle: () => idle,
+          },
+          dispose: async () => {},
+        };
+      },
+      resume: async () => { throw new Error("unexpected resume"); },
+    },
+    permissionPresets: { set: async () => {} },
+    sessions: { flush: async () => {} },
+    sessionPersistence: {
+      inspect: async () => {
+        if (!events.length) throw Object.assign(new Error(`session "${session.id}" not found`), { name: "SessionPersistenceNotFoundError" });
+        return { meta: session.header, events };
+      },
+    },
+    get: () => undefined,
+  });
+  const frames = [];
+  bridge.write = async (frame) => { frames.push(frame); };
+  const call = async (id, command, params = {}) => {
+    await bridge.onRequest({ type: "request", id, command, params });
+    const response = frames.find((frame) => frame.type === "response" && frame.id === id);
+    assert.equal(response?.success, true, JSON.stringify(response?.error));
+    return response.data;
+  };
+
+  const listed = await call("m1", "models/list");
+  assert.deepEqual(listed.models[0].capabilities, {
+    thinkingOptions: ["off", "low", "high", "max"],
+    thinkingDefault: "high",
+    fastTier: null,
+  });
+  assert.equal(listed.models[0].contextWindow, 1_000_000);
+
+  await call("s1", "session/start", {
+    remoteSessionId: session.id,
+    cwd: "/tmp",
+    developerInstructions: "RULES",
+    model: "deepseek-official/deepseek-v4-flash",
+    permissionMode: "workspace-write",
+  });
+  await call("t1", "turn/start", {
+    remoteSessionId: session.id,
+    sessionId: "host-session",
+    turnId: "turn-1",
+    operationId: "op-1",
+    prompt: "one",
+    reasoningEffort: "max",
+  });
+  await call("t2", "turn/start", {
+    remoteSessionId: session.id,
+    sessionId: "host-session",
+    turnId: "turn-2",
+    operationId: "op-2",
+    prompt: "two",
+    reasoningEffort: null,
+  });
+  assert.equal(resolvedConfigs[0].reasoningEffort, "max");
+  assert.equal("reasoningEffort" in resolvedConfigs[1], false, "null clears persisted effort so adapter default applies");
+});

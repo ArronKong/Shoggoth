@@ -11,6 +11,7 @@ const { imageAttachments } = require("./chat-attachments");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { contextToolContent } = require("./context-tool-content");
 const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
+const { effortId } = require("./model-reasoning-catalog");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { PROXY_ENV_PAIRS, readMacSystemProxyEnvironmentAsync } = require("./proxy-environment");
 const { runtimeBinding } = require("./runtime-adapter");
@@ -243,29 +244,80 @@ function defaultProcessGroupExists(pid) {
   try { process.kill(-pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
-function modelCatalogFromConfig(configOptions) {
+const EMPTY_MODEL_CAPABILITIES = Object.freeze({
+  thinkingOptions: Object.freeze([]),
+  thinkingDefault: null,
+  fastTier: null,
+});
+
+function thinkingConfigFromOptions(configOptions) {
+  if (!Array.isArray(configOptions)) return null;
+  const option = configOptions.find((entry) => plain(entry)
+    && (entry.id === "thinking_level" || entry.category === "thought_level")
+    && safeString(entry.id, 128) && Array.isArray(entry.options));
+  if (!option) return null;
+  const options = [];
+  const seen = new Set();
+  for (const entry of option.options) {
+    const value = plain(entry) ? entry.value : null;
+    if (!effortId(value) || seen.has(value)) continue;
+    seen.add(value);
+    options.push(value);
+    if (options.length >= 16) break;
+  }
+  const currentValue = effortId(option.currentValue) && seen.has(option.currentValue)
+    ? option.currentValue : null;
+  return Object.freeze({
+    configId: option.id,
+    currentValue,
+    options: Object.freeze(options),
+  });
+}
+
+function modelCatalogFromConfig(configOptions, { capabilitiesByModel = null } = {}) {
   if (!Array.isArray(configOptions)) return null;
   const option = configOptions.find((entry) => plain(entry) && entry.id === "model" && Array.isArray(entry.options));
   if (!option) return null;
-  const models = [];
+  const thought = thinkingConfigFromOptions(configOptions);
+  const rawModels = [];
   const seen = new Set();
   for (const entry of option.options.slice(0, 256)) {
     if (!plain(entry) || !safeString(entry.value, 512) || seen.has(entry.value)) continue;
     seen.add(entry.value);
-    models.push(Object.freeze({
+    rawModels.push({
       model: entry.value,
       displayName: safeString(entry.name, 512) ? entry.name : entry.value,
       description: safeString(entry.description, 4096, { empty: true }) ? entry.description : "",
-    }));
+    });
   }
-  if (models.length === 0) return null;
-  const current = safeString(option.currentValue, 512) && seen.has(option.currentValue) ? option.currentValue : models[0].model;
+  if (rawModels.length === 0) return null;
+  const current = safeString(option.currentValue, 512) && seen.has(option.currentValue) ? option.currentValue : rawModels[0].model;
+  const models = rawModels.map((entry) => {
+    let capabilities = capabilitiesByModel?.get(entry.model) ?? null;
+    if (!capabilities && entry.model === current && thought && thought.options.length > 0) {
+      capabilities = Object.freeze({
+        thinkingOptions: thought.options,
+        thinkingDefault: thought.currentValue,
+        fastTier: null,
+      });
+    }
+    return Object.freeze({
+      ...entry,
+      capabilities: capabilities ?? EMPTY_MODEL_CAPABILITIES,
+    });
+  });
   return Object.freeze({ current, models: Object.freeze(models) });
 }
 
 function configValue(configOptions, id) {
   const option = Array.isArray(configOptions) ? configOptions.find((entry) => plain(entry) && entry.id === id) : null;
   return safeString(option?.currentValue, 512) ? option.currentValue : null;
+}
+
+function validateThinkingLevel(value) {
+  if (value === undefined || value === null) return value;
+  if (!effortId(value)) throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "Antigravity thinking level is invalid");
+  return value;
 }
 
 class AntigravityAcpRuntimeHost {
@@ -706,33 +758,72 @@ class AntigravityAcpRuntimeHost {
   }
 
   _rememberConfig(sessionId, configOptions) {
-    const catalog = modelCatalogFromConfig(configOptions);
+    const previousCatalog = this.profileState.acpModelCatalog;
+    const previousCapabilities = previousCatalog
+      ? new Map(previousCatalog.models
+        .filter((entry) => entry.capabilities?.thinkingOptions?.length > 0)
+        .map((entry) => [entry.model, entry.capabilities]))
+      : null;
+    const catalog = modelCatalogFromConfig(configOptions, { capabilitiesByModel: previousCapabilities });
     if (catalog) this.profileState.acpModelCatalog = catalog;
     const config = this.sessionConfigs.get(sessionId) || {};
+    const hasConfigOptions = Array.isArray(configOptions);
+    const thought = hasConfigOptions ? thinkingConfigFromOptions(configOptions) : null;
     this.sessionConfigs.set(sessionId, {
       ...config,
       currentModel: configValue(configOptions, "model") ?? config.currentModel ?? null,
       currentMode: configValue(configOptions, "mode") ?? config.currentMode ?? null,
+      thinkingConfigId: hasConfigOptions ? (thought?.configId ?? null) : (config.thinkingConfigId ?? null),
+      currentThinkingLevel: hasConfigOptions ? (thought?.currentValue ?? null) : (config.currentThinkingLevel ?? null),
+      thinkingOptions: hasConfigOptions ? (thought ? thought.options : []) : (config.thinkingOptions ?? []),
     });
   }
 
-  async _applyConfig(sessionId, { model, mode }) {
-    for (const [configId, value, field] of [["model", model, "currentModel"], ["mode", mode, "currentMode"]]) {
-      // A model response may also update the selected mode. Its latest receipt
-      // decides whether the next write is still needed.
-      const current = this.sessionConfigs.get(sessionId)?.[field];
-      if (value === null || value === undefined || value === current) continue;
-      let result;
-      try {
-        result = await this.rpc.request("session/set_config_option", { sessionId, configId, value },
-          { timeoutMs: this.requestTimeoutMs });
-      } catch (error) {
-        recordAntigravitySessionDiagnostic({ paths: this.paths, binding: this.binding,
-          method: "session/set_config_option", sessionId, executionRunId: this.mcpExecutionRunId,
-          error, remoteClassification: classifyAntigravitySessionRemoteError(error?.rpcDetail) });
-        throw this._requestFailure(error, configId === "model" ? "RUNTIME_MODEL_UNAVAILABLE" : "ANTIGRAVITY_ACP_CONFIG_FAILED");
+  async _setConfigOption(sessionId, configId, value, fallbackCode) {
+    let result;
+    try {
+      result = await this.rpc.request("session/set_config_option", { sessionId, configId, value },
+        { timeoutMs: this.requestTimeoutMs });
+    } catch (error) {
+      recordAntigravitySessionDiagnostic({ paths: this.paths, binding: this.binding,
+        method: "session/set_config_option", sessionId, executionRunId: this.mcpExecutionRunId,
+        error, remoteClassification: classifyAntigravitySessionRemoteError(error?.rpcDetail) });
+      throw this._requestFailure(error, fallbackCode);
+    }
+    this._rememberConfig(sessionId, result?.configOptions);
+    return result;
+  }
+
+  async _applyConfig(sessionId, { model, mode, thinkingLevel }) {
+    // Apply model first: switching models updates the available thinking_level
+    // options and may also update the selected mode.
+    const currentModel = this.sessionConfigs.get(sessionId)?.currentModel;
+    if (model !== null && model !== undefined && model !== currentModel) {
+      await this._setConfigOption(sessionId, "model", model, "RUNTIME_MODEL_UNAVAILABLE");
+    }
+    if (thinkingLevel !== undefined) {
+      const sessionConfig = this.sessionConfigs.get(sessionId);
+      if (thinkingLevel !== null) {
+        if (!sessionConfig?.thinkingConfigId || !Array.isArray(sessionConfig.thinkingOptions)
+          || !sessionConfig.thinkingOptions.includes(thinkingLevel)) {
+          throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "Antigravity thinking level is unavailable for this model");
+        }
+        if (thinkingLevel !== sessionConfig.currentThinkingLevel) {
+          await this._setConfigOption(sessionId, sessionConfig.thinkingConfigId, thinkingLevel, "RUNTIME_MODEL_SETTINGS_INVALID");
+        }
+      } else if (sessionConfig?.thinkingConfigId) {
+        const catalogEntry = this.profileState.acpModelCatalog?.models
+          .find((entry) => entry.model === sessionConfig.currentModel);
+        const defaultLevel = catalogEntry?.capabilities?.thinkingDefault ?? null;
+        if (defaultLevel && sessionConfig.thinkingOptions?.includes(defaultLevel)
+          && sessionConfig.currentThinkingLevel !== defaultLevel) {
+          await this._setConfigOption(sessionId, sessionConfig.thinkingConfigId, defaultLevel, "RUNTIME_MODEL_SETTINGS_INVALID");
+        }
       }
-      this._rememberConfig(sessionId, result?.configOptions);
+    }
+    const currentMode = this.sessionConfigs.get(sessionId)?.currentMode;
+    if (mode !== null && mode !== undefined && mode !== currentMode) {
+      await this._setConfigOption(sessionId, "mode", mode, "ANTIGRAVITY_ACP_CONFIG_FAILED");
     }
   }
 
@@ -829,6 +920,7 @@ class AntigravityAcpRuntimeHost {
     normalizeAntigravityPermissionPolicy(input.permissionPolicy ?? this.permissionPolicy);
     const cwd = this._assertCwd(input.cwd);
     const model = this._validateModel(input.model);
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const mode = this._acpMode(input.permissionMode);
     const snapshot = this.ledger.snapshot();
     const existing = snapshot.sessions.find((session) => session.source === input.source);
@@ -894,7 +986,7 @@ class AntigravityAcpRuntimeHost {
       permissionMode: input.permissionMode ?? null,
     });
     this._rememberConfig(session.id, response.configOptions);
-    await this._applyConfig(session.id, { model, mode });
+    await this._applyConfig(session.id, { model, mode, thinkingLevel });
     return { session: this._projectSession(session) };
   }
 
@@ -911,6 +1003,7 @@ class AntigravityAcpRuntimeHost {
     const cwd = this._assertCwd(input.cwd);
     if (session.cwd !== cwd) throw hostError("RUNTIME_SESSION_NOT_FOUND", "Antigravity session workspace does not match");
     const model = this._validateModel(input.model);
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const mode = this._acpMode(input.permissionMode);
     const alreadyLoaded = this.sessionConfigs.has(session.id) && this.sessionConfigs.get(session.id).loaded === true;
     if (!alreadyLoaded) {
@@ -959,7 +1052,7 @@ class AntigravityAcpRuntimeHost {
       developerInstructions: input.developerInstructions || "",
       permissionMode: input.permissionMode ?? null,
     });
-    try { await this._applyConfig(session.id, { model, mode }); }
+    try { await this._applyConfig(session.id, { model, mode, thinkingLevel }); }
     catch (error) { throw runtimeSessionResumeError(error); }
     return { session: this._projectSession(session) };
   }
@@ -1086,6 +1179,7 @@ class AntigravityAcpRuntimeHost {
     const permissionMode = input.permissionMode ?? config.permissionMode ?? null;
     const mode = this._acpMode(permissionMode);
     const model = this._validateModel(input.model);
+    const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const session = this._requireSession(input.sessionId);
     if (session.archived) throw hostError("RUNTIME_SESSION_ARCHIVED", "Antigravity session is archived");
     if (this._assertCwd(input.cwd) !== session.cwd) {
@@ -1096,6 +1190,7 @@ class AntigravityAcpRuntimeHost {
       input.sessionId, input.operationId, input.prompt, input.context ?? null, model, input.cwd ?? null,
       input.permissionPolicy ?? null, permissionMode, (input.attachments || []).map((item) => [item.id ?? null, item.name ?? null]),
       ...(input.turnDeveloperInstructions == null ? [] : [require("./native-instruction-delivery").turnInstructionFingerprint(input)]),
+      ...(thinkingLevel == null ? [] : [{ thinkingLevel }]),
     ])).digest("hex");
     const existing = turnByOperation(session, input.operationId);
     if (existing) {
@@ -1119,7 +1214,7 @@ class AntigravityAcpRuntimeHost {
       throw hostError("RUNTIME_SESSION_BUSY", "Antigravity session already has an active turn");
     }
     // Configuration is applied before any receipt exists: its failure is not a send.
-    await this._applyConfig(session.id, { model, mode });
+    await this._applyConfig(session.id, { model, mode, thinkingLevel });
     const promptParts = this._promptParts(session.id, input);
     const params = {
       sessionId: session.id,
@@ -1258,8 +1353,71 @@ class AntigravityAcpRuntimeHost {
           "Antigravity model catalog is unavailable");
     }
     this.authVerified = true;
-    const catalog = modelCatalogFromConfig(response?.configOptions);
-    if (!catalog) throw hostError("RUNTIME_MODEL_CATALOG_INVALID", "Antigravity model catalog is invalid");
+    const activeCatalogSessionId = safeString(response?.sessionId, 512) ? response.sessionId : catalogSessionId;
+    const baseCatalog = modelCatalogFromConfig(response?.configOptions);
+    if (!baseCatalog) throw hostError("RUNTIME_MODEL_CATALOG_INVALID", "Antigravity model catalog is invalid");
+    const initialThinking = thinkingConfigFromOptions(response?.configOptions);
+    const availableConcreteIds = Array.isArray(response?.models?.availableModels)
+      ? new Set(response.models.availableModels
+        .map((entry) => (plain(entry) && safeString(entry.modelId, 512) ? entry.modelId : null))
+        .filter(Boolean))
+      : null;
+    // Antigravity ACP 1.4.3+ collapses per-level variants into family entries
+    // in `configOptions[model]` and emits `thinking_level` only for the active
+    // model. Probe the remaining grouped families on the catalog session so
+    // every selectable model advertises its exact server-supplied levels.
+    const probeCandidates = !activeCatalogSessionId ? []
+      : availableConcreteIds
+        ? baseCatalog.models.filter((entry) => entry.model !== baseCatalog.current && !availableConcreteIds.has(entry.model))
+        : initialThinking
+          ? baseCatalog.models.filter((entry) => entry.model !== baseCatalog.current).slice(0, 64)
+          : [];
+    let catalog = baseCatalog;
+    if (probeCandidates.length > 0) {
+      const capabilitiesByModel = new Map();
+      const currentEntry = baseCatalog.models.find((entry) => entry.model === baseCatalog.current);
+      if (currentEntry?.capabilities?.thinkingOptions?.length > 0) {
+        capabilitiesByModel.set(baseCatalog.current, currentEntry.capabilities);
+      }
+      let lastModel = baseCatalog.current;
+      try {
+        for (const candidate of probeCandidates) {
+          let probed;
+          try {
+            probed = await this.rpc.request("session/set_config_option",
+              { sessionId: activeCatalogSessionId, configId: "model", value: candidate.model },
+              { timeoutMs: this.requestTimeoutMs });
+          } catch (error) {
+            if (error?.code === "ANTIGRAVITY_ACP_REMOTE_ERROR") continue;
+            throw error;
+          }
+          lastModel = candidate.model;
+          const thought = thinkingConfigFromOptions(probed?.configOptions);
+          if (thought && thought.options.length > 0) {
+            capabilitiesByModel.set(candidate.model, Object.freeze({
+              thinkingOptions: thought.options,
+              thinkingDefault: null,
+              fastTier: null,
+            }));
+          }
+        }
+      } finally {
+        if (lastModel !== baseCatalog.current && this.state === "ready" && this.rpc && !this.rpc.ended) {
+          const restored = await this.rpc.request("session/set_config_option",
+            { sessionId: activeCatalogSessionId, configId: "model", value: baseCatalog.current },
+            { timeoutMs: this.requestTimeoutMs }).catch(() => null);
+          const restoredThought = thinkingConfigFromOptions(restored?.configOptions);
+          if (initialThinking?.currentValue && restoredThought
+            && restoredThought.currentValue !== initialThinking.currentValue
+            && restoredThought.options.includes(initialThinking.currentValue)) {
+            await this.rpc.request("session/set_config_option",
+              { sessionId: activeCatalogSessionId, configId: restoredThought.configId, value: initialThinking.currentValue },
+              { timeoutMs: this.requestTimeoutMs }).catch(() => null);
+          }
+        }
+      }
+      catalog = modelCatalogFromConfig(response?.configOptions, { capabilitiesByModel }) || baseCatalog;
+    }
     this.profileState.acpModelCatalog = catalog;
     this.processCatalog = catalog;
     return catalog;
@@ -1283,11 +1441,18 @@ class AntigravityAcpRuntimeHost {
       load: () => this._loadModelCatalog(),
     });
     const page = catalog.models.slice(offset, offset + limit).map((model) => ({
-      ...model,
+      model: model.model,
+      displayName: model.displayName,
+      description: model.description,
       isDefault: model.model === catalog.current,
       hidden: false,
-      // Reasoning effort is part of the model id (for example *-high / *-low).
-      capabilities: { thinkingOptions: [], thinkingDefault: null, fastTier: null },
+      capabilities: model.capabilities
+        ? {
+          thinkingOptions: [...model.capabilities.thinkingOptions],
+          thinkingDefault: model.capabilities.thinkingDefault,
+          fastTier: model.capabilities.fastTier,
+        }
+        : { thinkingOptions: [], thinkingDefault: null, fastTier: null },
     }));
     const next = offset + page.length;
     return { data: page, nextCursor: next < catalog.models.length ? String(next) : null };

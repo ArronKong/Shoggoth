@@ -3891,3 +3891,181 @@ test("a failed Grok initialize response cannot enable reload compatibility", asy
     await assert.rejects(rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
   } finally { await rpc.terminate(); child.closeProcess(); }
 });
+
+test("Grok exposes sorted reasoningEfforts capabilities and applies reasoning_effort via session/set_config_option", async () => {
+  const applied = [];
+  let sessionCounter = 0;
+  const sessionState = new Map();
+  const fixture = fixtureOptions((message, child) => {
+    if (message.method === "initialize") {
+      return rpcResult({
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+        authMethods: [],
+        _meta: {
+          agentVersion: "1.0.93",
+          defaultAuthMethodId: null,
+          modelState: {
+            currentModelId: "grok-4.6",
+            availableModels: [
+              {
+                modelId: "grok-4.6",
+                name: "Grok 4.6",
+                description: "frontier",
+                _meta: {
+                  supportsReasoningEffort: true,
+                  reasoningEffort: "high",
+                  reasoningEfforts: [
+                    { id: "xhigh", value: "xhigh", label: "Extra High", default: false },
+                    { id: "high", value: "high", label: "High", default: true },
+                    { id: "medium", value: "medium", label: "Medium", default: false },
+                    { id: "low", value: "low", label: "Low", default: false },
+                  ],
+                },
+              },
+              {
+                modelId: "grok-plain",
+                name: "Grok Plain",
+                description: "no reasoning",
+                _meta: { supportsReasoningEffort: false, reasoningEfforts: [{ value: "high" }] },
+              },
+            ],
+          },
+        },
+      });
+    }
+    if (message.method === "session/new") {
+      const sessionId = `grok-session-${++sessionCounter}`;
+      const model = message.params?._meta?.modelId || "grok-4.6";
+      sessionState.set(sessionId, { model, effort: "high" });
+      return rpcResult({
+        sessionId,
+        configOptions: [
+          { id: "model", category: "model", type: "select", currentValue: model,
+            options: [{ value: "grok-4.6", name: "Grok 4.6" }, { value: "grok-plain", name: "Grok Plain" }] },
+          ...(model === "grok-4.6" ? [{
+            id: "reasoning_effort", category: "thought_level", type: "select", currentValue: "high",
+            options: ["low", "medium", "high", "xhigh"].map((value) => ({ value, name: value })),
+          }] : []),
+        ],
+      });
+    }
+    if (message.method === "session/set_config_option") {
+      applied.push(message.params);
+      const state = sessionState.get(message.params.sessionId);
+      assert.equal(typeof message.params.value, "string", "Grok ACP expects string config value");
+      if (message.params.configId === "reasoning_effort") state.effort = message.params.value;
+      return rpcResult({
+        configOptions: [
+          { id: "model", category: "model", type: "select", currentValue: state.model,
+            options: [{ value: "grok-4.6", name: "Grok 4.6" }, { value: "grok-plain", name: "Grok Plain" }] },
+          { id: "reasoning_effort", category: "thought_level", type: "select", currentValue: state.effort,
+            options: ["low", "medium", "high", "xhigh"].map((value) => ({ value, name: value })) },
+        ],
+      });
+    }
+    if (message.method === "session/prompt") {
+      const { sessionId } = message.params;
+      queueMicrotask(() => {
+        child.sendNotification("session/update", {
+          sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } },
+        });
+        child.sendResult(message.id, { stopReason: "end_turn" });
+      });
+      return NO_RESPONSE;
+    }
+    return rpcResult({});
+  });
+  const workspace = path.join(fixture.paths.trustedRoot, "workspace");
+  fs.mkdirSync(workspace, { mode: 0o700 });
+  const policy = { approvalPolicy: "on-request", sandbox: "danger-full-access" };
+  try {
+    const runtime = await acquire(fixture, { workspace, permissionPolicy: policy });
+    const models = await runtime.modelsList({ limit: 100 });
+    assert.deepEqual(models, {
+      data: [
+        {
+          model: "grok-4.6",
+          displayName: "Grok 4.6",
+          description: "frontier",
+          isDefault: true,
+          hidden: false,
+          capabilities: {
+            thinkingOptions: ["low", "medium", "high", "xhigh"],
+            thinkingDefault: "high",
+            fastTier: null,
+          },
+        },
+        {
+          model: "grok-plain",
+          displayName: "Grok Plain",
+          description: "no reasoning",
+          isDefault: false,
+          hidden: false,
+        },
+      ],
+      nextCursor: null,
+    });
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    const started = await runtime.sessionStart({
+      source: "grok-thinking-source",
+      cwd: workspace,
+      model: "grok-4.6",
+      developerInstructions: "rules",
+      permissionPolicy: policy,
+    });
+    const sessionId = started.session.id;
+    await assert.rejects(runtime.turnStart({
+      sessionId,
+      operationId: "op-invalid",
+      prompt: "hi",
+      cwd: workspace,
+      model: "grok-4.6",
+      thinkingLevel: "ultra",
+      permissionPolicy: policy,
+    }), { code: "RUNTIME_MODEL_SETTINGS_INVALID" });
+    assert.equal(applied.length, 0);
+
+    const t1 = await runtime.turnStart({
+      sessionId,
+      operationId: "op-xhigh",
+      prompt: "hi",
+      cwd: workspace,
+      model: "grok-4.6",
+      thinkingLevel: "xhigh",
+      permissionPolicy: policy,
+    });
+    await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === t1.turn.id), "t1 done");
+    assert.deepEqual(applied, [{ sessionId, configId: "reasoning_effort", value: "xhigh" }]);
+
+    await assert.rejects(runtime.turnStart({
+      sessionId,
+      operationId: "op-xhigh",
+      prompt: "hi",
+      cwd: workspace,
+      model: "grok-4.6",
+      thinkingLevel: "low",
+      permissionPolicy: policy,
+    }), { code: "RUNTIME_OPERATION_CONFLICT" });
+
+    const t2 = await runtime.turnStart({
+      sessionId,
+      operationId: "op-inherit",
+      prompt: "again",
+      cwd: workspace,
+      model: "grok-4.6",
+      thinkingLevel: null,
+      permissionPolicy: policy,
+    });
+    await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === t2.turn.id), "t2 done");
+    assert.deepEqual(applied, [
+      { sessionId, configId: "reasoning_effort", value: "xhigh" },
+      { sessionId, configId: "reasoning_effort", value: "high" },
+    ], "explicit null restores the model default effort after an override");
+  } finally {
+    await fixture.adapter.stopAll();
+    fixture.cleanup();
+  }
+});
