@@ -15,6 +15,8 @@ const {
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
 } = require("../app/agent-service/runtime-account");
 const { createRuntimeCliAuth } = require("../app/runtime-cli-auth");
+const { resolveSystemCli } = require("../app/agent-service/system-cli-discovery");
+const { resolveOpenCodeBinary } = require("../app/agent-service/opencode-runtime-paths");
 
 function fixture() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "runtime-cli-auth-")));
@@ -37,6 +39,56 @@ function fixture() {
   });
   return { root, userHome, paths, create };
 }
+
+test("OpenCode auto-discovery recognizes its vendor directory after the existing fallbacks", t => {
+  const { root, userHome, create } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const standard = path.join(root, "standard");
+  const fileSystem = {
+    ...fs, realpathSync: target => fs.realpathSync(target.replace(/^\/(opt\/homebrew|usr\/local)\/bin\//u, `${standard}/$1/`)),
+  };
+  const writeExecutable = (target, mode = 0o755) => {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, "fixture", { mode });
+    return target;
+  };
+  const vendor = path.join(userHome, ".opencode", "bin", "opencode");
+  const options = { fs: fileSystem, parentEnv: { PATH: "/usr/bin:/bin" }, homedir: userHome };
+  assert.throws(() => resolveOpenCodeBinary(options), { code: "OPENCODE_BINARY_NOT_FOUND" });
+  writeExecutable(vendor);
+  assert.equal(resolveOpenCodeBinary(options), vendor);
+  let descriptor = create({ ...options, binaryResolvers: {}, systemOnly: true }).find(row => row.runtime === "opencode");
+  assert.equal(descriptor.binaryPath, vendor);
+  assert.equal(descriptor.binarySource, "vendor-bin");
+
+  const standardBinary = writeExecutable(path.join(standard, "opt", "homebrew", "opencode"));
+  assert.equal(resolveOpenCodeBinary(options), standardBinary);
+  const userBinary = writeExecutable(path.join(userHome, ".local", "bin", "opencode"));
+  assert.equal(resolveOpenCodeBinary(options), userBinary);
+
+  const nonExecutable = writeExecutable(path.join(root, "no-execute", "opencode"), 0o644);
+  const broken = path.join(root, "broken", "opencode");
+  fs.mkdirSync(path.dirname(broken));
+  fs.symlinkSync(path.join(root, "missing"), broken);
+  const shim = path.join(root, "prefix with spaces", "opencode");
+  fs.mkdirSync(path.dirname(shim));
+  fs.symlinkSync(vendor, shim);
+  const env = { PATH: ["relative", path.dirname(nonExecutable), path.dirname(broken), path.dirname(shim),
+    path.dirname(standardBinary), path.dirname(shim)].join(path.delimiter) };
+  descriptor = create({ ...options, parentEnv: env, binaryResolvers: {}, systemOnly: true }).find(row => row.runtime === "opencode");
+  assert.equal(descriptor.binaryPath, vendor);
+  assert.equal(descriptor.binaryCandidatePath, shim);
+  assert.equal(descriptor.binarySource, "path");
+  assert.equal(resolveOpenCodeBinary({ ...options, binaryPath: userBinary }), userBinary);
+  assert.throws(() => resolveOpenCodeBinary({ ...options, binaryPath: broken }), { code: "OPENCODE_BINARY_INVALID" });
+
+  for (const [runtime, command] of Object.entries({
+    codex: "codex", "grok-build": "grok", pi: "pi", "claude-code": "claude", "deepseek-harness": "dsh",
+  })) {
+    const executable = writeExecutable(path.join(userHome, ".local", "bin", command));
+    assert.equal(resolveSystemCli(runtime, options).binaryPath, executable);
+  }
+});
 
 test("catalog exposes eight available account-scoped environments without creating Runtime Homes", () => {
   const value = fixture();

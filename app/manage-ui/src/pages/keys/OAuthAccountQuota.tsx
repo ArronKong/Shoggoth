@@ -5,6 +5,13 @@ import type { OAuthProvider } from "../../types";
 import { canReadOAuthAccountQuota, readCachedOAuthQuota, refreshOAuthQuota, subscribeOAuthQuota } from "../../lib/oauthAccountQuota";
 import styles from "./OAuthAccountQuota.module.css";
 
+const unavailableMessageKeys = {
+  "antigravity-cli-missing": "keys.oauthQuotaAntigravityCliMissing",
+  "antigravity-cli-update-required": "keys.oauthQuotaAntigravityCliUpdateRequired",
+  "antigravity-cli-sign-in-required": "keys.oauthQuotaAntigravityCliSignInRequired",
+  "antigravity-cli-permission-denied": "keys.oauthQuotaAntigravityCliPermissionDenied",
+} as const;
+
 function quotaDuration(minutes: number, locale: string) {
   if (minutes % 1440 === 0) return new Intl.NumberFormat(locale, { style: "unit", unit: "day" }).format(minutes / 1440);
   if (minutes % 60 === 0) return new Intl.NumberFormat(locale, { style: "unit", unit: "hour" }).format(minutes / 60);
@@ -33,7 +40,8 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
   const result = canRead && snapshot?.status === "available" ? snapshot : undefined;
   const statusKey = !account.canReadQuota ? "keys.oauthQuotaNotIntegrated"
     : !canRead || snapshot?.status === "unsupported" ? "keys.oauthQuotaUnsupported"
-    : snapshot?.status === "unavailable" ? "keys.oauthQuotaUnavailable" : "keys.oauthQuotaLoading";
+    : snapshot?.status === "unavailable" ? (snapshot.reason && unavailableMessageKeys[snapshot.reason]) || "keys.oauthQuotaUnavailable"
+    : "keys.oauthQuotaLoading";
   const locale = i18n.resolvedLanguage || i18n.language;
   const percent = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 });
   const dateTime = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -65,6 +73,9 @@ export default function OAuthAccountQuota({ trigger, account, backend, title, on
               </div>
               {result?.accountName && <div className={styles.identity} dir="auto">
                 {result.accountName}
+              </div>}
+              {result && account.quotaSource === "antigravity-cli" && <div className={styles.identity}>
+                {t("keys.oauthQuotaAntigravityCliSource")}
               </div>}
               {!result && <div className={styles.identity}>{t(statusKey)}</div>}
             </div>

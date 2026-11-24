@@ -6,8 +6,10 @@ const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { CodexRuntimeHost } = require("../app/agent-service/codex-runtime-host");
 const { CodexSchemaContract } = require("../app/agent-service/codex-schema-contract");
-const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID: NATIVE, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID: MANAGED } =
-  require("../app/agent-service/runtime-account");
+const { AntigravityRuntimeAdapter } = require("../app/agent-service/antigravity-runtime-adapter");
+const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
+const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID: NATIVE, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID: MANAGED,
+  NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID: ANTIGRAVITY } = require("../app/agent-service/runtime-account");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { OpenClawBackend } = require("../app/core/openclaw-backend");
 const { BackendRegistry } = require("../app/core/backend-registry");
@@ -72,7 +74,7 @@ function fixtureOpenClaw(resetAt) {
 
 async function run() {
   const fixture = await openHandoffFixture({ builtinCliProfiles: true, validateHandles: true,
-    catalogs: { codex: ["fixture-model"] } });
+    catalogs: { codex: ["fixture-model"], antigravity: ["fixture-model"] } });
   let server;
   try {
     const schema = new CodexSchemaContract();
@@ -80,9 +82,22 @@ async function run() {
     const managed = fixtureCodex(schema, "managed-private-id", 28, resetsAt);
     const native = fixtureCodex(schema, "native-private-id", 61, resetsAt);
     const openClaw = fixtureOpenClaw(resetsAt * 1_000);
+    let antigravityReads = 0;
+    let antigravityQuota = { status: "available", checkedAt: Date.now(), windows: [
+      { label: "Gemini Models", durationMinutes: 300, usedPercent: 25, resetsAt: resetsAt * 1_000 },
+    ] };
+    const antigravityHost = { controlInstance: true, terminated: new Promise(() => {}),
+      subscribe: () => () => {},
+      authenticationState: async () => ({ authenticated: true, credentialPresent: true }),
+      accountQuotaRead: async () => { antigravityReads += 1; return antigravityQuota; },
+    };
+    const antigravityAdapter = new AntigravityRuntimeAdapter({ runtimePool: {
+      get: async () => antigravityHost, stop: async () => {}, stopAll: async () => {},
+    } });
     const manager = fixture.service.runtimeManager;
     const acquire = manager.acquire.bind(manager);
     manager.acquire = async (binding, options) => {
+      if (binding.runtimeAccountId === ANTIGRAVITY) return runtimeHandleV1(await antigravityAdapter.acquire(binding), binding);
       const handle = await acquire(binding, options);
       const codex = binding.runtimeAccountId === MANAGED ? managed : binding.runtimeAccountId === NATIVE ? native : null;
       if (codex) {
@@ -92,8 +107,9 @@ async function run() {
       return handle;
     };
     const registry = new BackendRegistry();
-    const backend = new ShoggothBackend({ paths: fixture.paths, runtimeCliAuth: [MANAGED, NATIVE].map(runtimeAccountId => ({
-      runtimeAccountId, runtime: "codex", name: runtimeAccountId, binaryPath: process.execPath,
+    const backend = new ShoggothBackend({ paths: fixture.paths, runtimeCliAuth: [MANAGED, NATIVE, ANTIGRAVITY].map(runtimeAccountId => ({
+      runtimeAccountId, runtime: runtimeAccountId === ANTIGRAVITY ? "antigravity" : "codex",
+      name: runtimeAccountId, binaryPath: process.execPath,
       accountHome: fixture.root, processHome: fixture.root, homeEnv: null,
       accountKind: runtimeAccountId === MANAGED ? "shoggoth-managed" : "native-user",
       credentialProbe: "runtime", credentialFile: null, loginArgs: [], logoutArgs: [], docsUrl: "https://example.test",
@@ -134,6 +150,16 @@ async function run() {
     const nativeSnapshot = await (await nativeQuota(NATIVE)).json();
     assert.equal(nativeSnapshot.accountName, "native@example.test");
     assert.equal(nativeSnapshot.windows[0].usedPercent, 61);
+
+    const antigravity = await nativeAccount(ANTIGRAVITY);
+    assert.equal(antigravity.status.loggedIn, true);
+    assert.equal(antigravity.canReadQuota, true);
+    assert.equal(antigravity.quotaSource, "antigravity-cli");
+    assert.equal(antigravityReads, 0);
+    assert.deepEqual(await (await nativeQuota(ANTIGRAVITY)).json(), antigravityQuota);
+    assert.equal((await nativeAccount(ANTIGRAVITY)).cachedQuota, undefined);
+    antigravityQuota = { status: "unavailable", reason: "antigravity-cli-sign-in-required" };
+    assert.deepEqual(await (await nativeQuota(ANTIGRAVITY)).json(), antigravityQuota);
 
     const cacheFile = path.join(userDataRoot, "ui-state", "oauth-account-quotas.json");
     assert.equal(fs.statSync(cacheFile).mode & 0o777, 0o600);

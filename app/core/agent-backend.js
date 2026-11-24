@@ -332,10 +332,15 @@ class AgentBackend {
    * view uses installed executables and existing readiness evidence without
    * requesting Service or account probes. The full view can refresh readiness.
    * `installsOnSignIn` marks a runtime whose sign-in installs it when missing.
+   * Detailed status can use the execution owner's installation inventory. The
+   * Agent creation view returns local inventory and cached proof without IPC.
    * @param {{forAgentCreation?:boolean}} [_options]
    * @returns {Promise<Array<{runtime:string,name:string,runtimeAccountId:string,enabled:boolean,releaseEnabled:boolean,installation:"available"|"unavailable"|"unknown",installsOnSignIn:boolean,serviceConnected:boolean}>>}
    */
   async getRuntimeStatuses(_options) { return []; }
+
+  /** Private desktop settings detail. Implementations scope paths to known CLI accounts. */
+  async getRuntimeCliLocations() { return []; }
 
   /**
    * Called after Settings saved a change to the disconnected backends or local

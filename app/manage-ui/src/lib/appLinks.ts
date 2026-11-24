@@ -19,8 +19,12 @@ export function internalAppHashFromHref(href: string, currentHref: string): stri
   try {
     const current = new URL(currentHref);
     const target = new URL(rawHref, current);
-    if (target.origin === current.origin && target.hash.startsWith("#/")) {
-      return target.hash;
+    if (target.origin !== current.origin) return null;
+    if (target.hash.startsWith("#/")) return target.hash;
+    // Existing inspiration reminders can link to the page without the router hash.
+    if (!target.hash && target.pathname === "/inspirations"
+      && (target.protocol === "http:" || target.protocol === "https:")) {
+      return `#${target.pathname}${target.search}`;
     }
   } catch {
     // Malformed URLs are not App routes.

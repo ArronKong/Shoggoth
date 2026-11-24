@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { executableRealpath, resolveSystemCli } = require("./system-cli-discovery");
 const { pathToFileURL } = require("node:url");
 const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
@@ -239,20 +240,6 @@ function prepareDeepSeekHarnessRuntimeAccountIntegration(paths, runtimeAccountId
   });
 }
 
-function executableRealpath(candidate, fileSystem) {
-  if (typeof candidate !== "string" || candidate.length === 0 || candidate.includes("\0")
-    || !path.isAbsolute(candidate)) return null;
-  try {
-    const resolved = fileSystem.realpathSync(candidate);
-    const stat = fileSystem.lstatSync(resolved);
-    if (!path.isAbsolute(resolved) || !stat.isFile() || stat.isSymbolicLink()) return null;
-    fileSystem.accessSync(resolved, fileSystem.constants.X_OK);
-    return path.resolve(resolved);
-  } catch {
-    return null;
-  }
-}
-
 function resolveDeepSeekHarnessExecutable(candidate, options = {}) {
   const resolved = executableRealpath(candidate, options.fs || fs);
   if (!resolved) {
@@ -265,34 +252,7 @@ function resolveDeepSeekHarnessExecutable(candidate, options = {}) {
 }
 
 function resolveDeepSeekHarnessBinary(options = {}) {
-  const fileSystem = options.fs || fs;
-  if (options.binaryPath !== undefined) {
-    return resolveDeepSeekHarnessExecutable(options.binaryPath, {
-      fs: fileSystem,
-      code: "DEEPSEEK_HARNESS_BINARY_INVALID",
-      message: "DeepSeek binaryPath must be an absolute executable regular file",
-    });
-  }
-  const parentEnv = options.parentEnv || process.env;
-  const userHome = options.homedir || os.homedir();
-  const candidates = [];
-  for (const entry of String(parentEnv.PATH || "").split(path.delimiter)) {
-    if (entry.length > 0 && path.isAbsolute(entry) && !entry.includes("\0")) {
-      candidates.push(path.join(entry, "dsh"));
-    }
-  }
-  if (typeof userHome === "string" && path.isAbsolute(userHome) && !userHome.includes("\0")) {
-    candidates.push(path.join(userHome, ".local", "bin", "dsh"));
-  }
-  candidates.push("/opt/homebrew/bin/dsh", "/usr/local/bin/dsh");
-  for (const candidate of [...new Set(candidates)]) {
-    const resolved = executableRealpath(candidate, fileSystem);
-    if (resolved) return resolved;
-  }
-  throw runtimeError(
-    "DEEPSEEK_HARNESS_BINARY_NOT_FOUND",
-    "DeepSeek CLI executable was not found",
-  );
+  return resolveSystemCli(DEEPSEEK_HARNESS_RUNTIME, options).binaryPath;
 }
 
 function resolveDeepSeekHarnessLaunch(binaryPath, options = {}) {

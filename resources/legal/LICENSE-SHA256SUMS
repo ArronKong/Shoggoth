@@ -54,7 +54,7 @@ d90bf0a089da4cf43d644ed240a0b3825dcdb705e64e38371d56995a4cc9e4c5  licenses/npm/g
 f65c5d9f22a317b2a10803bd1868461ce6499c2ed7217bc80c0cc772a748789c  licenses/npm/graceful-fs@4.2.11/LICENSE
 0f0ca96f50793990031ebc488a38f7292ff70bce8ab6a8e5eeda674abc32ccdf  licenses/npm/has-property-descriptors@1.0.2/LICENSE
 6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490  licenses/npm/highlight.js@11.11.1/LICENSE
-1cd0a2b02a6cc40ef8ee16310d13eeffdd7b5de4a562fd3ee7c921d8eb54f60a  licenses/npm/i18next@26.3.0/LICENSE
+1cd0a2b02a6cc40ef8ee16310d13eeffdd7b5de4a562fd3ee7c921d8eb54f60a  licenses/npm/i18next@26.3.4/LICENSE
 4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b  licenses/npm/isexe@2.0.0/LICENSE
 8078b0829d6c3e9ecde2f003e1966e4cad3efc6e7a640efbab0313cc166b1af1  licenses/npm/jose@6.2.12/LICENSE.md
 2213d91c606205c71eb051a199478cdc2adde945893404d7f1421436dd6d5cc1  licenses/npm/js-tokens@4.0.0/LICENSE

@@ -2,13 +2,14 @@ name: Recover hosted release capacity
 
 on:
   workflow_run:
-    workflows: [Signed macOS draft]
+    workflows: [Signed macOS draft, CI]
     types: [completed]
 
 permissions:
   contents: read
   actions: write
   checks: read
+  pull-requests: read
 
 concurrency:
   group: shoggoth-release-recovery-${{ github.event.workflow_run.id }}
@@ -16,7 +17,12 @@ concurrency:
 
 jobs:
   recover:
-    if: github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository
+    if: >-
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.event == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'failure' &&
+        startsWith(github.event.workflow_run.head_branch, 'codex/release-v')))
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:

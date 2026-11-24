@@ -306,10 +306,7 @@ function resolveAntigravityExecutable(candidate, options = {}) {
   return resolved;
 }
 
-// The ACP server is installed by the Antigravity sign-in. Models offers that
-// sign-in once this Mac already uses Antigravity, shown by its `agy` command or
-// its app; neither is executed. Its built-in Agent waits for the server.
-function antigravityUsedOnThisMac(options = {}) {
+function resolveAntigravityCli(options = {}) {
   const fileSystem = options.fs || fs;
   const home = typeof options.homedir === "string" && path.isAbsolute(options.homedir) ? options.homedir : null;
   const pathValue = options.parentEnv?.PATH;
@@ -318,14 +315,26 @@ function antigravityUsedOnThisMac(options = {}) {
     ...(home ? [path.join(home, ".local", "bin")] : []),
     "/opt/homebrew/bin", "/usr/local/bin",
   ].map((directory) => path.join(directory, "agy"));
-  if (commands.some((candidate) => executableRealpath(candidate, fileSystem))) return true;
+  for (const candidate of commands) {
+    const resolved = executableRealpath(candidate, fileSystem);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Models offers the ACP sign-in once this Mac already uses Antigravity, shown
+// by its `agy` command or its app. The built-in Agent waits for the ACP server.
+function antigravityUsedOnThisMac(options = {}) {
+  if (resolveAntigravityCli(options)) return true;
+  const fileSystem = options.fs || fs;
+  const home = typeof options.homedir === "string" && path.isAbsolute(options.homedir) ? options.homedir : null;
   return ["/Applications", ...(home ? [path.join(home, "Applications")] : [])].some((directory) => {
     try { return fileSystem.statSync(path.join(directory, "Antigravity.app")).isDirectory(); } catch { return false; }
   });
 }
 
 // The Antigravity runtime executes Google's official ACP server installed by
-// Shoggoth (see antigravity-acp-distribution.js); the agy CLI is not used.
+// Shoggoth (see antigravity-acp-distribution.js) for Agent sessions.
 function resolveAntigravityBinary(options = {}) {
   const fileSystem = options.fs || fs;
   if (options.binaryPath !== undefined) {
@@ -390,5 +399,6 @@ module.exports = {
   prepareAntigravityKeychainContextAsync,
   prepareAntigravityRuntimeAccountHome,
   resolveAntigravityBinary,
+  resolveAntigravityCli,
   resolveAntigravityExecutable,
 };

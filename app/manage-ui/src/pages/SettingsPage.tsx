@@ -321,7 +321,10 @@ export default function SettingsPage() {
     // Status + versions fill in asynchronously; neither blocks editing/saving.
     setRuntimesLoading(true);
     setRuntimesError(false);
-    getRuntimeStatuses().then((items) => { if (isCurrentRefresh()) setRuntimes(items); })
+    getRuntimeStatuses().then((items) => {
+      if (!isCurrentRefresh()) return;
+      setRuntimes(items);
+    })
       .catch(() => { if (isCurrentRefresh()) setRuntimesError(true); })
       .finally(() => { if (isCurrentRefresh()) setRuntimesLoading(false); });
     getStatus()

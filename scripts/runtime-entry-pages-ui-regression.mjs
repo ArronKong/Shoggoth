@@ -51,6 +51,7 @@ try {
     await new Promise((resolve) => server.close(resolve));
   } else {
     const main = path.join(temp, "main.cjs");
+    const discoveryOnly = process.argv.includes("--cli-discovery");
     const screenshot = process.argv.find((value) => value.startsWith("--screenshot="))?.slice("--screenshot=".length);
     const agentScreenshot = process.argv.find((value) => value.startsWith("--agent-screenshot="))?.slice("--agent-screenshot=".length);
     fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron");
@@ -64,13 +65,21 @@ app.whenReady().then(async()=>{
     await w.loadFile(${JSON.stringify(page)});
     let deadline;
     const result=await Promise.race([
-      w.webContents.executeJavaScript("window.runRuntimeEntryFixture()",true),
+      w.webContents.executeJavaScript(${JSON.stringify(discoveryOnly ? "window.checkCliDiscovery()" : "window.runRuntimeEntryFixture()")},true),
       new Promise((_resolve,reject)=>{deadline=setTimeout(()=>reject(Error("capacity fixture deadline")),30000);})
     ]).finally(()=>clearTimeout(deadline));
     const geometry=[];
     for(const width of [1100,390]) {
       w.setContentSize(width,950);
-      for(const theme of ["light","dark"]) geometry.push(await w.webContents.executeJavaScript('window.checkRuntimeEntryGeometry('+JSON.stringify(theme)+')'));
+      for(const theme of ["light","dark"]) geometry.push(await w.webContents.executeJavaScript(
+        ${discoveryOnly}
+          ? 'window.checkCliDiscoveryGeometry('+JSON.stringify(theme)+','+width+')'
+          : 'window.checkRuntimeEntryGeometry('+JSON.stringify(theme)+')'));
+    }
+    if (${discoveryOnly}) {
+      console.log(JSON.stringify({...result,geometry,verified:true}));
+      passed=true;
+      return;
     }
     assert.equal(result.writes,3);
     ${screenshot ? `require("node:fs").writeFileSync(${JSON.stringify(path.resolve(screenshot))},(await w.webContents.capturePage()).toPNG());` : ""}

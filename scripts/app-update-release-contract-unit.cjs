@@ -107,8 +107,10 @@ for (const workflowName of ["release.yml", "verify-signed-draft.yml", "ci.yml", 
   }
 }
 const recovery = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/release-recovery.yml"), "utf8"));
-assert.deepEqual(recovery.on, { workflow_run: { workflows: ["Signed macOS draft"], types: ["completed"] } });
-assert.deepEqual(recovery.permissions, { contents: "read", actions: "write", checks: "read" });
+assert.deepEqual(recovery.on, { workflow_run: { workflows: ["Signed macOS draft", "CI"], types: ["completed"] } });
+assert.deepEqual(recovery.permissions, { contents: "read", actions: "write", checks: "read", "pull-requests": "read" });
+assert.match(recovery.jobs.recover.if, /head_repository\.full_name == github\.repository/u);
+assert.match(recovery.jobs.recover.if, /event == 'pull_request'.*startsWith\(github\.event\.workflow_run\.head_branch, 'codex\/release-v'\)/su);
 assert.equal(recovery.jobs.recover.steps[0].with.ref, "${{ github.sha }}", "Recovery must execute trusted default-branch code");
 assert.equal(recovery.jobs.recover.steps[0].with["persist-credentials"], false);
 assert.ok(!recovery.jobs.recover.environment, "Recovery cannot read the signing environment");
@@ -132,8 +134,8 @@ assert.ok(ci.on.workflow_call !== undefined && ci.on.pull_request !== undefined)
 assert.match(workflow, /node scripts\/release-build\.cjs/u);
 const build = fs.readFileSync(path.join(root, "scripts/release-build.cjs"), "utf8");
 for (const gate of ["electron-builder", '"--publish", "never"', "shoggoth-host-capability-coverage-unit.cjs", "shoggoth-source-parity.cjs",
-  "verify-app-update-release.mjs", "create-macos-dmg.mjs", "buildNotarytoolArgs",
-  "assertAcceptedReceipt(result)", 'runStapler("staple", dmg)', 'runStapler("validate", dmg)',
+  "verify-app-update-release.mjs", "create-macos-dmg.mjs", "await notarizeArchive(dmg, receiptPath,",
+  'runStapler("staple", dmg)', 'runStapler("validate", dmg)',
   '"/usr/bin/hdiutil", ["verify"', "recordBuild("]) assert.ok(build.includes(gate));
 assert.match(workflow, /release-draft\.cjs confirm/u);
 assert.doesNotMatch(workflow, /--draft=false|--publish always|--clobber/u);

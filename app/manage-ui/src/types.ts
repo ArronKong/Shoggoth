@@ -1013,7 +1013,9 @@ type OAuthQuotaCredits =
   | { kind: "wallets"; wallets: Array<{ kind: "recharge" | "bonus"; amount: number; unit: "USD" | "CNY" }> };
 
 export type OAuthAccountQuota =
-  | { status: "unavailable" | "unsupported" }
+  | { status: "unsupported" }
+  | { status: "unavailable"; reason?: "antigravity-cli-missing" | "antigravity-cli-update-required"
+      | "antigravity-cli-sign-in-required" | "antigravity-cli-permission-denied" }
   | { status: "available"; checkedAt: number; accountName?: string; quotaScope?: string; windows: Array<{
       label: string | null;
       durationMinutes: number | null;
@@ -1038,6 +1040,7 @@ export interface OAuthProvider {
   disconnectCommand: string | null;
   disconnectable: boolean;
   canReadQuota?: boolean;
+  quotaSource?: "antigravity-cli";
   quotaScope?: string | null;
   cachedQuota?: Extract<OAuthAccountQuota, { status: "available" }>;
   /**
@@ -2913,6 +2916,15 @@ export interface RuntimeStatus {
   serviceConnected: boolean;
   readiness?: "ready" | "auth-required" | "unverified" | "incompatible";
   features?: RuntimeFeatures | null;
+}
+
+/** Read through the desktop bridge because executable locations may contain user paths. */
+export interface RuntimeCliLocation {
+  backendId: string;
+  runtimeAccountId: string;
+  path: string;
+  source: "path" | "user-bin" | "system-bin" | "vendor-bin" | "explicit";
+  confirmed: boolean;
 }
 
 export type ServiceRecoveryCode = "SERVICE_RECOVERY_REQUIRED";

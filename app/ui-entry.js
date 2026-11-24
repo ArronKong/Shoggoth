@@ -60,7 +60,7 @@ const { createKanbanProjectStore } = require("./core/kanban-project-store");
 const { createModelChangeJournal } = require("./core/model-change-journal");
 const { ModelChangeCoordinator } = require("./core/model-change-coordinator");
 const { ModelOperationRecoveryStore } = require("./model-operation-recovery-store");
-const { registerDesktopModelOperationRecoveryIpc } = require("./desktop-model-operation-recovery-ipc");
+const { registerDesktopModelOperationRecoveryIpc, trustedRenderer } = require("./desktop-model-operation-recovery-ipc");
 const { DesktopGroupSendJournalStore } = require("./desktop-group-send-journal-store");
 const { registerDesktopGroupSendJournalIpc } = require("./desktop-group-send-journal-ipc");
 const { createWorkAdmissionGate } = require("./core/work-admission-gate");
@@ -809,6 +809,14 @@ const modelOperationRecoveryIpc = registerDesktopModelOperationRecoveryIpc({
     if (appIsQuitting || modelOperationRecoveryStore !== store) throw new Error("model recovery store retired");
     return store;
   },
+});
+
+ipcMain.handle("shoggoth:runtime-cli:locations", async (event, ...args) => {
+  const isCurrent = () => !appIsQuitting && trustedRenderer(event, () => mainWindow, () => serverOrigin);
+  const registry = appBackendRegistry;
+  if (args.length || !registry || !isCurrent()) return [];
+  const locations = await registry.getRuntimeCliLocations();
+  return registry === appBackendRegistry && isCurrent() ? locations : [];
 });
 
 const groupSendJournalIpc = registerDesktopGroupSendJournalIpc({

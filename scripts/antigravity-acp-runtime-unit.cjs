@@ -14,6 +14,7 @@ const {
   modelCatalogFromConfig,
 } = require("../app/agent-service/antigravity-acp-runtime-host");
 const { AntigravityRuntimeAdapter } = require("../app/agent-service/antigravity-runtime-adapter");
+const { readAntigravityCliQuota } = require("../app/agent-service/antigravity-cli-quota");
 const { ANTIGRAVITY_ACP_SERVER_VERSION, ANTIGRAVITY_ACP_CONTRACTS } = require("../app/agent-service/antigravity-acp-distribution");
 const {
   antigravityUsedOnThisMac,
@@ -24,6 +25,79 @@ const {
 const { normalizeInteractiveRequestV1 } = require("../app/core/shoggoth-interaction-contract");
 const { DatabaseSync } = require("node:sqlite");
 const { AntigravityNativeToolResults, nativeToolCall } = require("../app/agent-service/antigravity-native-tool-results");
+
+test("Antigravity quota uses the signed CLI's native login and structured /usage windows", async t => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-quota-unit-")));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const binary = path.join(home, ".local", "bin", "agy");
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, "fixture", { mode: 0o700 });
+  const parentEnv = { PATH: "/usr/bin:/bin", GEMINI_HOME: "/isolated-acp", GOOGLE_API_KEY: "fixture-secret" };
+  const resetsAt = "2026-11-24T12:00:00Z";
+  const calls = [];
+  const options = { homedir: home, platform: "darwin", parentEnv,
+    readSystemProxy: async () => ({ HTTPS_PROXY: "http://127.0.0.1:9999" }),
+    execute: async (command, args, options) => {
+      calls.push({ command, args, ...options });
+      if (command === "/usr/bin/codesign") return {};
+      if (args[0] === "--version") return { stdout: "1.5.15\n" };
+      return { stdout: JSON.stringify({ status: "SUCCESS", conversation_id: "", num_turns: 0, usage: { total_tokens: 0 },
+        command: { name: "usage", data: { groups: [
+          { name: "Gemini Models", buckets: [
+            { window: "5h", remaining_fraction: 0.75, reset_time: resetsAt },
+            { window: "5h", remaining_fraction: 0.5, disabled: true },
+            { window: "weekly", remaining_fraction: "0.8" },
+          ] },
+          { name: "Claude and GPT models", buckets: [{ window: "weekly", remaining_fraction: 0, reset_time: resetsAt }] },
+        ] } } }) };
+    } };
+  const quota = await readAntigravityCliQuota(options);
+  assert.equal(quota.status, "available");
+  assert.deepEqual(quota.windows, [
+    { label: "Gemini Models", durationMinutes: 300, usedPercent: 25, resetsAt: Date.parse(resetsAt) },
+    { label: "Claude and GPT models", durationMinutes: 10080, usedPercent: 100, resetsAt: Date.parse(resetsAt) },
+  ]);
+  assert.equal(quota.quotaScope, undefined);
+  assert.equal(calls[0].command, "/usr/bin/codesign");
+  assert.match(calls[0].args[2], /anchor apple generic.*EQHXZ8M8AV/u);
+  assert.deepEqual(calls.slice(1).map(call => [call.command, ...call.args.slice(0, 2)]),
+    [[binary, "--version"], [binary, "-p", "/usage"]]);
+  assert.equal(calls[2].env.HOME, home);
+  assert.equal(calls[2].env.GOOGLE_API_KEY, undefined);
+  assert.equal(calls[2].env.GEMINI_HOME, undefined);
+  assert.equal(calls[2].env.HTTPS_PROXY, "http://127.0.0.1:9999");
+  assert.equal(calls[2].env.AGY_CLI_DISABLE_AUTO_UPDATE, "true");
+  assert.equal(fs.existsSync(calls[2].cwd), false);
+});
+
+test("Antigravity quota fences older or prompt-like CLI behavior and projects fixed errors", async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agy-quota-errors-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const binary = path.join(home, "agy");
+  let version = "1.1.10", result, usageCalls = 0;
+  const options = { homedir: home, platform: "darwin", parentEnv: { PATH: home }, readSystemProxy: async () => ({}),
+    execute: async (command, args) => {
+      if (command === "/usr/bin/codesign") return {};
+      if (args[0] === "--version") return { stdout: version };
+      usageCalls += 1;
+      return result;
+    } };
+  fs.writeFileSync(binary, "old", { mode: 0o700 });
+  const update = { status: "unavailable", reason: "antigravity-cli-update-required" };
+  assert.deepEqual(await readAntigravityCliQuota(options), update);
+  assert.equal(usageCalls, 0);
+  fs.writeFileSync(binary, "current", { mode: 0o700 });
+  version = "1.1.11";
+  result = { stdout: JSON.stringify({ status: "ERROR", error: "fixture" }),
+    stderr: 'AGY_ERROR: {"status":"PERMISSION_DENIED","error_code":403,"message":"private@example.test"}' };
+  assert.deepEqual(await readAntigravityCliQuota(options), { status: "unavailable", reason: "antigravity-cli-permission-denied" });
+  result = { stdout: JSON.stringify({ status: "ERROR", error: "Authentication required. Please visit the URL" }) };
+  assert.deepEqual(await readAntigravityCliQuota(options), { status: "unavailable", reason: "antigravity-cli-sign-in-required" });
+  result = { stdout: JSON.stringify({ status: "SUCCESS", num_turns: 1, conversation_id: "unexpected" }) };
+  assert.deepEqual(await readAntigravityCliQuota(options), update);
+  assert.deepEqual(await readAntigravityCliQuota(options), update);
+  assert.equal(usageCalls, 3);
+});
 
 test("approval retains a full long command and its execution directory; undisplayable commands never reach approval", async () => {
   const calls = [], active = { sessionId: "permission-session", turnId: "permission-turn", accepted: true,
@@ -106,7 +180,7 @@ async function until(predicate, label, timeout = 5_000) {
 }
 
 function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, serverVersion = ANTIGRAVITY_ACP_SERVER_VERSION,
-  reportedVersion = serverVersion, contracts = serverVersion === ANTIGRAVITY_ACP_SERVER_VERSION ? ANTIGRAVITY_ACP_CONTRACTS
+  reportedVersion = serverVersion, contracts = [ANTIGRAVITY_ACP_SERVER_VERSION, "1.4.3"].includes(serverVersion) ? ANTIGRAVITY_ACP_CONTRACTS
     : serverVersion === "1.2.1" ? { workspaceExecution: 1, nativeToolResults: 1 } : {} } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agy-acp-host-")));
   fs.chmodSync(root, 0o700);
@@ -189,7 +263,7 @@ function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, s
   return { root, paths, home, workspace, serverPath, harnessPath, gateCalls, records, create, timeoutBridges, spawns };
 }
 
-test("1.4.3 installs a trusted timeout bridge before spawn and registers only its issued MCP descriptor", async t => {
+test("the current ACP installs a trusted timeout bridge before spawn and registers only its issued MCP descriptor", async t => {
   const f = fixture(t), host = f.create();
   await host.initialize();
   assert.equal(f.timeoutBridges.length, 1);
@@ -415,11 +489,11 @@ for (const serverVersion of ["1.2.2", "2.0.0", "nightly"]) test(`Antigravity ${s
   assert.equal(f.spawns[0].options.env.AGY_ACP_FORCE_FILE_STORAGE, "1");
 });
 
-test("the verified 1.4.3 distribution retains the managed workspace boundary", async t => {
-  const f = fixture(t, { serverVersion: "1.4.3" });
+for (const serverVersion of ["1.4.3", ANTIGRAVITY_ACP_SERVER_VERSION]) test(`the verified ${serverVersion} distribution retains the managed workspace boundary`, async t => {
+  const f = fixture(t, { serverVersion });
   const host = f.create({ workspaceExecutionVersion: 1 });
   await host.initialize();
-  assert.equal(host.server.version, "1.4.3");
+  assert.equal(host.server.version, serverVersion);
   assert.ok(host.workspaceExecutionHome);
   assert.ok(host.nativeToolResults, "the known error broadcast still needs authoritative native tool results");
   const session = await host.sessionStart({ source: "latest-managed-boundary", cwd: f.workspace });
@@ -699,15 +773,36 @@ test("pending lossy results settle once on native cancellation and transport los
 
 test("start sanitizes the retired global MCP entry and spawns without leaking environment", async (t) => {
   const f = fixture(t);
-  const host = f.create();
+  const host = f.create({ readSystemProxyEnvironment: async () => ({
+    HTTPS_PROXY: "http://127.0.0.1:9000", ALL_PROXY: "socks5://127.0.0.1:9000",
+  }) });
   await host.initialize();
   const mcp = JSON.parse(fs.readFileSync(path.join(f.home, ".gemini", "config", "mcp_config.json"), "utf8"));
   assert.deepEqual(Object.keys(mcp.mcpServers), ["userServer"], "only the stale ungated shoggoth entry is removed");
-  const env = host._spawnEnvironment();
+  const { env } = f.spawns[0].options;
   assert.equal(env.GEMINI_HOME, path.join(f.home, ".gemini"));
   assert.equal(env.BROWSER, "/usr/bin/true", "background hosts must never open a browser");
   assert.equal(env.HTTPS_PROXY, "http://127.0.0.1:7897");
+  assert.equal(env.ALL_PROXY, undefined, "explicit proxy configuration takes precedence");
   assert.equal(env.SECRET_TOKEN, undefined);
+});
+
+test("a cold ACP host uses system proxies when launchd supplied no proxy addresses", async (t) => {
+  const f = fixture(t);
+  const systemProxyEnvironment = {
+    HTTP_PROXY: "http://127.0.0.1:7897",
+    HTTPS_PROXY: "http://127.0.0.1:7897",
+    ALL_PROXY: "socks5://127.0.0.1:7897",
+    NO_PROXY: "127.0.0.1,.local",
+  };
+  const readSystemProxyEnvironment = async () => systemProxyEnvironment;
+  const host = f.create({ parentEnv: { PATH: process.env.PATH }, readSystemProxyEnvironment });
+  await host.initialize();
+  const { env } = f.spawns[0].options;
+  for (const [key, value] of Object.entries(systemProxyEnvironment)) {
+    assert.equal(env[key], value);
+    assert.equal(env[key.toLowerCase()], value);
+  }
 });
 
 test("authentication: missing selection, deferred verification and active verification", async (t) => {

@@ -30,6 +30,9 @@ const { recordServiceRequestTimeout } = require("../agent-service/service-reques
 const { recordChatSendFailure } = require("../agent-service/chat-send-diagnostics");
 const { resolveServicePaths } = require("../agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../agent-service/service-protocol-version");
+const { SYSTEM_CLI_DISCOVERY_METHOD, SYSTEM_CLI_RUNTIMES, SYSTEM_CLI_SOURCES,
+  executableRealpath } = require("../agent-service/system-cli-discovery");
+const { executableFileStamp } = require("../agent-service/runtime-executable-identity");
 const agentFileProtocol = require("../agent-service/agent-file-protocol");
 const { importPath, payloadPath, readBoundedFile, readWorkspaceOutput, sha256, fileIdFromStorageKey } = require("../agent-service/agent-file-store");
 const { ensurePrivateDirectoryTree } = require("../agent-service/security");
@@ -143,6 +146,7 @@ const RUNTIME_MODEL_CATALOG_MUTATION = /^(?:agent\.binding\.(?:add|update|remove
 const DEFAULT_READINESS_TIMEOUT_MS = 70_000;
 const DEFAULT_READINESS_INTERVAL_MS = 500;
 const DEFAULT_SERVICE_STATUS_TIMEOUT_MS = 1_000;
+const CLI_DISCOVERY_MISSING_TTL_MS = 2_000;
 // A busy Service (connected, no reply yet) keeps its verified roster until it
 // stays silent for this many consecutive health samples spanning this long.
 const SERVICE_BUSY_STATUS_SAMPLES = 3;
@@ -523,6 +527,11 @@ function validLoginCommand(value) {
       && typeof item === "string" && !item.includes("\0"));
 }
 
+function validExecutablePath(value) {
+  return typeof value === "string" && value.isWellFormed() && !value.includes("\0")
+    && Buffer.byteLength(value, "utf8") <= 4096 && path.isAbsolute(value);
+}
+
 function normalizeRuntimeCliAuth(entries) {
   if (entries === undefined) return new Map();
   if (!Array.isArray(entries)) {
@@ -534,8 +543,10 @@ function normalizeRuntimeCliAuth(entries) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)
       || typeof entry.runtime !== "string" || !/^[a-z][a-z0-9-]{0,63}$/u.test(entry.runtime)
       || typeof entry.name !== "string" || entry.name.length === 0
-      || (entry.binaryPath !== null
-        && (typeof entry.binaryPath !== "string" || !path.isAbsolute(entry.binaryPath)))
+      || (entry.binaryPath !== null && !validExecutablePath(entry.binaryPath))
+      || (entry.binarySource !== undefined && !SYSTEM_CLI_SOURCES.includes(entry.binarySource))
+      || (entry.binaryCandidatePath !== undefined
+        && (entry.binaryPath === null || !validExecutablePath(entry.binaryCandidatePath)))
       || (entry.binaryPath === null
         && (typeof entry.unavailableReason !== "string" || entry.unavailableReason.length === 0
           || !entry.unavailableReason.isWellFormed() || entry.unavailableReason.includes("\0")
@@ -567,6 +578,8 @@ function normalizeRuntimeCliAuth(entries) {
       runtimeAccountId: entry.runtimeAccountId,
       name: entry.name,
       binaryPath: entry.binaryPath === null ? null : path.resolve(entry.binaryPath),
+      binaryCandidatePath: entry.binaryCandidatePath === undefined ? null : path.resolve(entry.binaryCandidatePath),
+      binarySource: entry.binarySource ?? null,
       unavailableReason: entry.binaryPath === null ? entry.unavailableReason : null,
       installableOnSignIn: entry.installableOnSignIn === true,
       accountHome: path.resolve(entry.accountHome),
@@ -586,6 +599,25 @@ function normalizeRuntimeCliAuth(entries) {
     }));
   }
   return result;
+}
+
+function validateRuntimeCliDiscovery(value) {
+  if (!exactObject(value, ["instanceNonce", "rows"]) || typeof value.instanceNonce !== "string"
+    || !/^[a-f0-9]{48}$/u.test(value.instanceNonce) || !Array.isArray(value.rows)
+    || value.rows.length > SYSTEM_CLI_RUNTIMES.length) {
+    throw new TypeError("Invalid Service CLI discovery");
+  }
+  const descriptors = normalizeRuntimeCliAuth(value.rows);
+  for (const descriptor of descriptors.values()) {
+    const account = DEFAULT_RUNTIME_ACCOUNTS.find(entry => entry.id === descriptor.runtimeAccountId);
+    if (account?.kind !== "native-user" || descriptor.accountKind !== account.kind
+      || descriptor.runtime !== account.runtime || !SYSTEM_CLI_RUNTIMES.includes(account.runtime)
+      || descriptor.loginCommand !== null || descriptor.installableOnSignIn
+      || (descriptor.binaryPath !== null && (!descriptor.binaryCandidatePath || !descriptor.binarySource))) {
+      throw new TypeError("Invalid Service CLI account");
+    }
+  }
+  return { instanceNonce: value.instanceNonce, descriptors };
 }
 
 function shellQuote(value) {
@@ -1000,6 +1032,7 @@ function validateServiceEventPage(value, params) {
 
 function validateServiceResult(method, value, params) {
   try {
+    if (method === SYSTEM_CLI_DISCOVERY_METHOD) return validateRuntimeCliDiscovery(value);
     if (method === "chat.session.prewarm") {
       if (!exactObject(value, ["supported", "state"]) || typeof value.supported !== "boolean"
         || !["ready", "scheduled", "busy", "unavailable", "unsupported"].includes(value.state)) throw new TypeError("Invalid preparation response");
@@ -1039,6 +1072,7 @@ function validateServiceResult(method, value, params) {
         || typeof value.mcpCredentialsLocked !== "boolean"
         || (value.chatAcceptanceV1 !== undefined && typeof value.chatAcceptanceV1 !== "boolean")
         || (value.activeMemoryCommands !== undefined && typeof value.activeMemoryCommands !== "boolean")
+        || (value.nativeCliDiscovery !== undefined && typeof value.nativeCliDiscovery !== "boolean")
         || (value.instanceNonce !== undefined
           && (typeof value.instanceNonce !== "string" || !/^[a-f0-9]{48}$/u.test(value.instanceNonce)))) {
         throw new TypeError("invalid service.status response");
@@ -1048,6 +1082,7 @@ function validateServiceResult(method, value, params) {
         pendingCommandsLocked: value.pendingCommandsLocked,
         mcpCredentialsLocked: value.mcpCredentialsLocked,
         activeMemoryCommands: value.activeMemoryCommands === true,
+        nativeCliDiscovery: value.nativeCliDiscovery === true,
         chatAcceptanceV1: value.chatAcceptanceV1 === true,
         ...(value.instanceNonce === undefined ? {} : { instanceNonce: value.instanceNonce }),
       });
@@ -1571,15 +1606,21 @@ class ShoggothBackend extends AgentBackend {
 
   _runtimeProofFor(accountId) {
     const proof = this._runtimeReadiness?.get(accountId);
+    const descriptor = this.runtimeCliAuth.get(accountId);
     const age = proof ? Date.now() - proof.observedAt : -1;
     return proof && proof.generation === this._generation && age >= 0 && age < 30_000
-      && proof.binaryPath === this.runtimeCliAuth.get(accountId)?.binaryPath
-      && proof.executableStamp !== null && proof.executableStamp === this._runtimeExecutableStamp(proof.binaryPath)
+      && proof.binaryPath === descriptor?.binaryPath
+      && proof.executableStamp !== null
+      && proof.executableStamp === this._runtimeExecutableStamp(descriptor?.binaryPath, descriptor?.binaryCandidatePath)
       ? proof : null;
   }
 
-  _runtimeExecutableStamp(binaryPath) {
-    try { return require("../agent-service/runtime-executable-identity").executableFileStamp(binaryPath); }
+  _runtimeExecutableStamp(binaryPath, candidatePath) {
+    if (!binaryPath) return null;
+    try {
+      if (candidatePath && executableRealpath(candidatePath) !== binaryPath) return null;
+      return executableFileStamp(candidatePath ?? binaryPath);
+    }
     catch { return null; }
   }
 
@@ -1591,13 +1632,53 @@ class ShoggothBackend extends AgentBackend {
           : runtime.startsWith("ext-") && availability.reason === "runtime-unavailable" ? "RUNTIME_IDENTITY_UNAVAILABLE" : "NATIVE_RUNTIME_DISABLED");
   }
 
-  async _refreshRuntimeCliAuth() {
-    if (this.getRuntimeCliAuth) this.runtimeCliAuth = normalizeRuntimeCliAuth(await this.getRuntimeCliAuth());
+  _serviceCliDescriptors() {
+    const snapshot = this._runtimeCliDiscovery;
+    return this._nativeCliDiscovery && !this._statusUncertain && snapshot?.generation === this._generation
+      ? snapshot.descriptors : null;
+  }
+
+  _readRuntimeCliDiscovery(generation) {
+    if (this._runtimeCliDiscoveryPending?.generation === generation) return this._runtimeCliDiscoveryPending.promise;
+    const promise = this._call(SYSTEM_CLI_DISCOVERY_METHOD, {}).then(snapshot => {
+      if (generation === this._generation) {
+        this._runtimeCliDiscovery = snapshot.instanceNonce === this._serviceInstanceNonce
+          ? { generation, descriptors: snapshot.descriptors, observedAt: Date.now() } : null;
+      }
+    }, () => {
+      if (generation === this._generation) this._runtimeCliDiscovery = null;
+    }).finally(() => {
+      if (this._runtimeCliDiscoveryPending?.promise === promise) this._runtimeCliDiscoveryPending = null;
+    });
+    this._runtimeCliDiscoveryPending = { generation, promise };
+    return promise;
+  }
+
+  async _refreshRuntimeCliAuth({ readService = false } = {}) {
+    if (!this.getRuntimeCliAuth) return this.runtimeCliAuth;
+    const generation = this._generation;
+    if (readService && this._nativeCliDiscovery && !this._statusUncertain) {
+      await this._readRuntimeCliDiscovery(generation);
+    }
+    const local = normalizeRuntimeCliAuth(await this.getRuntimeCliAuth());
+    if (generation !== this._generation) return this.runtimeCliAuth;
+    const age = Date.now() - (this._runtimeCliDiscovery?.observedAt ?? 0);
+    const recent = age >= 0 && age < CLI_DISCOVERY_MISSING_TTL_MS;
+    for (const [id, descriptor] of this._serviceCliDescriptors() || []) {
+      if (!isRuntimeAvailable(descriptor.runtime)) continue;
+      // A path returned earlier can go missing or a package manager can retarget
+      // a symlink. Fall back to local inventory until the next Service read.
+      const usable = descriptor.binaryPath
+        ? this._runtimeExecutableStamp(descriptor.binaryPath, descriptor.binaryCandidatePath) !== null
+        : readService || recent || !local.get(id)?.binaryPath;
+      if (usable) local.set(id, descriptor);
+    }
+    this.runtimeCliAuth = local;
     return this.runtimeCliAuth;
   }
 
   async _connectedCliAccounts() {
-    const descriptors = await this._refreshRuntimeCliAuth();
+    const descriptors = await this._refreshRuntimeCliAuth({ readService: true });
     return DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user"
       && descriptors.get(account.id)?.binaryPath
       && this._bindingAvailability("", account.runtime, account.id).available).map(account => account.id);
@@ -1797,15 +1878,16 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async getRuntimeStatuses({ forAgentCreation = false } = {}) {
-    const descriptors = await this._refreshRuntimeCliAuth();
+    let descriptors = await this._refreshRuntimeCliAuth();
     let serviceConnected = this._state === "started" && !this._statusUncertain;
     let providers = [];
     let extensions = [];
-    // Creation accepts built-in account IDs and only needs local inventory.
-    // Settings can wait for fresh login, model and extension status checks.
+    // Creation uses local inventory and any cached selection. The full view
+    // refreshes it through the Service before probing login and models.
     if (!forAgentCreation) {
       serviceConnected = await this.getStatus().then(status => status.connected === true, () => false);
       providers = serviceConnected ? await this.listOAuthProviders().then(result => result.providers, () => []) : [];
+      descriptors = serviceConnected ? this.runtimeCliAuth : await this._refreshRuntimeCliAuth();
       // A CLI installed since the last check gets its built-in Agent now.
       if (this._state === "started") {
         void this._ensureBuiltinAgents({ force: true }).then((result) => (result?.createdProfileIds.length
@@ -1835,6 +1917,18 @@ class ShoggothBackend extends AgentBackend {
       releaseEnabled: true, enabled: entry.enabled, installation: entry.availability, serviceConnected,
       readiness: entry.authentication === "authenticated" ? "ready" : entry.authentication === "unauthenticated" ? "auth-required" : "unverified",
       authentication: entry.authentication, availabilityCode: entry.code, features: entry.features, toggleable: false }))];
+  }
+
+  async getRuntimeCliLocations() {
+    const descriptors = await this._refreshRuntimeCliAuth();
+    const confirmed = this._serviceCliDescriptors();
+    return [...descriptors.values()].filter(descriptor => descriptor.binaryPath && descriptor.binarySource
+      && SYSTEM_CLI_RUNTIMES.includes(descriptor.runtime)).map(descriptor => ({
+      runtimeAccountId: descriptor.runtimeAccountId,
+      path: descriptor.binaryPath,
+      source: descriptor.binarySource,
+      confirmed: confirmed?.get(descriptor.runtimeAccountId) === descriptor,
+    }));
   }
 
   async applyNativeRuntimeConfig(input) {
@@ -1944,6 +2038,7 @@ class ShoggothBackend extends AgentBackend {
         if (status.instanceNonce) this._serviceInstanceNonce = status.instanceNonce;
         this._activeMemoryCommands = status.activeMemoryCommands === true;
         this._chatAcceptanceV1 = status.chatAcceptanceV1 === true;
+        this._nativeCliDiscovery = status.nativeCliDiscovery === true;
         this._statusUncertain = !this._isServiceReady(status);
         return this._statusUncertain ? "not-ready" : "ready";
       } catch (error) {
@@ -2185,7 +2280,8 @@ class ShoggothBackend extends AgentBackend {
     const profiles = [...this._profilesByAgent.values()];
     // Re-resolve so a runtime installed by its own sign-in (Antigravity) is seen
     // by the "I have signed in" re-check without restarting.
-    const descriptors = await this._refreshRuntimeCliAuth();
+    const descriptors = await this._refreshRuntimeCliAuth({ readService: true });
+    const serviceDescriptors = this._serviceCliDescriptors();
     let disabled = [];
     try { disabled = this._getDisabledBackendIds?.() || []; } catch { /* configuration unavailable */ }
     const byIdentity = (left, right) => Number(right.isDefault) - Number(left.isDefault)
@@ -2214,7 +2310,10 @@ class ShoggothBackend extends AgentBackend {
     }
     const providers = await mapBounded(accountGroups, 3, async (group) => {
       const { descriptor, accountProfiles, switchable, enabled } = group;
-      const executableStamp = this._runtimeExecutableStamp(descriptor.binaryPath);
+      const executableStamp = this._runtimeExecutableStamp(descriptor.binaryPath, descriptor.binaryCandidatePath);
+      const requiresSelection = this.getRuntimeCliAuth && this._nativeCliDiscovery
+        && SYSTEM_CLI_RUNTIMES.includes(descriptor.runtime);
+      const selected = !requiresSelection || serviceDescriptors?.get(descriptor.runtimeAccountId) === descriptor;
       // A native CLI's switch stops using it as a runtime in the app; its Agents
       // stay. It never signs out, so its login state and records are intact on
       // reconnect, and a disconnected CLI is not probed.
@@ -2222,13 +2321,14 @@ class ShoggothBackend extends AgentBackend {
       const authRead = accountProfile ? ["profile.auth.read", { profileId: accountProfile.id }]
         : group.binding ? ["profile.binding.auth.read", group.binding] : null;
       const canReadQuota = RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(descriptor.runtime);
+      const quotaSource = descriptor.runtime === "antigravity" ? "antigravity-cli" : null;
       let loggedIn = false;
       let quotaScope;
       let statusError = descriptor.binaryPath ? null : descriptor.unavailableReason;
       let statusVerification = null;
       let readiness = "unverified";
       let features = null;
-      if (descriptor.binaryPath && enabled && isRuntimeAvailable(descriptor.runtime)) {
+      if (descriptor.binaryPath && selected && enabled && isRuntimeAvailable(descriptor.runtime)) {
         const presence = switchable || descriptor.credentialProbe === "runtime"
           ? { present: true, error: null }
           : managedCredentialPresence(
@@ -2246,7 +2346,7 @@ class ShoggothBackend extends AgentBackend {
         if (canReadAuth && !authRead) statusVerification = "unverified";
         if (canReadAuth && authRead) {
           try {
-            const verified = canReadQuota ? await this._readScopedOAuth(...authRead) : await this._call(...authRead);
+            const verified = canReadQuota && !quotaSource ? await this._readScopedOAuth(...authRead) : await this._call(...authRead);
             loggedIn = verified.status === "authenticated";
             quotaScope = verified.quotaScope;
             readiness = loggedIn ? "ready" : verified.status === "unauthenticated" ? "auth-required" : "unverified";
@@ -2280,7 +2380,9 @@ class ShoggothBackend extends AgentBackend {
           }
         }
       }
-      if (generation !== this._generation || executableStamp !== this._runtimeExecutableStamp(descriptor.binaryPath)) {
+      if (generation !== this._generation
+        || descriptor.binaryPath !== this.runtimeCliAuth.get(descriptor.runtimeAccountId)?.binaryPath
+        || executableStamp !== this._runtimeExecutableStamp(descriptor.binaryPath, descriptor.binaryCandidatePath)) {
         loggedIn = false; readiness = "unverified"; statusVerification = "unverified"; statusError = null;
       } else if (switchable && !quotaOnly) {
         this._runtimeReadiness ||= new Map();
@@ -2305,6 +2407,7 @@ class ShoggothBackend extends AgentBackend {
           ? runtimeCliCommand(descriptor, descriptor.logoutArgs) : null,
         disconnectable: false,
         ...(canReadQuota ? { canReadQuota: true } : {}),
+        ...(quotaSource ? { quotaSource } : {}),
         ...(loggedIn && quotaScope !== undefined ? { quotaScope } : {}),
         ...(switchable && (descriptor.binaryPath || !enabled)
           ? { connection: { id: descriptor.runtime, enabled } } : {}),
@@ -2480,10 +2583,10 @@ class ShoggothBackend extends AgentBackend {
     const generation = this._generation;
     let refresh;
     refresh = (async () => {
+      const connectedAccounts = await this._connectedCliAccounts();
       await this._ensureBuiltinAgents();
       const entries = await this._lifecycleSnapshot();
       const profiles = entries.filter((entry) => entry.profile.enabled).map((entry) => entry.profile);
-      const connectedAccounts = await this._connectedCliAccounts();
       await this._refreshCodexAutomationOwner();
       const sessionsByProfile = await mapBounded(
         profiles, MAX_PROFILE_SESSION_CONCURRENCY, async (profile) => {
@@ -4095,6 +4198,7 @@ class ShoggothBackend extends AgentBackend {
       if (method === "runtime.account.login.start") timeoutMs = 30_000;
       if (method === "runtime.account.login.cancel") timeoutMs = 20_000;
       if (method === "runtime.account.quota.read") timeoutMs = 30_000;
+      if (method === SYSTEM_CLI_DISCOVERY_METHOD) timeoutMs = this.serviceStatusTimeoutMs;
       // A provider sign-in may first start the runtime's own server.
       if (["runtime.account.login.options", "runtime.account.login.provider.start",
         "runtime.account.login.apikey"].includes(method)) timeoutMs = 30_000;
@@ -4771,6 +4875,7 @@ class ShoggothBackend extends AgentBackend {
         if (ready && this._startGenerationActive(generation)) {
           this._activeMemoryCommands = status.activeMemoryCommands === true;
           this._chatAcceptanceV1 = status.chatAcceptanceV1 === true;
+          this._nativeCliDiscovery = status.nativeCliDiscovery === true;
         }
       } catch (error) {
         this._observeServiceRecovery(error, generation);
@@ -4805,6 +4910,7 @@ class ShoggothBackend extends AgentBackend {
     this._state = recovering ? "recovering" : "starting";
     this._activeMemoryCommands = false;
     this._chatAcceptanceV1 = false;
+    this._nativeCliDiscovery = false;
     this._modelChoices = [];
     try {
       const ready = await this._waitForServiceReady(generation);
@@ -4974,6 +5080,8 @@ class ShoggothBackend extends AgentBackend {
     this._state = "stopping";
     this._activeMemoryCommands = false;
     this._chatAcceptanceV1 = false;
+    this._nativeCliDiscovery = false;
+    this._runtimeCliDiscovery = null;
     this._acceptedChatOperations.clear();
     this._consecutiveStatusTimeouts = 0;
     this._serviceBusy = false;

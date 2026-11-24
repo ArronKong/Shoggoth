@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { RuntimeStatus } from "../../types";
 import { BackendMark } from "./BackendOverview";
-import { RuntimeFeatureNotice } from "../../components/RuntimeFeatureNotice";
+import { RuntimeResumeNotice } from "../../components/RuntimeFeatureNotice";
 
 export default function RuntimeStatusList({ runtimes, loading, error, busy, onToggle }: {
   runtimes: RuntimeStatus[]; loading: boolean; error: boolean; busy: boolean;
@@ -34,7 +34,7 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
           <div className="settings-cli-tile-copy">
             <h6>{runtime.name}</h6>
             <span className={`settings-health ${tone === "is-off" ? "" : tone}`}><i />{t(`settings.${status}`)}</span>
-            {runtime.enabled && runtime.serviceConnected && runtime.features && <RuntimeFeatureNotice features={runtime.features} />}
+            {runtime.enabled && runtime.serviceConnected && runtime.features?.resume === "unsupported" && <RuntimeResumeNotice />}
           </div>
           {runtime.toggleable !== false && runtime.releaseEnabled && runtime.installation === "available" && <button className="btn-secondary btn-sm" disabled={busy} onClick={() => onToggle(runtime)}>
             {t(runtime.enabled ? status === "runtimeReady" ? "settings.disconnect" : "agents.disable" : "settings.reconnect")}

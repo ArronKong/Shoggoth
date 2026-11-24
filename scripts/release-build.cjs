@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
-const { assertAcceptedReceipt, buildNotarytoolArgs } = require("./notarize.cjs");
+const { notarizeArchive } = require("./notarize.cjs");
 const { recordBuild, packageNames } = require("./release-draft.cjs");
 const { runStapler } = require("./release-stapler.cjs");
 
@@ -35,12 +35,8 @@ async function main() {
   run(process.execPath, ["scripts/create-macos-dmg.mjs", "--arch", arch, "--distribution", "official"]);
   const dmg = path.join(root, "dist", `Shoggoth-${version}-${arch}.dmg`);
   const receiptPath = path.join(evidence, "dmg-notarization.json");
-  const result = execFileSync("/usr/bin/xcrun", buildNotarytoolArgs(dmg,
-    process.env.SHOGGOTH_NOTARY_KEYCHAIN_PROFILE, process.env.SHOGGOTH_NOTARY_KEYCHAIN), {
-    cwd: root, encoding: "utf8", timeout: 30 * 60_000,
-  });
-  fs.writeFileSync(receiptPath, result);
-  assertAcceptedReceipt(result);
+  await notarizeArchive(dmg, receiptPath,
+    process.env.SHOGGOTH_NOTARY_KEYCHAIN_PROFILE, process.env.SHOGGOTH_NOTARY_KEYCHAIN);
   runStapler("staple", dmg);
   runStapler("validate", dmg);
   run("/usr/bin/hdiutil", ["verify", dmg]);

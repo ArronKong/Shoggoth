@@ -20,16 +20,9 @@ const {
   NATIVE_PI_RUNTIME_ACCOUNT_ID,
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
 } = require("./agent-service/runtime-account");
-const {
-  resolveCodexRuntimeLayout,
-  resolveCodexSystemBinary,
-} = require("./agent-service/codex-runtime-paths");
-const { resolveGrokBuildBinary } = require("./agent-service/grok-build-runtime-paths");
+const { resolveCodexRuntimeLayout } = require("./agent-service/codex-runtime-paths");
 const { antigravityUsedOnThisMac, resolveAntigravityBinary } = require("./agent-service/antigravity-runtime-paths");
-const { resolvePiBinary } = require("./agent-service/pi-runtime-paths");
-const { resolveClaudeCodeBinary } = require("./agent-service/claude-code-runtime-paths");
-const { resolveOpenCodeBinary } = require("./agent-service/opencode-runtime-paths");
-const { resolveDeepSeekHarnessBinary } = require("./agent-service/deepseek-harness-runtime-paths");
+const { SYSTEM_CLI_RUNTIMES, resolveSystemCli } = require("./agent-service/system-cli-discovery");
 
 const ACCOUNT_BY_ID = new Map(DEFAULT_RUNTIME_ACCOUNTS.map((account) => [account.id, account]));
 const NATIVE_HOME_SEGMENTS = Object.freeze({
@@ -189,13 +182,14 @@ function resolveAccountHome(commandName, account, options) {
 
 function resolveBinary(account, options) {
   if (account.kind === "shoggoth-managed") {
-    return options.resolveBundledCodexLayout({
+    const { runtimePath } = options.resolveBundledCodexLayout({
       repoRoot: options.repoRoot,
       packaged: options.packaged,
       resourcesPath: options.resourcesPath,
       platform: options.platform,
       arch: options.arch,
-    }).runtimePath;
+    });
+    return { binaryPath: runtimePath };
   }
   const binaryOptions = {
     parentEnv: options.parentEnv,
@@ -203,7 +197,8 @@ function resolveBinary(account, options) {
     fs: options.fs,
     paths: options.paths,
   };
-  return options.binaryResolvers[account.runtime](binaryOptions);
+  const resolver = options.binaryResolvers[account.runtime];
+  return resolver ? { binaryPath: resolver(binaryOptions) } : resolveSystemCli(account.runtime, binaryOptions);
 }
 
 function authorityConflictReason(account, options) {
@@ -259,35 +254,31 @@ function createRuntimeCliAuth(options = {}) {
     arch: options.arch,
     resolveBundledCodexLayout: options.resolveBundledCodexLayout || resolveCodexRuntimeLayout,
     binaryResolvers: {
-      codex: resolveCodexSystemBinary,
-      "grok-build": resolveGrokBuildBinary,
       antigravity: resolveAntigravityBinary,
-      pi: resolvePiBinary,
-      "claude-code": resolveClaudeCodeBinary,
-      opencode: resolveOpenCodeBinary,
-      "deepseek-harness": resolveDeepSeekHarnessBinary,
       ...(options.binaryResolvers || {}),
     },
   };
   return AUTH_SPECS.filter((spec) => {
     const account = ACCOUNT_BY_ID.get(spec.runtimeAccountId);
-    return (!options.nativeOnly || account.kind === "native-user")
+    return (!(options.nativeOnly || options.systemOnly) || account.kind === "native-user")
+      && (!options.systemOnly || SYSTEM_CLI_RUNTIMES.includes(account.runtime))
       && require("./runtime-availability").isRuntimeAvailable(account.runtime);
   }).map((spec) => {
     const account = ACCOUNT_BY_ID.get(spec.runtimeAccountId);
     const commandName = account.id === NATIVE_CODEX_RUNTIME_ACCOUNT_ID ? spec.name : `${spec.name} CLI`;
     const accountHome = resolveAccountHome(commandName, account, context);
     const authorityConflict = authorityConflictReason(account, context);
-    let binaryPath = null;
+    let executable;
     let unavailableReason = accountHome.error || authorityConflict;
     if (!unavailableReason) {
       try {
-        binaryPath = resolveBinary(account, context);
+        executable = resolveBinary(account, context);
       } catch (error) {
         unavailableReason = spec.unavailableReasons?.[error?.code]
           || `${commandName} is not installed or executable`;
       }
     }
+    const binaryPath = executable?.binaryPath ?? null;
     const loginCommand = spec.loginScript && !accountHome.error && !authorityConflict
       && typeof context.executablePath === "string" && typeof context.repoRoot === "string"
       ? Object.freeze({
@@ -308,6 +299,9 @@ function createRuntimeCliAuth(options = {}) {
       runtimeAccountId: account.id,
       name: spec.name,
       binaryPath,
+      ...(executable?.candidatePath ? {
+        binaryCandidatePath: executable.candidatePath, binarySource: executable.source,
+      } : {}),
       ...(binaryPath === null ? { unavailableReason } : {}),
       ...(installableOnSignIn ? { installableOnSignIn: true } : {}),
       accountHome: path.resolve(accountHome.home),

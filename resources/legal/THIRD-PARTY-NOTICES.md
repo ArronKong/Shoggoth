@@ -65,7 +65,7 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | has-property-descriptors | 1.0.2 | MIT | [LICENSE](licenses/npm/has-property-descriptors@1.0.2/LICENSE) |
 | highlight.js | 11.11.1 | BSD-3-Clause | [LICENSE](licenses/npm/highlight.js@11.11.1/LICENSE) |
 | html-parse-stringify | 3.0.1 | MIT | [HTML-PARSE-STRINGIFY.txt](licenses/source/HTML-PARSE-STRINGIFY.txt) |
-| i18next | 26.3.0 | MIT | [LICENSE](licenses/npm/i18next@26.3.0/LICENSE) |
+| i18next | 26.3.4 | MIT | [LICENSE](licenses/npm/i18next@26.3.4/LICENSE) |
 | isexe | 2.0.0 | ISC | [LICENSE](licenses/npm/isexe@2.0.0/LICENSE) |
 | jose | 6.2.12 | MIT | [LICENSE.md](licenses/npm/jose@6.2.12/LICENSE.md) |
 | js-tokens | 4.0.0 | MIT | [LICENSE](licenses/npm/js-tokens@4.0.0/LICENSE) |

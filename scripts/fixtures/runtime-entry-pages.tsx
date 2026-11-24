@@ -157,6 +157,8 @@ scope.fetch = async (input: string, init?: RequestInit) => {
     readiness: "ready",
     runtime, name: runtime, runtimeAccountId: `native-${runtime}-default-v1`, backendId: "shoggoth", enabled: preview ? ["codex", "pi", "deepseek-harness"].includes(runtime) : runtime !== "pi",
     releaseEnabled: runtime !== "claude-code", installation: runtime === "grok-build" ? "unavailable" : "available", serviceConnected: true,
+    ...(runtime === "antigravity" ? { features: { resume: "supported", compact: "unsupported", steer: "unsupported" } } : {}),
+    ...(runtime === "deepseek-harness" ? { features: { resume: "unsupported", compact: "supported", steer: "unsupported" } } : {}),
   })) });
   if (route === "/__api/shoggoth/runtime-accounts") return Response.json({ accounts });
   if (route === "/__api/shoggoth/status") return Response.json({ error: "fixture service details unavailable" }, { status: 503 });
@@ -274,6 +276,47 @@ const choose = async (runtime: string, model = "shared-model") => {
     && document.querySelector(".model-menu__label")?.textContent === bindings.find(binding => binding.runtime === runtime)!.name, "CLI tab applied");
   const option = [...document.querySelectorAll<HTMLButtonElement>('.model-menu [role="option"]')].find(item => item.title === model);
   check(option && !option.disabled, "available model directly selectable"); option!.click();
+};
+scope.checkCliDiscovery = async () => {
+  const selectedCliPath = "/fixture/service bin/codex";
+  const candidateCliPath = "/fixture/user/.local/bin/pi";
+  let locationReads = 0;
+  scope.openclawDesktop = {
+    getRuntimeCliLocations: async () => {
+      locationReads++;
+      return [
+        { backendId: "shoggoth", runtimeAccountId: "native-codex-default-v1", path: selectedCliPath, source: "path", confirmed: true },
+        { backendId: "shoggoth", runtimeAccountId: "native-pi-default-v1", path: candidateCliPath, source: "user-bin", confirmed: false },
+      ];
+    },
+  };
+  cfg.disabledBackends = ["pi"];
+  scope.showSettings(true); await openLocalRuntimes();
+  const sectionSelector = "#settings-local-runtimes";
+  await wait(() => document.querySelector(`${sectionSelector} [data-runtime="codex"] .settings-health`)?.textContent === "已就绪"
+    && document.querySelector(`${sectionSelector} [data-runtime="pi"] .settings-health`)?.textContent === "未连接", "CLI status ready");
+  const section = document.querySelector(sectionSelector)!;
+  check(section.querySelectorAll('[data-runtime="codex"] button').length === 1, "Settings keeps the CLI connection control");
+  const visibleDetails = [section.textContent, ...Array.from(section.querySelectorAll("[title]"), node => node.getAttribute("title"))];
+  check(visibleDetails.every(value => !value?.includes(selectedCliPath) && !value?.includes(candidateCliPath)),
+    "Settings hides confirmed and candidate CLI paths, including tooltips");
+  check(locationReads === 0, "Settings does not request CLI paths");
+  const antigravity = section.querySelector('[data-runtime="antigravity"]')!;
+  check(antigravity.querySelector(".settings-health")?.textContent === "已就绪", "Antigravity status is ready");
+  check(!antigravity.textContent?.includes("不支持原生压缩"), "Settings hides the native compaction notice");
+  check(section.querySelector('[data-runtime="deepseek-harness"] [role="status"]')?.textContent?.includes("无法继续历史会话"),
+    "Settings displays the notice when a Runtime cannot resume the conversation");
+  return { cliPathsHidden: true, compactNoticeHidden: true, resumeNoticeVisible: true };
+};
+scope.checkCliDiscoveryGeometry = async (theme: string, width: number) => {
+  await wait(() => innerWidth === width, `Settings viewport reaches ${width}px`);
+  document.documentElement.dataset.theme = theme;
+  const tile = document.querySelector('[data-runtime="codex"]')!;
+  const status = tile.querySelector(".settings-health")!;
+  const bounds = status.getBoundingClientRect();
+  check(bounds.width > 0 && bounds.right <= tile.getBoundingClientRect().right, "status fits the runtime tile");
+  check(document.documentElement.scrollWidth <= innerWidth + 1, "Settings horizontal overflow");
+  return { width: innerWidth, theme, statusFits: true };
 };
 scope.runRuntimeEntryFixture = async () => {
   await openModels();
