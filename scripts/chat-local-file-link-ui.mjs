@@ -37,12 +37,39 @@ try {
     process.on("SIGINT", close);
   } else {
     const main = path.join(temp, "main.cjs");
-    fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron");
-app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
-app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:${Number(process.env.CHAT_FILE_LINK_WIDTH || 1360)},height:950,webPreferences:{backgroundThrottling:false}});let passed=false;
-try{await w.loadURL(${JSON.stringify(origin)});console.log(JSON.stringify(await w.webContents.executeJavaScript('window.runFixture()')));
-if(${JSON.stringify(process.env.CHAT_FILE_LINK_SCREENSHOT || "")})require('node:fs').writeFileSync(${JSON.stringify(process.env.CHAT_FILE_LINK_SCREENSHOT || "")},(await w.webContents.capturePage()).toPNG());
-passed=true;}catch(e){console.error(e);}finally{w.destroy();app.exit(passed?0:1);}});`);
+    fs.writeFileSync(main, `const { app, BrowserWindow } = require("electron");
+const assert = require("node:assert/strict");
+const { shouldOpenExternalUrl } = require(${JSON.stringify(path.join(root, "app/board-widget-navigation.js"))});
+const origin = ${JSON.stringify(origin)};
+const screenshotPath = ${JSON.stringify(process.env.CHAT_FILE_LINK_SCREENSHOT || "")};
+app.setPath("userData", ${JSON.stringify(path.join(temp, "profile"))});
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({ show: false, width: ${Number(process.env.CHAT_FILE_LINK_WIDTH || 1360)}, height: 950,
+    webPreferences: { backgroundThrottling: false } });
+  const externalOpens = [];
+  window.webContents.session.webRequest.onBeforeRequest({ urls: ["http://*/*", "https://*/*"] }, (request, callback) => {
+    callback({ cancel: new URL(request.url).origin !== origin });
+  });
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (shouldOpenExternalUrl(url)) externalOpens.push(url);
+    return { action: "deny" };
+  });
+  let passed = false;
+  try {
+    await window.loadURL(origin);
+    const result = await window.webContents.executeJavaScript('window.runFixture()');
+    assert.deepEqual(externalOpens, result.externalLinks, "Only the external links reach the desktop browser handler");
+    console.log(JSON.stringify(result));
+    if (screenshotPath) require("node:fs").writeFileSync(screenshotPath, (await window.webContents.capturePage()).toPNG());
+    passed = true;
+  } catch (error) {
+    console.error(error);
+  } finally {
+    window.destroy();
+    app.exit(passed ? 0 : 1);
+  }
+});
+`);
     const result = await promisify(execFile)(path.join(root, "node_modules/.bin/electron"), [main], {
       encoding: "utf8", timeout: 30_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
     });

@@ -2,10 +2,10 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { validRuntimeProfileId } = require("./runtime-adapter");
+const { executableRealpath, resolveSystemCli } = require("./system-cli-discovery");
 
 const CLAUDE_CODE_RUNTIME = "claude-code";
 const MIN_CLAUDE_CODE_VERSION = Object.freeze([2, 1, 220]);
@@ -44,20 +44,6 @@ function prepareClaudeCodeHome(paths, runtimeProfileId) {
   return home;
 }
 
-function executableRealpath(candidate, fileSystem) {
-  if (typeof candidate !== "string" || candidate.length === 0 || candidate.includes("\0")
-    || !path.isAbsolute(candidate)) return null;
-  try {
-    const resolved = fileSystem.realpathSync(candidate);
-    const stat = fileSystem.lstatSync(resolved);
-    if (!path.isAbsolute(resolved) || !stat.isFile() || stat.isSymbolicLink()) return null;
-    fileSystem.accessSync(resolved, fileSystem.constants.X_OK);
-    return path.resolve(resolved);
-  } catch {
-    return null;
-  }
-}
-
 function resolveClaudeCodeExecutable(candidate, options = {}) {
   const fileSystem = options.fs || fs;
   const resolved = executableRealpath(candidate, fileSystem);
@@ -71,31 +57,7 @@ function resolveClaudeCodeExecutable(candidate, options = {}) {
 }
 
 function resolveClaudeCodeBinary(options = {}) {
-  const fileSystem = options.fs || fs;
-  if (options.binaryPath !== undefined) {
-    return resolveClaudeCodeExecutable(options.binaryPath, {
-      fs: fileSystem,
-      code: "CLAUDE_CODE_BINARY_INVALID",
-      message: "Claude Code binaryPath must be an absolute executable regular file",
-    });
-  }
-  const parentEnv = options.parentEnv || process.env;
-  const userHome = options.homedir || os.homedir();
-  const candidates = [];
-  for (const entry of String(parentEnv.PATH || "").split(path.delimiter)) {
-    if (entry.length > 0 && path.isAbsolute(entry) && !entry.includes("\0")) {
-      candidates.push(path.join(entry, "claude"));
-    }
-  }
-  if (typeof userHome === "string" && path.isAbsolute(userHome) && !userHome.includes("\0")) {
-    candidates.push(path.join(userHome, ".local", "bin", "claude"));
-  }
-  candidates.push("/opt/homebrew/bin/claude", "/usr/local/bin/claude");
-  for (const candidate of [...new Set(candidates)]) {
-    const resolved = executableRealpath(candidate, fileSystem);
-    if (resolved) return resolved;
-  }
-  throw runtimeError("CLAUDE_CODE_BINARY_NOT_FOUND", "Claude Code CLI executable was not found");
+  return resolveSystemCli(CLAUDE_CODE_RUNTIME, options).binaryPath;
 }
 
 function parseClaudeCodeVersion(value) {

@@ -6,8 +6,20 @@ const { releaseApi, sleep } = require("./release-http.cjs");
 
 const repository = "ArronKong/Shoggoth";
 const maximumAttempts = 3;
-const macJobs = new Set(["source-ci / macos-hook-checks", "Sign and notarize arm64", "Sign and notarize x64",
-  "native-verification / Native arm64 draft verification", "native-verification / Native x64 draft verification"]);
+const workflows = new Map([
+  [".github/workflows/release.yml", { file: "release.yml", name: "Signed macOS draft", event: "workflow_dispatch",
+    ref: /^v\d+\.\d+\.\d+$/u }],
+  [".github/workflows/ci.yml", { file: "ci.yml", name: "CI", event: "pull_request",
+    ref: /^codex\/release-v\d+\.\d+\.\d+$/u }],
+]);
+const macJobs = new Map([
+  ["macos-hook-checks", "macos-latest"],
+  ["source-ci / macos-hook-checks", "macos-latest"],
+  ["Sign and notarize arm64", "macos-latest"],
+  ["Sign and notarize x64", "macos-15-intel"],
+  ["native-verification / Native arm64 draft verification", "macos-latest"],
+  ["native-verification / Native x64 draft verification", "macos-15-intel"],
+]);
 const interruptibleJobs = new Map([
   ["source-ci / isolated-checks", "ubuntu-latest"],
   ["source-ci / macos-hook-checks", "macos-latest"],
@@ -17,27 +29,39 @@ const interruptibleJobs = new Map([
 ]);
 const shutdownError = "The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.";
 const cancelledError = "The operation was canceled.";
+const allocationError = "The job was not acquired by Runner of type hosted even after multiple attempts";
 const publicReadError = "Transient public verification read exhausted";
 const intelHarnessTimeout = "Intel first-launch harness self-test subprocess timed out before draft verification.";
 
 function assertTrustedRun(run) {
   assert.equal(run.repository?.full_name, repository, "Unexpected run repository");
   assert.equal(run.head_repository?.full_name, repository, "Fork runs cannot request recovery");
-  assert.equal(run.event, "workflow_dispatch", "Only deliberate release dispatches may recover");
-  assert.equal(run.path, ".github/workflows/release.yml");
+  const workflow = workflows.get(run.path);
+  assert.ok(workflow, "Unexpected recovery workflow");
+  assert.equal(run.event, workflow.event, "Unexpected recovery event");
   // REST run.name can contain run-name (and the version); use workflow_id below.
   assert.ok(Number.isSafeInteger(run.workflow_id) && run.workflow_id > 0);
-  assert.match(run.head_branch, /^v\d+\.\d+\.\d+$/u);
+  assert.match(run.head_branch, workflow.ref);
   assert.match(run.head_sha, /^[a-f0-9]{40}$/u);
   assert.ok(Number.isSafeInteger(run.id) && run.id > 0);
   assert.ok(Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0);
+  return workflow;
 }
 
-async function jobsFor(client, runId) {
-  const result = await client.get(`/actions/runs/${runId}/jobs?filter=latest&per_page=100`);
+function assertSameRun(actual, expected) {
+  assertTrustedRun(actual);
+  for (const key of ["id", "workflow_id", "path", "event", "head_branch", "head_sha"]) {
+    assert.equal(actual[key], expected[key], `Recovery run ${key} changed`);
+  }
+}
+
+async function jobsFor(client, run) {
+  const result = await client.get(`/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
   assert.equal(result.total_count, result.jobs.length, "Incomplete job inventory");
-  assert.ok(result.jobs.every(job => job.run_id === runId && Number.isSafeInteger(job.id) && job.id > 0),
+  assert.ok(result.jobs.every(job => job.run_id === run.id && job.head_sha === run.head_sha
+    && job.run_attempt === run.run_attempt && job.status === "completed" && Number.isSafeInteger(job.id) && job.id > 0),
     "Unexpected job identity");
+  assert.equal(new Set(result.jobs.map(job => job.name)).size, result.jobs.length, "Duplicate recovery job");
   return result.jobs;
 }
 
@@ -75,10 +99,10 @@ function publishedInThisRun(jobs) {
 
 async function retryReason(client, job, jobs) {
   if (!Array.isArray(job.steps)) return null;
-  if (job.conclusion === "cancelled" && job.steps.length === 0 && macJobs.has(job.name)
-    && job.labels?.some(label => ["macos-latest", "macos-15-intel"].includes(label))) {
-    const annotations = await checkAnnotations(client, job);
-    if (annotations.some(item => item.message === "The job was not acquired by Runner of type hosted even after multiple attempts")) {
+  if (job.conclusion === "cancelled" && job.steps.length === 0 && job.runner_id === 0
+    && macJobs.has(job.name) && job.labels?.includes(macJobs.get(job.name))) {
+    const failures = (await checkAnnotations(client, job)).filter(item => item.annotation_level === "failure");
+    if (failures.length === 1 && failures[0].message === allocationError) {
       return "hosted-mac-allocation";
     }
   }
@@ -113,9 +137,12 @@ async function retryReason(client, job, jobs) {
   return null;
 }
 
-async function retryCandidates(client, jobs) {
+async function retryCandidates(client, jobs, event) {
+  const failed = jobs.filter(item => !["success", "skipped"].includes(item.conclusion));
+  if (event === "pull_request" && (failed.length !== 1 || failed[0].name !== "macos-hook-checks"
+    || !jobs.some(job => job.name === "isolated-checks" && job.conclusion === "success"))) return [];
   const candidates = [];
-  for (const job of jobs.filter(item => !["success", "skipped"].includes(item.conclusion))) {
+  for (const job of failed) {
     const reason = await retryReason(client, job, jobs);
     if (!reason) return [];
     candidates.push({ id: job.id, reason });
@@ -123,44 +150,56 @@ async function retryCandidates(client, jobs) {
   return candidates.sort((a, b) => a.id - b.id);
 }
 
+async function assertRetryTarget(client, run) {
+  if (run.event === "pull_request") {
+    const head = encodeURIComponent(`ArronKong:${run.head_branch}`);
+    const pulls = await client.get(`/pulls?state=open&base=main&head=${head}&per_page=100`);
+    const matches = pulls.filter(pr => pr.state === "open" && pr.base?.ref === "main"
+      && pr.base.repo?.full_name === repository && pr.head?.repo?.full_name === repository
+      && pr.head.ref === run.head_branch && pr.head.sha === run.head_sha);
+    assert.equal(matches.length, 1, "Release PR is closed or its reviewed source changed");
+    assert.ok(Number.isSafeInteger(matches[0].number) && matches[0].number > 0);
+    return matches[0].number;
+  }
+  await client.assertTag(run.head_branch, run.head_sha);
+  const ancestry = await client.get(`/compare/${run.head_sha}...main`);
+  assert.ok(["ahead", "identical"].includes(ancestry.status), "Release source must belong to reviewed main");
+  return run.head_branch;
+}
+
 async function recoverRelease(client, eventRun, runtime = {}) {
   const pause = runtime.sleep || sleep;
   const record = runtime.record || (() => {});
-  assertTrustedRun(eventRun);
+  const trusted = assertTrustedRun(eventRun);
   let current = await client.get(`/actions/runs/${eventRun.id}`);
-  assertTrustedRun(current);
-  assert.deepEqual([current.id, current.head_sha, current.head_branch], [eventRun.id, eventRun.head_sha, eventRun.head_branch]);
-  const workflow = await client.get("/actions/workflows/release.yml");
-  assert.deepEqual([current.workflow_id, eventRun.workflow_id, workflow.path, workflow.name],
-    [workflow.id, workflow.id, ".github/workflows/release.yml", "Signed macOS draft"]);
+  assertSameRun(current, eventRun);
+  const workflow = await client.get(`/actions/workflows/${trusted.file}`);
+  assert.deepEqual([workflow.id, workflow.path, workflow.name], [current.workflow_id, eventRun.path, trusted.name]);
   if (current.run_attempt !== eventRun.run_attempt || current.status !== "completed")
     return { decision: "already-advanced", runId: current.id, attempt: current.run_attempt };
   if (current.conclusion === "success") return { decision: "success", runId: current.id, attempt: current.run_attempt };
-  const jobs = await jobsFor(client, current.id);
+  const jobs = await jobsFor(client, current);
   const failed = jobs.filter(job => !["success", "skipped"].includes(job.conclusion));
-  const base = { runId: current.id, source: current.head_sha, tag: current.head_branch,
+  const base = { runId: current.id, source: current.head_sha, event: current.event,
+    ...(current.event === "pull_request" ? { branch: current.head_branch } : { tag: current.head_branch }),
     attempt: current.run_attempt, failedJobs: failed.map(job => ({ id: job.id, name: job.name, conclusion: job.conclusion,
       steps: (job.steps || []).filter(step => ["failure", "cancelled"].includes(step.conclusion)).map(step => step.name) })) };
   if (publishedInThisRun(jobs) && failed.some(job => job.name === "verify-public")) base.releaseState = "published-verification-pending";
   if (current.conclusion !== "failure") return { ...base, decision: "needs-attention", reason: "Run was cancelled or did not fail normally" };
   if (current.run_attempt >= maximumAttempts) return { ...base, decision: "needs-attention", reason: "Automatic retry limit reached (3 total attempts)" };
-  const candidates = await retryCandidates(client, jobs);
+  const candidates = await retryCandidates(client, jobs, current.event);
   if (!candidates.length) return { ...base, decision: "needs-attention", reason: "Failed steps do not match a verified transient condition" };
-  await client.assertTag(current.head_branch, current.head_sha);
-  const ancestry = await client.get(`/compare/${current.head_sha}...main`);
-  assert.ok(["ahead", "identical"].includes(ancestry.status), "Release source must belong to reviewed main");
+  const target = await assertRetryTarget(client, current);
   const backoffMs = current.run_attempt === 1 ? 60_000 : 180_000;
   record({ ...base, decision: "waiting-to-retry", backoffMs, candidates });
   await pause(backoffMs);
   current = await client.get(`/actions/runs/${current.id}`);
   if (current.status !== "completed" || current.run_attempt !== eventRun.run_attempt)
     return { ...base, decision: "already-advanced" };
-  assertTrustedRun(current);
-  assert.deepEqual([current.id, current.workflow_id, current.head_sha, current.head_branch],
-    [eventRun.id, eventRun.workflow_id, eventRun.head_sha, eventRun.head_branch]);
+  assertSameRun(current, eventRun);
   assert.equal(current.conclusion, "failure");
-  await client.assertTag(current.head_branch, current.head_sha);
-  const confirmed = await retryCandidates(client, await jobsFor(client, current.id));
+  assert.equal(await assertRetryTarget(client, current), target, "Recovery target changed during backoff");
+  const confirmed = await retryCandidates(client, await jobsFor(client, current), current.event);
   assert.deepEqual(confirmed, candidates, "Failure inventory changed during backoff");
   const route = confirmed.length === 1 ? `/actions/jobs/${confirmed[0].id}/rerun`
     : `/actions/runs/${current.id}/rerun-failed-jobs`;
@@ -170,9 +209,7 @@ async function recoverRelease(client, eventRun, runtime = {}) {
   catch (error) { record({ ...base, decision: "reconciling-retry", error: error.message }); }
   for (let check = 0; check < 10; check++) {
     const after = await client.get(`/actions/runs/${current.id}`);
-    assertTrustedRun(after);
-    assert.deepEqual([after.id, after.workflow_id, after.head_sha, after.head_branch],
-      [current.id, current.workflow_id, current.head_sha, current.head_branch]);
+    assertSameRun(after, current);
     if (after.run_attempt > current.run_attempt)
       return { ...base, decision: "retried", nextAttempt: after.run_attempt, reusedSuccessfulJobs: true, candidates };
     await pause(3000);
@@ -194,7 +231,7 @@ async function main() {
   save(result);
   const state = result.releaseState ? "The release is public. Download verification is pending.\n\n" : "";
   const steps = (result.failedJobs || []).map(job => `- [${job.name}](https://github.com/${repository}/actions/runs/${result.runId}/job/${job.id}) ${job.steps.join(", ")}`).join("\n");
-  const summary = `Release recovery: **${result.decision}**\n\n[Original release run](https://github.com/${repository}/actions/runs/${event.workflow_run.id})\n\n${state}${result.reason || ""}\n\n${steps}\n`;
+  const summary = `Release recovery: **${result.decision}**\n\n[Original workflow run](https://github.com/${repository}/actions/runs/${event.workflow_run.id})\n\n${state}${result.reason || ""}\n\n${steps}\n`;
   fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
   console.log(JSON.stringify(result));
   if (result.decision === "needs-attention") process.exitCode = 1;

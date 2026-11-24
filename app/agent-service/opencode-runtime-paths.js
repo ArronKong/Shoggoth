@@ -2,10 +2,10 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { validRuntimeProfileId } = require("./runtime-adapter");
 const { serviceError } = require("./security");
+const { resolveSystemCli } = require("./system-cli-discovery");
 
 const OPENCODE_RUNTIME = "opencode";
 const VALID_APPROVAL_POLICIES = new Set(["untrusted", "on-failure", "on-request", "never"]);
@@ -14,27 +14,7 @@ const VALID_SANDBOXES = new Set(["read-only", "workspace-write", "danger-full-ac
 function error(code, message) { return serviceError(code, message); }
 
 function resolveOpenCodeBinary(options = {}) {
-  const fileSystem = options.fs || fs;
-  const userHome = options.homedir || os.homedir();
-  const parentEnv = options.parentEnv || process.env;
-  const candidates = options.binaryPath !== undefined ? [options.binaryPath] : [
-    ...String(parentEnv.PATH || "").split(path.delimiter).filter(path.isAbsolute)
-      .map((entry) => path.join(entry, "opencode")),
-    path.join(userHome, ".local", "bin", "opencode"),
-    "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode",
-  ];
-  for (const candidate of new Set(candidates)) {
-    if (typeof candidate !== "string" || !path.isAbsolute(candidate) || candidate.includes("\0")) continue;
-    try {
-      const resolved = fileSystem.realpathSync(candidate);
-      const stat = fileSystem.lstatSync(resolved);
-      if (!stat.isFile() || stat.isSymbolicLink()) continue;
-      fileSystem.accessSync(resolved, fileSystem.constants.X_OK);
-      return path.resolve(resolved);
-    } catch {}
-  }
-  throw error(options.binaryPath === undefined ? "OPENCODE_BINARY_NOT_FOUND" : "OPENCODE_BINARY_INVALID",
-    "OpenCode CLI executable is unavailable or unsafe");
+  return resolveSystemCli(OPENCODE_RUNTIME, options).binaryPath;
 }
 
 function parseOpenCodeVersion(value) {

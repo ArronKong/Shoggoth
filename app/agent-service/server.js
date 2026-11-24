@@ -54,6 +54,7 @@ const { assignBuiltinAgentAvatar } = require("./builtin-agent-avatars");
 const { agentGreeting } = require("./agent-greeting");
 const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME } = require("./runtime-account");
 const { AUTH_SPECS, createRuntimeCliAuth } = require("../runtime-cli-auth");
+const { SYSTEM_CLI_DISCOVERY_METHOD } = require("./system-cli-discovery");
 const { CodexRuntimeConfigWriter } = require("./codex-runtime-config");
 const { EncryptedSecretStore } = require("./encrypted-secret-store");
 const { RunExecutionStore } = require("./run-execution-store");
@@ -1484,14 +1485,16 @@ function createAgentService(options) {
   });
   // Built-in CLI Agents created so far, greeted Agents, and the Codex automation owner.
   const builtinAgentState = new BuiltinAgentState({ paths });
+  const readCliAuth = (scope) => createRuntimeCliAuth({
+    paths, repoRoot, parentEnv: options.parentEnv, homedir: options.runtimeStorageHomedir,
+    packaged: options.packaged, resourcesPath: options.resourcesPath, ...scope,
+  });
   // CLIs installed on this Mac, whose built-in Agent may be created. Antigravity
   // counts once its own sign-in has installed the ACP server.
   const installedBuiltinAccountIds = () => {
     if (options.builtinCliProfiles !== true) return new Set();
     if (options.builtinCliInstalledAccountIds !== undefined) return new Set(options.builtinCliInstalledAccountIds);
-    const parentEnv = options.parentEnv || process.env;
-    const homedir = options.runtimeStorageHomedir || os.homedir;
-    return new Set(createRuntimeCliAuth({ paths, parentEnv, homedir, nativeOnly: true })
+    return new Set(readCliAuth({ nativeOnly: true })
       .filter((entry) => entry.binaryPath !== null).map((entry) => entry.runtimeAccountId));
   };
   // Every new Agent gets one first greeting; one on a local CLI names that CLI.
@@ -2964,8 +2967,7 @@ function createAgentService(options) {
     if (!require("../runtime-availability").isRuntimeAvailable(profile.runtime)) return false;
     const now = (options.now || Date.now)();
     if (Math.abs(now - proactiveCliFacts.at) >= 30_000) {
-      proactiveCliFacts = { at: now, rows: require("../runtime-cli-auth").createRuntimeCliAuth({ paths, repoRoot,
-        parentEnv: options.parentEnv, homedir: options.runtimeStorageHomedir, packaged: options.packaged, resourcesPath: options.resourcesPath }) };
+      proactiveCliFacts = { at: now, rows: readCliAuth() };
     }
     return proactiveCliFacts.rows.some(row => row.runtimeAccountId === profile.runtimeAccountId && row.binaryPath !== null);
   };
@@ -4629,6 +4631,7 @@ function createAgentService(options) {
         // MCP authority is lazily unlocked on the first authenticated helper handshake.
         mcpCredentialsLocked: mcpSessionManager === null,
         activeMemoryCommands: Boolean(shoggothMemory),
+        nativeCliDiscovery: true,
         chatAcceptanceV1: workRunCoordinator.acceptsChatReceipts === true,
       };
     } else if (request.method === "service.mcpAuth.migrateKeychain") {
@@ -4825,6 +4828,17 @@ function createAgentService(options) {
       }
       if (!validateAuthResult(request.method, result)) {
         errorResponse(socket, id, "AUTH_RESPONSE_INVALID", "账户认证响应无效");
+        return;
+      }
+    } else if (request.method === SYSTEM_CLI_DISCOVERY_METHOD) {
+      if (!exactObject(request, ["id", "token", "version", "method", "params"]) || !exactObject(request.params, [])) {
+        errorResponse(socket, id, "INVALID_PARAMS", "Runtime CLI discovery has no parameters");
+        return;
+      }
+      try {
+        result = { instanceNonce, rows: readCliAuth({ systemOnly: true }) };
+      } catch {
+        errorResponse(socket, id, "RUNTIME_CLI_DISCOVERY_UNAVAILABLE", "Runtime CLI discovery is unavailable");
         return;
       }
     } else if (request.method === runtimeExtensionStatusProtocol.METHOD) {

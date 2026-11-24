@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { validRuntimeProfileId } = require("./runtime-adapter");
+const { executableRealpath, resolveSystemCli } = require("./system-cli-discovery");
 
 const PI_RUNTIME = "pi";
 const DEFAULT_PI_PERMISSION_POLICY = Object.freeze({
@@ -41,20 +42,6 @@ function preparePiHome(paths, runtimeProfileId) {
   return home;
 }
 
-function executableRealpath(candidate, fileSystem) {
-  if (typeof candidate !== "string" || candidate.length === 0 || candidate.includes("\0")
-    || !path.isAbsolute(candidate)) return null;
-  try {
-    const resolved = fileSystem.realpathSync(candidate);
-    const stat = fileSystem.lstatSync(resolved);
-    if (!path.isAbsolute(resolved) || !stat.isFile() || stat.isSymbolicLink()) return null;
-    fileSystem.accessSync(resolved, fileSystem.constants.X_OK);
-    return path.resolve(resolved);
-  } catch {
-    return null;
-  }
-}
-
 function resolvePiExecutable(candidate, options = {}) {
   const resolved = executableRealpath(candidate, options.fs || fs);
   if (!resolved) {
@@ -67,31 +54,7 @@ function resolvePiExecutable(candidate, options = {}) {
 }
 
 function resolvePiBinary(options = {}) {
-  const fileSystem = options.fs || fs;
-  if (options.binaryPath !== undefined) {
-    return resolvePiExecutable(options.binaryPath, {
-      fs: fileSystem,
-      code: "PI_BINARY_INVALID",
-      message: "Pi binaryPath must be an absolute executable regular file",
-    });
-  }
-  const parentEnv = options.parentEnv || process.env;
-  const userHome = options.homedir || os.homedir();
-  const candidates = [];
-  for (const entry of String(parentEnv.PATH || "").split(path.delimiter)) {
-    if (entry.length > 0 && path.isAbsolute(entry) && !entry.includes("\0")) {
-      candidates.push(path.join(entry, "pi"));
-    }
-  }
-  if (typeof userHome === "string" && path.isAbsolute(userHome) && !userHome.includes("\0")) {
-    candidates.push(path.join(userHome, ".local", "bin", "pi"));
-  }
-  candidates.push("/opt/homebrew/bin/pi", "/usr/local/bin/pi");
-  for (const candidate of [...new Set(candidates)]) {
-    const resolved = executableRealpath(candidate, fileSystem);
-    if (resolved) return resolved;
-  }
-  throw runtimeError("PI_BINARY_NOT_FOUND", "Pi CLI executable was not found");
+  return resolveSystemCli(PI_RUNTIME, options).binaryPath;
 }
 
 function resolvePiLaunch(binaryPath, options = {}) {

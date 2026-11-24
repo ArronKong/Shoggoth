@@ -49,6 +49,31 @@ test("install state distinguishes missing, unsupported and corrupt installs", as
   assert.equal((await antigravityAcpInstallState({ paths: f.paths, platform: "darwin", arch: "arm64" })).state, "corrupt");
 });
 
+test("the new release takes precedence while an existing host can verify the selected older path", async (t) => {
+  const f = fixture(t);
+  const options = { paths: f.paths, platform: "darwin", arch: "arm64" };
+  const previous = path.join(path.dirname(f.dir), "1.4.3");
+  const createFiles = (directory, serverBytes, harnessBytes) => {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    for (const [name, size] of [["agy_acp_server.par", serverBytes], ["localharness_external", harnessBytes]]) {
+      const file = path.join(directory, name);
+      fs.writeFileSync(file, "", { mode: 0o755 });
+      fs.truncateSync(file, size);
+    }
+  };
+  createFiles(previous, 282_446_160, 122_957_936);
+  const { serverPath } = resolveAntigravityAcpServer(options);
+  assert.equal(serverPath, path.join(previous, "agy_acp_server.par"));
+  assert.equal((await antigravityAcpInstallState({ ...options, preferredOnly: true })).state, "missing");
+
+  createFiles(f.dir, 179_921_328, 129_208_672);
+  assert.equal(resolveAntigravityAcpServer(options).version, ANTIGRAVITY_ACP_SERVER_VERSION);
+  assert.equal(resolveAntigravityAcpServer({ ...options, serverPath }).version, "1.4.3");
+
+  fs.truncateSync(path.join(f.dir, "agy_acp_server.par"), 1);
+  assert.throws(() => resolveAntigravityAcpServer(options), { code: "ANTIGRAVITY_ACP_INTEGRITY_FAILED" });
+});
+
 test("a failed download leaves no staging directory and reports a safe code", async (t) => {
   const f = fixture(t);
   const calls = [];

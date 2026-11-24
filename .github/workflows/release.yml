@@ -308,6 +308,7 @@ jobs:
           name: signing-${{ matrix.arch }}-attempt-${{ github.run_attempt }}
           path: |
             dist/${{ matrix.app_dir }}/Shoggoth.app.notarization.json
+            dist/${{ matrix.app_dir }}/Shoggoth.app.notarization.submission.json
             dist/signing-${{ matrix.arch }}/*.json
           if-no-files-found: warn
       - name: Remove temporary signing credentials

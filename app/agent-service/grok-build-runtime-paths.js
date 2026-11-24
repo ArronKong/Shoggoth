@@ -2,10 +2,10 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { validRuntimeProfileId } = require("./runtime-adapter");
+const { executableRealpath, resolveSystemCli } = require("./system-cli-discovery");
 
 const GROK_BUILD_RUNTIME = "grok-build";
 const DEFAULT_GROK_BUILD_PERMISSION_POLICY = Object.freeze({
@@ -46,23 +46,6 @@ function prepareGrokBuildHome(paths, runtimeProfileId) {
   return grokHome;
 }
 
-function executableRealpath(candidate, fileSystem) {
-  if (typeof candidate !== "string" || candidate.length === 0 || candidate.includes("\0")
-    || !path.isAbsolute(candidate)) return null;
-  let resolved;
-  let stat;
-  try {
-    resolved = fileSystem.realpathSync(candidate);
-    if (!path.isAbsolute(resolved)) return null;
-    stat = fileSystem.lstatSync(resolved);
-    if (!stat.isFile() || stat.isSymbolicLink()) return null;
-    fileSystem.accessSync(resolved, fileSystem.constants.X_OK);
-  } catch {
-    return null;
-  }
-  return path.resolve(resolved);
-}
-
 function resolveGrokBuildExecutable(candidate, options = {}) {
   const fileSystem = options.fs || fs;
   if (typeof candidate !== "string" || !path.isAbsolute(candidate) || candidate.includes("\0")) {
@@ -82,33 +65,7 @@ function resolveGrokBuildExecutable(candidate, options = {}) {
 }
 
 function resolveGrokBuildBinary(options = {}) {
-  const fileSystem = options.fs || fs;
-  const explicit = options.binaryPath;
-  if (explicit !== undefined) {
-    return resolveGrokBuildExecutable(explicit, {
-      fs: fileSystem,
-      code: "GROK_BUILD_BINARY_INVALID",
-      message: "Grok Build binaryPath must be an absolute executable regular file",
-    });
-  }
-
-  const parentEnv = options.parentEnv || process.env;
-  const home = options.homedir || os.homedir();
-  const candidates = [];
-  for (const entry of String(parentEnv.PATH || "").split(path.delimiter)) {
-    if (entry.length > 0 && path.isAbsolute(entry) && !entry.includes("\0")) {
-      candidates.push(path.join(entry, "grok"));
-    }
-  }
-  if (typeof home === "string" && path.isAbsolute(home) && !home.includes("\0")) {
-    candidates.push(path.join(home, ".local", "bin", "grok"));
-  }
-  candidates.push("/opt/homebrew/bin/grok", "/usr/local/bin/grok");
-  for (const candidate of [...new Set(candidates)]) {
-    const resolved = executableRealpath(candidate, fileSystem);
-    if (resolved) return resolved;
-  }
-  throw runtimeError("GROK_BUILD_BINARY_NOT_FOUND", "Grok Build executable was not found");
+  return resolveSystemCli(GROK_BUILD_RUNTIME, options).binaryPath;
 }
 
 function normalizeGrokBuildPermissionPolicy(value = DEFAULT_GROK_BUILD_PERMISSION_POLICY) {

@@ -132,6 +132,16 @@ try {
   assert.equal(internalAppHashFromHref("https://example.com/#/tasks", currentHref), null);
   assert.equal(internalAppHashFromHref("#message-1", currentHref), null);
   assert.equal(internalAppHashFromHref("javascript:#/tasks", currentHref), null);
+  const resultPath = "/inspirations?id=note%2Fone&filter=result";
+  const resultRoute = `#${resultPath}`;
+  assert.equal(internalAppHashFromHref(`http://127.0.0.1:18799${resultPath}`, currentHref), resultRoute);
+  assert.equal(internalAppHashFromHref(resultPath, currentHref), resultRoute);
+  assert.equal(internalAppHashFromHref(`http://127.0.0.1:18799/${resultRoute}`, currentHref), resultRoute);
+  assert.equal(internalAppHashFromHref(`http://127.0.0.1:18800${resultPath}`, currentHref), null);
+  assert.equal(internalAppHashFromHref(`https://example.com${resultPath}`, currentHref), null);
+  assert.equal(internalAppHashFromHref("/inspirations/guide", currentHref), null);
+  assert.equal(internalAppHashFromHref("/__api/inspirations/detail?id=note%2Fone", currentHref), null);
+  assert.equal(internalAppHashFromHref(`file://${resultPath}`, "file:///index.html#/chat"), null);
 
   const markdownSource = fs.readFileSync(path.join(uiRoot, "src/lib/markdown.ts"), "utf8");
   const chatSource = fs.readFileSync(path.join(uiRoot, "src/pages/ChatPage.tsx"), "utf8");

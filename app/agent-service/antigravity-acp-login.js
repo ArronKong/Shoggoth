@@ -19,6 +19,7 @@ const {
   prepareAntigravityRuntimeAccountHome,
 } = require("./antigravity-runtime-paths");
 const { resolveCanonicalServicePaths, systemHome } = require("./paths");
+const { readMacSystemProxyEnvironmentAsync } = require("./proxy-environment");
 const { serviceError } = require("./security");
 
 const AUTH_URL_PATTERN = /https:\/\/accounts\.google\.com\/[^\s"'<>]+/u;
@@ -56,13 +57,13 @@ async function loginAntigravityAcp(options = {}) {
   const parentEnv = options.parentEnv || process.env;
   const userHome = options.userHome || systemHome();
   if (signal?.aborted) throw canceled();
-  const install = await (options.installState || antigravityAcpInstallState)({ paths });
+  const install = await (options.installState || antigravityAcpInstallState)({ paths, preferredOnly: true });
   if (install.state === "unsupported") {
     throw serviceError("ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED", "当前设备平台暂不支持 Antigravity 官方服务端");
   }
   if (install.state !== "installed") {
     onStage("installing");
-    log(`正在下载并校验 Antigravity 官方服务端 ${ANTIGRAVITY_ACP_SERVER_VERSION}（约 107 MB）…`);
+    log(`正在下载并校验 Antigravity 官方服务端 ${ANTIGRAVITY_ACP_SERVER_VERSION}（约 100 MB）…`);
     try {
       await (options.installServer || installAntigravityAcpServer)({ paths, parentEnv, signal });
     } catch (error) {
@@ -73,7 +74,7 @@ async function loginAntigravityAcp(options = {}) {
   }
   if (signal?.aborted) throw canceled();
   onStage("starting");
-  const server = await (options.verifyServer || verifyAntigravityAcpServer)({ paths });
+  const server = await (options.verifyServer || verifyAntigravityAcpServer)({ paths, preferredOnly: true });
   const home = prepareAntigravityRuntimeAccountHome(paths, options.runtimeAccountId);
   prepareAntigravityKeychainContext({
     home,
@@ -83,10 +84,13 @@ async function loginAntigravityAcp(options = {}) {
     execFileSync: options.securityExecFileSync,
   });
   const acpHome = prepareAntigravityAcpHome({ home, trustedRoot: paths.trustedRoot });
+  const readSystemProxy = options.readSystemProxyEnvironment || readMacSystemProxyEnvironmentAsync;
+  const systemProxyEnvironment = await readSystemProxy({ platform: options.platform, signal });
+  if (signal?.aborted) throw canceled();
   const child = (options.spawnProcess || spawn)(server.serverPath, [], {
     cwd: home,
     env: antigravityAcpSpawnEnvironment({
-      parentEnv, userHome, home, geminiHome: acpHome.geminiHome, openBrowser: true,
+      parentEnv, userHome, home, geminiHome: acpHome.geminiHome, openBrowser: true, systemProxyEnvironment,
     }),
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],

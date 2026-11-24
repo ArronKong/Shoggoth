@@ -791,17 +791,17 @@
     },
     {
       "name": "i18next",
-      "version": "26.3.0",
+      "version": "26.3.4",
       "license": "MIT",
-      "integrity": "sha512-gHSgGpUXVmuqE2El1W61DmxeyeTlFfZgdJRWMo9jScAn5pu7TuTuiccb1zh3E2J9hEBVGJ23+96x0ieBhfuIHA==",
+      "integrity": "sha512-pa7m0d7pBDqGHZxljT+WPFeyFgQ7P7SciPPo1tTqYuO0z4sqADYhwnBESmmGp/wEof1inwdls/k8ZgTg8rxFHA==",
       "distributed": true,
       "scopes": [
         "frontend"
       ],
       "licenseFiles": [
-        "licenses/npm/i18next@26.3.0/LICENSE"
+        "licenses/npm/i18next@26.3.4/LICENSE"
       ],
-      "source": "https://registry.npmjs.org/i18next/-/i18next-26.3.0.tgz"
+      "source": "https://registry.npmjs.org/i18next/-/i18next-26.3.4.tgz"
     },
     {
       "name": "isexe",

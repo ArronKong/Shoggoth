@@ -162,6 +162,7 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
     retain: value => ipcRenderer.invoke("shoggoth:model-operation-recovery:retain", value),
     ack: identity => ipcRenderer.invoke("shoggoth:model-operation-recovery:ack", identity),
   },
+  getRuntimeCliLocations: () => ipcRenderer.invoke("shoggoth:runtime-cli:locations"),
   readClipboardFiles: () => ipcRenderer.invoke("shoggoth:chat:clipboard-files"),
   readChatClipboard: chatOnly => ipcRenderer.invoke("shoggoth:chat:clipboard-files", { withCaption: true, chatOnly }),
   writeChatClipboard: value => ipcRenderer.invoke("shoggoth:chat:write-clipboard", value),

@@ -7,6 +7,7 @@ const { createRequire } = require("node:module");
 const { CODEX_VERSION } = require("./codex-schema-contract");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { PROXY_ENV_PAIRS, normalizeProxyEnvironment } = require("./proxy-environment");
+const { executableRealpath, resolveSystemCli } = require("./system-cli-discovery");
 
 // skills.include_instructions=false drops Codex's passive index of every
 // skill under ~/.agents/skills from each request (Shoggoth Skills come from
@@ -54,49 +55,8 @@ function assertRegularExecutable(target, label) {
   }
 }
 
-function executableRealpath(candidate, fileSystem = fs) {
-  if (typeof candidate !== "string" || candidate.length === 0 || candidate.includes("\0")
-    || !path.isAbsolute(candidate)) return null;
-  try {
-    const resolved = fileSystem.realpathSync(candidate);
-    const stat = fileSystem.lstatSync(resolved);
-    if (!path.isAbsolute(resolved) || !stat.isFile() || stat.isSymbolicLink()) return null;
-    fileSystem.accessSync(resolved, fileSystem.constants.X_OK);
-    return path.resolve(resolved);
-  } catch {
-    return null;
-  }
-}
-
 function resolveCodexSystemBinary(options = {}) {
-  const fileSystem = options.fs || fs;
-  if (options.binaryPath !== undefined) {
-    const resolved = executableRealpath(options.binaryPath, fileSystem);
-    if (!resolved) {
-      throw runtimeError(
-        "CODEX_RUNTIME_INVALID",
-        "Codex binaryPath must be an absolute executable regular file",
-      );
-    }
-    return resolved;
-  }
-  const candidates = [];
-  const pathValue = options.parentEnv?.PATH;
-  if (typeof pathValue === "string") {
-    for (const entry of pathValue.split(path.delimiter)) {
-      if (path.isAbsolute(entry)) candidates.push(path.join(entry, "codex"));
-    }
-  }
-  const home = options.homedir || os.homedir();
-  if (typeof home === "string" && path.isAbsolute(home)) {
-    candidates.push(path.join(home, ".local", "bin", "codex"));
-  }
-  candidates.push("/opt/homebrew/bin/codex", "/usr/local/bin/codex");
-  for (const candidate of [...new Set(candidates)]) {
-    const resolved = executableRealpath(candidate, fileSystem);
-    if (resolved) return resolved;
-  }
-  throw runtimeError("CODEX_SYSTEM_BINARY_NOT_FOUND", "Codex is not installed or executable");
+  return resolveSystemCli("codex", { ...options, parentEnv: options.parentEnv || {} }).binaryPath;
 }
 
 function resolveCodexMcpParentBinaries(options = {}) {

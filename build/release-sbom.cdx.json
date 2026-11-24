@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.375",
+      "version": "0.8.378",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.375",
-      "purl": "pkg:generic/shoggoth@0.8.375",
+      "bom-ref": "pkg:generic/shoggoth@0.8.378",
+      "purl": "pkg:generic/shoggoth@0.8.378",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -8586,13 +8586,13 @@
     {
       "type": "library",
       "name": "i18next",
-      "version": "26.3.0",
-      "bom-ref": "pkg:npm/i18next@26.3.0",
-      "purl": "pkg:npm/i18next@26.3.0",
+      "version": "26.3.4",
+      "bom-ref": "pkg:npm/i18next@26.3.4",
+      "purl": "pkg:npm/i18next@26.3.4",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "8074a01a9517566baa136125d56eb50e6c5ec9e4e515f660749456328f6349c027e69bbb4ee4ee89c71bd7387713627d844055189db7fbdeb1d2278185fb881c"
+          "content": "a5aee6d1dee9043a861d9c658d3f963c57b216043b3fb49c88f3e8d6d4ea62e3b4cf8b2a003621c270444a6986a7fc04a1fd629f0765b3f93c6604e0f2bc451c"
         }
       ],
       "licenses": [
@@ -15863,7 +15863,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.375",
+      "ref": "pkg:generic/shoggoth@0.8.378",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
@@ -16148,7 +16148,7 @@
         "pkg:npm/http-proxy-agent@7.0.2",
         "pkg:npm/http2-wrapper@1.0.3",
         "pkg:npm/https-proxy-agent@7.0.6",
-        "pkg:npm/i18next@26.3.0",
+        "pkg:npm/i18next@26.3.4",
         "pkg:npm/iconv-lite@0.7.3",
         "pkg:npm/inflight@1.0.6",
         "pkg:npm/inherits@2.0.4",

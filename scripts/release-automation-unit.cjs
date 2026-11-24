@@ -79,9 +79,9 @@ function recoveryFixture() {
   const run = { id: 42, repository: { full_name: repo }, head_repository: { full_name: repo },
     event: "workflow_dispatch", path: ".github/workflows/release.yml", name: "Validate signed draft v1.2.3", workflow_id: 123,
     head_branch: tag, head_sha: sha, run_attempt: 1, status: "completed", conclusion: "failure" };
-  const job = { id: 9, name: "source-ci / macos-hook-checks", conclusion: "cancelled", steps: [],
+  const job = { id: 9, name: "source-ci / macos-hook-checks", conclusion: "cancelled", steps: [], runner_id: 0,
     labels: ["macos-latest"], check_run_url: `https://api.github.com/repos/${repo}/check-runs/9` };
-  const annotations = [{ message: "The job was not acquired by Runner of type hosted even after multiple attempts" }];
+  const annotations = [{ annotation_level: "failure", message: "The job was not acquired by Runner of type hosted even after multiple attempts" }];
   const jobs = [{ id: 6, name: "source-ci / isolated-checks", conclusion: "success" }, job,
     { id: 7, name: "Sign and notarize arm64", conclusion: "skipped" }];
   const writes = [], delays = [], records = [];
@@ -90,7 +90,9 @@ function recoveryFixture() {
     get: async route => {
       if (route === "/actions/workflows/release.yml") return { id: 123, path: ".github/workflows/release.yml", name: "Signed macOS draft" };
       if (route === "/actions/runs/42") return clone(run);
-      if (route.includes("/jobs?")) return clone({ total_count: jobs.length, jobs: jobs.map(job => ({ run_id: run.id, ...job })) });
+      if (route.includes("/jobs?")) return clone({ total_count: jobs.length, jobs: jobs.map(job => ({
+        run_id: run.id, head_sha: run.head_sha, run_attempt: run.run_attempt, status: "completed", ...job,
+      })) });
       if (route === "/check-runs/9") return { id: 9 };
       if (route === "/check-runs/9/annotations?per_page=100") return clone(annotations);
       if (route === `/compare/${sha}...main`) return { status: "identical" };
@@ -118,12 +120,61 @@ test("the observed pre-execution Mac capacity failure reruns just that job and i
   assert.equal(f.jobs[0].conclusion, "success");
 });
 
+function prRecoveryFixture() {
+  const f = recoveryFixture();
+  const branch = `codex/release-${tag}`;
+  Object.assign(f.run, { event: "pull_request", path: ".github/workflows/ci.yml", head_branch: branch, pull_requests: [] });
+  f.job.name = "macos-hook-checks";
+  f.jobs[0].name = "isolated-checks";
+  f.jobs[2].name = "reviewed-pr-ci";
+  const pr = { number: 49, state: "open", base: { ref: "main", repo: { full_name: repo } },
+    head: { ref: branch, sha, repo: { full_name: repo } } };
+  const get = f.client.get;
+  f.client.get = async route => {
+    if (route === "/actions/workflows/ci.yml") return { id: 123, path: f.run.path, name: "CI" };
+    if (route === `/pulls?state=open&base=main&head=${encodeURIComponent(`ArronKong:${branch}`)}&per_page=100`) return clone([pr]);
+    return get(route);
+  };
+  f.client.assertTag = async () => assert.fail("PR CI recovery must not operate on a release tag");
+  return { ...f, pr };
+}
+
+test("PR #49 capacity failure retries only the unstarted Mac on the same open release PR", async () => {
+  const f = prRecoveryFixture();
+  f.annotations.push({ annotation_level: "notice", message: "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times." });
+  const result = await recoverRelease(f.client, clone(f.run), f.runtime);
+  assert.equal(result.decision, "retried");
+  assert.deepEqual(result.candidates, [{ id: 9, reason: "hosted-mac-allocation" }]);
+  assert.deepEqual(f.writes, [{ route: "/actions/jobs/9/rerun", method: "POST" }]);
+});
+
+test("PR capacity recovery does not retry real test failures, stale PRs, or unrelated jobs", async () => {
+  for (const kind of ["linux-failed", "already-assigned", "mac-started", "extra-error", "wrong-label", "closed-pr", "updated-head", "wrong-branch"]) {
+    const f = prRecoveryFixture();
+    if (kind === "linux-failed") f.jobs[0].conclusion = "failure";
+    if (kind === "already-assigned") f.job.runner_id = 42;
+    if (kind === "mac-started") f.job.steps = [{ name: "Test Hooks", conclusion: "failure" }];
+    if (kind === "extra-error") f.annotations.push({ annotation_level: "failure", message: "Action failed" });
+    if (kind === "wrong-label") f.job.labels = ["macos-15-intel"];
+    if (kind === "closed-pr") f.runtime.sleep = async () => { f.pr.state = "closed"; };
+    if (kind === "updated-head") f.pr.head.sha = "d".repeat(40);
+    if (kind === "wrong-branch") f.run.head_branch = "codex/unrelated";
+    if (["closed-pr", "updated-head", "wrong-branch"].includes(kind)) {
+      await assert.rejects(recoverRelease(f.client, clone(f.run), f.runtime));
+    } else {
+      assert.equal((await recoverRelease(f.client, clone(f.run), f.runtime)).decision, "needs-attention", kind);
+    }
+    assert.deepEqual(f.writes, [], kind);
+  }
+});
+
 test("only confirmed hosted shutdowns in restartable jobs are retried", async () => {
   const cancel = "2026-11-13T05:50:38.4170750Z ##[error]The operation was canceled.";
   const shutdown = "2026-11-13T05:50:38.1752561Z ##[error]The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.";
   for (const kind of ["shutdown", "ordinary-cancel", "assertion-failure", "signing", "user-cancelled", "unexpected-runner"]) {
     const f = recoveryFixture();
     f.jobs[0].name = "validate";
+    f.jobs[2].name = "draft";
     Object.assign(f.job, {
       name: kind === "signing" ? "Sign and notarize arm64" : "source-ci / isolated-checks",
       status: "completed", conclusion: "failure", labels: kind === "signing" ? ["macos-latest"] : ["ubuntu-latest"],
@@ -213,7 +264,7 @@ for (const kind of ["code-failure", "started-job", "missing-allocation-annotatio
     assert.equal(result.decision, "needs-attention"); assert.equal(f.writes.length, 0);
   });
 
-test("fork, PR and unexpected workflow events cannot obtain recovery writes", async () => {
+test("fork, wrong event and unexpected workflow cannot obtain recovery writes", async () => {
   for (const patch of [{ head_repository: { full_name: "fork/Shoggoth" } }, { event: "pull_request" },
     { path: ".github/workflows/other.yml" }, { head_branch: "main" }]) {
     const f = recoveryFixture(); Object.assign(f.run, patch);
@@ -326,6 +377,19 @@ test("both jobs must attest the merged PR's exact tree before its CI can be reus
   rerun.run.run_attempt++;
   rerun.jobs.forEach(job => { job.run_attempt++; });
   assert.equal(await verifySourceCiProof(rerun, repo, sha, proof), null);
+});
+
+test("GitHub's latest attempt may carry forward successful Linux CI with the same merge tree", async () => {
+  const f = prCiFixture();
+  f.run.run_attempt = 2;
+  for (const job of f.jobs) job.run_attempt = 2; // GitHub exposes retained jobs under the latest attempt.
+  f.jobs.find(job => job.name === "isolated-checks").started_at = "2026-11-13T06:00:00Z";
+  f.jobs.find(job => job.name === "macos-hook-checks").started_at = "2026-11-13T06:30:00Z";
+  const proof = { runId: f.run.id, runAttempt: 2 };
+  assert.deepEqual(await selectPullRequestSourceCi(f, repo, sha), proof);
+  assert.deepEqual(await verifySourceCiProof(f, repo, sha, proof), proof);
+  f.jobs.find(job => job.name === "isolated-checks").steps[0].name = `Tested PR #38 tree ${"d".repeat(40)}`;
+  assert.equal(await verifySourceCiProof(f, repo, sha, proof), null);
 });
 
 test("only both successful jobs of the exact same-repo main push CI may be reused", async () => {

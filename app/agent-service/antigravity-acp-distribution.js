@@ -8,9 +8,9 @@ const { readCodeIdentityAsync } = require("./code-identity");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 
 // Google's official Antigravity ACP server (ACP registry id `antigravity-acp`).
-// Shoggoth pins one verified release; upgrading means editing this manifest
-// and re-running the live acceptance, never following the registry silently.
-const ANTIGRAVITY_ACP_SERVER_VERSION = "1.4.3";
+// Only these pinned archives can be selected. Existing installs can use the
+// previous verified release until the current release has been installed.
+const ANTIGRAVITY_ACP_SERVER_VERSION = "1.5.2";
 // Adapter contracts belong to the hash/signature-verified distribution, not
 // to the release label reported by a user's CLI.
 const ANTIGRAVITY_ACP_CONTRACTS = Object.freeze({ workspaceExecution: 1, modelOnly: 1,
@@ -24,20 +24,40 @@ const SERVER_FILE = "agy_acp_server.par";
 const HARNESS_FILE = "localharness_external";
 const RELEASES = Object.freeze({
   "darwin-arm64": Object.freeze({
-    contracts: ANTIGRAVITY_ACP_CONTRACTS,
-    url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-arm64.zip",
-    archiveBytes: 114_147_623,
-    archiveSha256: "c57db0a9b8b712daa9c3c17cdb990a61842ea569f279e8bd79d7aa85a303b20b",
-    files: Object.freeze({
-      [SERVER_FILE]: Object.freeze({
-        bytes: 282_446_160,
-        sha256: "1251927db3e21f3d693fd042d6890d82f65eb00587e97f1f3d8f0d798e7f0954",
-        requirement: googleRequirement("agy_acp_server"),
+    [ANTIGRAVITY_ACP_SERVER_VERSION]: Object.freeze({
+      contracts: ANTIGRAVITY_ACP_CONTRACTS,
+      url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.2-darwin-arm64.zip",
+      archiveBytes: 100_309_778,
+      archiveSha256: "123a16d5c40a8ac99e20f01a62b68dd860fd96b1c528dfb8eaa37ca8733d4845",
+      files: Object.freeze({
+        [SERVER_FILE]: Object.freeze({
+          bytes: 179_921_328,
+          sha256: "4cea3c96875a4bb66a1c136d972b5cfdc5f7c91579ff7b9cbfc158a4358270bc",
+          requirement: googleRequirement("agy_acp_server"),
+        }),
+        [HARNESS_FILE]: Object.freeze({
+          bytes: 129_208_672,
+          sha256: "31ec5f444b8c849ddb14da1c0893a87dddab60f1d5e282b79db36dc41b2521ab",
+          requirement: googleRequirement("localharness_external"),
+        }),
       }),
-      [HARNESS_FILE]: Object.freeze({
-        bytes: 122_957_936,
-        sha256: "9e8fdc6e20a3262ca0a771850ca4a8414ca839a642cc964ec5c547cc2c33c200",
-        requirement: googleRequirement("localharness_external"),
+    }),
+    "1.4.3": Object.freeze({
+      contracts: ANTIGRAVITY_ACP_CONTRACTS,
+      url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-arm64.zip",
+      archiveBytes: 114_147_623,
+      archiveSha256: "c57db0a9b8b712daa9c3c17cdb990a61842ea569f279e8bd79d7aa85a303b20b",
+      files: Object.freeze({
+        [SERVER_FILE]: Object.freeze({
+          bytes: 282_446_160,
+          sha256: "1251927db3e21f3d693fd042d6890d82f65eb00587e97f1f3d8f0d798e7f0954",
+          requirement: googleRequirement("agy_acp_server"),
+        }),
+        [HARNESS_FILE]: Object.freeze({
+          bytes: 122_957_936,
+          sha256: "9e8fdc6e20a3262ca0a771850ca4a8414ca839a642cc964ec5c547cc2c33c200",
+          requirement: googleRequirement("localharness_external"),
+        }),
       }),
     }),
   }),
@@ -57,15 +77,15 @@ function platformKey(platform = process.platform, arch = process.arch) {
   return `${platform}-${arch}`;
 }
 
-function releaseFor(platform, arch) {
-  const release = RELEASES[platformKey(platform, arch)];
-  if (!release) {
+function releasesFor(platform, arch) {
+  const releases = RELEASES[platformKey(platform, arch)];
+  if (!releases) {
     throw distributionError(
       "ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED",
       "The official Antigravity ACP server has no verified build for this platform",
     );
   }
-  return release;
+  return releases;
 }
 
 function installRoot(paths) {
@@ -74,10 +94,6 @@ function installRoot(paths) {
     throw distributionError("ANTIGRAVITY_ACP_PATHS_INVALID", "Antigravity ACP install paths are invalid");
   }
   return path.join(paths.stateDir, "runtime-bin", "antigravity-acp");
-}
-
-function installDirectory(paths) {
-  return path.join(installRoot(paths), ANTIGRAVITY_ACP_SERVER_VERSION);
 }
 
 function safeFile(fileSystem, target, expectedBytes) {
@@ -94,12 +110,7 @@ function safeFile(fileSystem, target, expectedBytes) {
   return stat;
 }
 
-// Cheap, synchronous shape check used when resolving a RuntimeAccount. The
-// full hash and signature verification is `verifyAntigravityAcpServer`.
-function resolveAntigravityAcpServer(options = {}) {
-  const fileSystem = options.fs || fs;
-  const release = releaseFor(options.platform, options.arch);
-  const directory = installDirectory(options.paths);
+function resolveRelease(fileSystem, directory, version, release) {
   const serverPath = path.join(directory, SERVER_FILE);
   const harnessPath = path.join(directory, HARNESS_FILE);
   let directoryStat;
@@ -108,9 +119,7 @@ function resolveAntigravityAcpServer(options = {}) {
       throw distributionError("ANTIGRAVITY_ACP_INTEGRITY_FAILED", "Antigravity ACP install directory is unreadable");
     }
   }
-  if (!directoryStat) {
-    throw distributionError("ANTIGRAVITY_ACP_NOT_INSTALLED", "The official Antigravity ACP server is not installed");
-  }
+  if (!directoryStat) return null;
   if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
     || (typeof process.getuid === "function" && directoryStat.uid !== process.getuid())) {
     throw distributionError("ANTIGRAVITY_ACP_INTEGRITY_FAILED", "Antigravity ACP install directory is unsafe");
@@ -120,8 +129,23 @@ function resolveAntigravityAcpServer(options = {}) {
   if (!server || !harness) {
     throw distributionError("ANTIGRAVITY_ACP_NOT_INSTALLED", "The official Antigravity ACP server is incomplete");
   }
-  return Object.freeze({ version: ANTIGRAVITY_ACP_SERVER_VERSION, directory, serverPath, harnessPath,
-    contracts: release.contracts });
+  return Object.freeze({ version, directory, serverPath, harnessPath, contracts: release.contracts });
+}
+
+// Cheap, synchronous shape check when resolving a RuntimeAccount. Verification
+// can be bound to that exact path while a new version is installed alongside it.
+function resolveAntigravityAcpServer(options = {}) {
+  const fileSystem = options.fs || fs;
+  const releases = releasesFor(options.platform, options.arch);
+  const root = installRoot(options.paths);
+  for (const [version, release] of Object.entries(releases)) {
+    if (options.preferredOnly && version !== ANTIGRAVITY_ACP_SERVER_VERSION) continue;
+    const directory = path.join(root, version);
+    if (options.serverPath !== undefined && options.serverPath !== path.join(directory, SERVER_FILE)) continue;
+    const resolved = resolveRelease(fileSystem, directory, version, release);
+    if (resolved) return resolved;
+  }
+  throw distributionError("ANTIGRAVITY_ACP_NOT_INSTALLED", "The official Antigravity ACP server is not installed");
 }
 
 function sha256File(fileSystem, target) {
@@ -154,14 +178,18 @@ async function verifyFile(fileSystem, target, expected, readIdentity) {
   verifiedFiles.set(target, key);
 }
 
-async function verifyAntigravityAcpServer(options = {}) {
+async function verifyRelease(resolved, release, options) {
   const fileSystem = options.fs || fs;
-  const release = releaseFor(options.platform, options.arch);
-  const resolved = resolveAntigravityAcpServer(options);
   const readIdentity = options.readCodeIdentity || ((target) => readCodeIdentityAsync(target));
   await verifyFile(fileSystem, resolved.serverPath, release.files[SERVER_FILE], readIdentity);
   await verifyFile(fileSystem, resolved.harnessPath, release.files[HARNESS_FILE], readIdentity);
   return resolved;
+}
+
+async function verifyAntigravityAcpServer(options = {}) {
+  const resolved = resolveAntigravityAcpServer(options);
+  const release = releasesFor(options.platform, options.arch)[resolved.version];
+  return verifyRelease(resolved, release, options);
 }
 
 async function antigravityAcpInstallState(options = {}) {
@@ -191,11 +219,13 @@ function removeTree(fileSystem, target) {
 // verifies it, and atomically moves the verified tree into place.
 async function installAntigravityAcpServer(options = {}) {
   const fileSystem = options.fs || fs;
-  const release = releaseFor(options.platform, options.arch);
+  const version = ANTIGRAVITY_ACP_SERVER_VERSION;
+  const release = releasesFor(options.platform, options.arch)[version];
   const root = installRoot(options.paths);
-  const directory = installDirectory(options.paths);
+  const directory = path.join(root, version);
+  const verifyOptions = { ...options, preferredOnly: true, serverPath: undefined };
   const execFileImpl = options.execFile || execFile;
-  try { return await verifyAntigravityAcpServer(options); } catch (error) {
+  try { return await verifyAntigravityAcpServer(verifyOptions); } catch (error) {
     if (error?.code === "ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED") throw error;
   }
   ensurePrivateDirectoryTree(root, options.paths.trustedRoot);
@@ -239,9 +269,18 @@ async function installAntigravityAcpServer(options = {}) {
     }
     for (const name of entries) fileSystem.chmodSync(path.join(extracted, name), 0o755);
     fileSystem.chmodSync(extracted, 0o700);
-    removeTree(fileSystem, directory);
-    fileSystem.renameSync(extracted, directory);
-    return await verifyAntigravityAcpServer(options);
+    await verifyRelease(resolveRelease(fileSystem, extracted, version, release), release, options);
+    try {
+      fileSystem.renameSync(extracted, directory);
+    } catch (error) {
+      if (!["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR"].includes(error?.code)) throw error;
+      // Another installer may already have published the same verified release.
+      const existing = await verifyAntigravityAcpServer(verifyOptions).catch(() => null);
+      if (existing) return existing;
+      removeTree(fileSystem, directory);
+      fileSystem.renameSync(extracted, directory);
+    }
+    return await verifyAntigravityAcpServer(verifyOptions);
   } catch (error) {
     if (!error?.code?.startsWith?.("ANTIGRAVITY_ACP_")) {
       throw distributionError("ANTIGRAVITY_ACP_INSTALL_FAILED", "Installing the Antigravity ACP server failed");
@@ -256,6 +295,7 @@ module.exports = {
   ANTIGRAVITY_ACP_SERVER_VERSION,
   ANTIGRAVITY_ACP_CONTRACTS,
   GOOGLE_TEAM_IDENTIFIER,
+  googleRequirement,
   antigravityAcpInstallState,
   installAntigravityAcpServer,
   resolveAntigravityAcpServer,

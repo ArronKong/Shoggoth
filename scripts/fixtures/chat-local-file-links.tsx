@@ -1,13 +1,13 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { HashRouter } from "react-router-dom";
+import { HashRouter, Route, Routes } from "react-router-dom";
 import LocalFileLinks from "../../app/manage-ui/src/components/LocalFileLinks";
 import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
 import GroupChatMarkdown from "../../app/manage-ui/src/pages/GroupChatMarkdown";
 import GroupChatPanel from "../../app/manage-ui/src/pages/GroupChatPanel";
 import CronPage from "../../app/manage-ui/src/pages/CronPage";
 import CodexCronRunResult from "../../app/manage-ui/src/pages/cron/CodexCronRunResult";
-import { IdeaDetail } from "../../app/manage-ui/src/pages/InspirationPage";
+import InspirationPage, { IdeaDetail } from "../../app/manage-ui/src/pages/InspirationPage";
 import { NavigationGuardProvider } from "../../app/manage-ui/src/lib/navigation-guard";
 import { FALLBACK_BACKEND_DESCRIPTORS } from "../../app/manage-ui/src/lib/backends";
 import type { InspirationExecution, InspirationIdea, UnifiedCronJob } from "../../app/manage-ui/src/types";
@@ -38,6 +38,10 @@ const chatAttachmentPath = "/tmp/single-chat-attachment.txt";
 const publishedId = "a".repeat(64);
 const publishedHref = `/__api/agents/files/managed-files/${publishedId}/content?backend=shoggoth`;
 const downloadedPdf = "/Users/example/Downloads/作品集.pdf";
+const ideaId = "file-idea";
+const resultPath = `/inspirations?id=${ideaId}&filter=result`;
+const webGuideHref = "https://example.com/guide";
+const webInspirationHref = `https://example.com${resultPath}`;
 const sessions = [{ key, agentId: "files", agentName: "文件助手", updatedAt: Date.now() }];
 const messages = [
   { id: "user-files", role: "user", content: `请整理 ${paths[0]}，完成后把报告和数据文件发给我。` },
@@ -52,8 +56,13 @@ const messages = [
     `- 含空格的目录和文件名：${paths[7]} saved successfully`,
     `- 原成果入口：[reminder-plan.md](<${paths[8]}>)`,
     `- [下载作品集](${publishedHref})`,
-    "\n[查看说明](https://example.com/guide)",
+    `\n[查看说明](${webGuideHref})`,
   ].join("\n") },
+  { id: "assistant-inspiration", role: "assistant", content: [
+    String.raw`「灵感文件」已有结果。[查看灵感结果](${location.origin}/inspirations?id=${ideaId}\&filter=result)`,
+    `- [灵感文件](#${resultPath})`,
+    `[外部网页](${webInspirationHref})`,
+  ].join("\n\n") },
   { id: "assistant-auth-error", role: "assistant", content: authError },
   { id: "user-attachment", role: "user", content: `已上传附件。\n\n--- Attached Context ---\n@file:${chatAttachmentPath}` },
 ];
@@ -63,7 +72,7 @@ const detailPath = "/tmp/详情产物 报告.md";
 const detailText = `结果已保存：\`${detailPath}\`。另见 [数据文件](~/Downloads/data.csv)。`;
 const job: UnifiedCronJob = { id: "file-reveal-cron", backendId: "openclaw", name: "文件定位回归", enabled: false,
   schedule: { kind: "at", at: new Date(completedAt).toISOString() }, lastRunAt: completedAt, lastStatus: "ok" };
-const execution: InspirationExecution = { id: "file-execution", ideaId: "file-idea", runId: "file-run", profileId: null,
+const execution: InspirationExecution = { id: "file-execution", ideaId, runId: "file-run", profileId: null,
   agentId: "files", backendId: "shoggoth", workspace: "/tmp", sessionKey: null, ideaRevision: 1, createdAt: completedAt,
   retryOf: null, status: "completed", resultSummary: detailText, errorCode: null, finishedAt: completedAt, attention: null };
 const idea: InspirationIdea = { id: execution.ideaId, body: "文件定位测试", title: "灵感文件", revision: 1, favorite: false,
@@ -158,9 +167,11 @@ state.fetch = async (url: unknown, init?: RequestInit) => {
     if (action === "runs") return json({ runs: [] });
     return json({ jobs: [job], job });
   }
-  if (pathname.startsWith("/__api/inspirations/detail?")) return json({ idea });
+  if (pathname.startsWith("/__api/inspirations?")) return json({ items: [idea], total: 1, hasMore: false, nextCursor: null });
+  if (pathname === `/__api/inspirations/detail?id=${ideaId}`) return json({ idea });
   if (pathname.startsWith("/__api/inspirations/executions?")) return json({ executions: [execution], total: 1, hasMore: false, nextCursor: null });
   if (pathname.startsWith("/__api/inspirations/agents")) return json({ agents: [] });
+  if (pathname === "/__api/inspirations/growth") return json({ settings: { enabled: false, revision: 1, executors: [] }, failures: [] });
   if (pathname.startsWith("/__api/inspirations/activity?")) return json({ runId: execution.runId,
     trajectory: { parts: [], truncated: false }, artifacts: { items: [{ path: detailPath, name: "详情产物 报告.md", ext: ".md" }] } });
   if (pathname.startsWith("/__api/inspirations/media?")) return new Response("detail bytes");
@@ -187,7 +198,8 @@ const fileButtons = (scope = ".chat-thread") => Array.from(document.querySelecto
 const attachments = (scope = ".chat-thread") => Array.from(document.querySelectorAll<HTMLButtonElement>(`${scope} .chat-file-button`));
 const root = createRoot(document.getElementById("root")!);
 const render = (content: React.ReactNode) => root.render(<HashRouter><NavigationGuardProvider><UiProvider>
-  <LocalFileLinks /><ScrollbarProvider />{content}
+  <LocalFileLinks /><ScrollbarProvider />
+  <Routes><Route path="/inspirations" element={<InspirationPage />} /><Route path="*" element={content} /></Routes>
 </UiProvider></NavigationGuardProvider></HashRouter>);
 render(<ChatPage />);
 
@@ -214,10 +226,31 @@ state.runFixture = async () => {
   attachments()[0].click();
   await wait(() => state.revealCalls.length === beforeChatAttachment + 1, "single-chat attachment reveals");
   check(state.revealCalls.at(-1) === chatAttachmentPath, "single-chat attachment retains its original file path");
-  const external = document.querySelector<HTMLAnchorElement>('.chat-thread a[href="https://example.com/guide"]')!;
-  check(external.target === "_blank" && !external.hasAttribute("data-local-path"), "external links retain normal behavior");
+  const externalLinks = [webGuideHref, webInspirationHref];
+  for (const href of externalLinks) {
+    const external = document.querySelector<HTMLAnchorElement>(`.chat-thread a[href="${href}"]`)!;
+    check(external.target === "_blank" && !external.hasAttribute("data-local-path"), "external links retain normal behavior");
+    external.click();
+  }
   check(!toSanitizedMarkdownHtml(paths[1]).includes("data-local-path"), "chat-only linkification must not leak through the Markdown cache");
   check(!toSanitizedMarkdownHtml('[bad](javascript:alert(1))', true).includes("href="), "unsafe hrefs stay blocked");
+
+  const checkInspirationLinks = async (scope: string) => {
+    const findLink = (label: string) => Array.from(document.querySelectorAll<HTMLAnchorElement>(`${scope} a`))
+      .find(link => link.textContent === label);
+    for (const label of ["查看灵感结果", "灵感文件"]) {
+      const link = findLink(label);
+      check(link?.getAttribute("href") === `#${resultPath}` && !link.target, `${label} must open in the same window`);
+      link!.click();
+      await wait(() => document.querySelector(`[role="dialog"] [data-inspiration-round="${execution.runId}"]`), "linked inspiration result");
+      check(location.hash === `#${resultPath}` && location.pathname === "/", `${label} preserves the exact note and filter`);
+      check(document.querySelector('[data-inspiration-toolbar] [role="tab"][aria-selected="true"]')?.getAttribute("aria-label")
+        === i18n.t("inspiration.filters.result"), "Inspiration opens with the result filter selected");
+      history.back();
+      await wait(() => location.hash === initialHash && findLink(label), "return to reminder history");
+    }
+  };
+  await checkInspirationLinks(".chat-thread");
 
   state.failReveal = true;
   links()[0].click();
@@ -251,6 +284,7 @@ state.runFixture = async () => {
   attachments(immersive)[0].click();
   await wait(() => state.revealCalls.length === beforeImmersiveButton + 1, "immersive attachment reveals");
   check(state.revealCalls.at(-1) === chatAttachmentPath, "immersive attachment sends the exact path");
+  await checkInspirationLinks(immersive);
   document.querySelector<HTMLButtonElement>(`${immersive} [aria-label="${i18n.t("chat.immersiveExit")}"]`)!.click();
   await wait(() => !document.querySelector(immersive), "return to normal chat");
   document.querySelector<HTMLButtonElement>(".chat-artifacts-trigger")!.click();
@@ -353,5 +387,6 @@ state.runFixture = async () => {
   check(state.directOpens.length === 0, "no surface directly opens any file");
   check(JSON.stringify(messages) === originalMessages, "filename labels do not rewrite message history");
   return { passed: true, width: innerWidth, paths: paths.length, hostReveals: state.revealCalls.length, attachmentReveals: state.attachmentReveals.length,
+    inspirationLinks: { standard: true, immersive: true }, externalLinks,
     checks: "filename labels, no duplicate body file buttons, exact paths, no navigation, errors, streaming, immersive, details, group plain and decorated Markdown, uploaded attachments preserved, auth-error example, summary body link, no group writes" };
 };

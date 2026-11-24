@@ -2,7 +2,7 @@
 
 const { RUNTIME_ACCOUNT_RUNTIMES } = require("./runtime-account");
 const { validQuotaSnapshot } = require("../core/oauth-account-quota");
-const RUNTIME_ACCOUNT_QUOTA_RUNTIMES = new Set(["codex", "grok-build", "deepseek-harness", "claude-code"]);
+const RUNTIME_ACCOUNT_QUOTA_RUNTIMES = new Set(["codex", "grok-build", "deepseek-harness", "claude-code", "antigravity"]);
 
 const RUNTIME_ACCOUNT_SERVICE_METHODS = Object.freeze([
   "runtime.account.list",

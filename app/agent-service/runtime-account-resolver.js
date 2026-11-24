@@ -13,18 +13,13 @@ const {
   CODEX_APP_SERVER_ARGS,
   prepareCodexRuntimeAccountHome,
   resolveCodexRuntimeLayout,
-  resolveCodexSystemBinary,
 } = require("./codex-runtime-paths");
-const { resolveGrokBuildBinary } = require("./grok-build-runtime-paths");
 const {
   prepareAntigravityRuntimeAccountHome,
   resolveAntigravityBinary,
 } = require("./antigravity-runtime-paths");
-const { resolvePiBinary } = require("./pi-runtime-paths");
-const { resolveClaudeCodeBinary } = require("./claude-code-runtime-paths");
-const { resolveOpenCodeBinary } = require("./opencode-runtime-paths");
-const { resolveDeepSeekHarnessBinary } = require("./deepseek-harness-runtime-paths");
 const { serviceError } = require("./security");
+const { resolveSystemCli } = require("./system-cli-discovery");
 const { RuntimeExecutableIdentity, executableInterpreter } = require("./runtime-executable-identity");
 
 const DEFAULT_ACCOUNT_BY_ID = new Map(
@@ -42,6 +37,10 @@ const NATIVE_HOME = Object.freeze({
 
 function resolverError(code, message) {
   return serviceError(code, message);
+}
+
+function resolveNativeBinary(runtime, options) {
+  return runtime === "antigravity" ? resolveAntigravityBinary(options) : resolveSystemCli(runtime, options).binaryPath;
 }
 
 function runtimePathsOverlap(left, right) {
@@ -259,13 +258,10 @@ class RuntimeAccountResolver {
     }
     const binaryOptions = { binaryPath: options.binaryPath, parentEnv: this.parentEnv,
       homedir: this.userHome, fs: this.fs, paths: this.paths };
-    const resolvers = { codex: resolveCodexSystemBinary, "grok-build": resolveGrokBuildBinary,
-      antigravity: resolveAntigravityBinary, pi: resolvePiBinary, "claude-code": resolveClaudeCodeBinary,
-      opencode: resolveOpenCodeBinary, "deepseek-harness": resolveDeepSeekHarnessBinary };
     const binaryPath = account.kind !== "native-user" ? resolveCodexRuntimeLayout({
       repoRoot: options.repoRoot ?? this.repoRoot, packaged: options.packaged ?? this.packaged,
       resourcesPath: options.resourcesPath ?? this.resourcesPath, platform: this.platform, arch: this.arch,
-    }).runtimePath : resolvers[binding.runtime](binaryOptions);
+    }).runtimePath : resolveNativeBinary(binding.runtime, binaryOptions);
     let interpreterPath = null;
     if (["pi", "deepseek-harness"].includes(binding.runtime)) {
       const launch = binding.runtime === "pi"
@@ -366,32 +362,27 @@ class RuntimeAccountResolver {
       parentEnv: this.parentEnv,
       homedir: this.userHome,
       fs: this.fs,
+      paths: this.paths,
     };
-    let binaryPath;
+    if (runtime === "codex" && this.paths) {
+      for (const managedHome of internalCodexHomePaths(this.paths)) {
+        assertRuntimeHomesSeparated(nativeHome, managedHome, "Native and bundled Codex Homes");
+      }
+    }
+    if (runtime === "antigravity" && !this.paths) {
+      throw resolverError("RUNTIME_ACCOUNT_PATHS_REQUIRED", "Antigravity integration paths are required");
+    }
+    const binaryPath = resolveNativeBinary(runtime, binaryOptions);
     let home = nativeHome;
     let integrationRoot = null;
     let configSourceHome = null;
     let strategy = "native";
     let spawnEnv;
     if (runtime === "codex") {
-      if (this.paths) {
-        for (const managedHome of internalCodexHomePaths(this.paths)) {
-          assertRuntimeHomesSeparated(nativeHome, managedHome, "Native and bundled Codex Homes");
-        }
-      }
-      binaryPath = resolveCodexSystemBinary(binaryOptions);
       spawnEnv = { HOME: this.userHome, CODEX_HOME: nativeHome };
     } else if (runtime === "grok-build") {
-      binaryPath = resolveGrokBuildBinary(binaryOptions);
       spawnEnv = { HOME: this.userHome, GROK_HOME: nativeHome };
     } else if (runtime === "antigravity") {
-      if (!this.paths) {
-        throw resolverError(
-          "RUNTIME_ACCOUNT_PATHS_REQUIRED",
-          "Antigravity integration paths are required",
-        );
-      }
-      binaryPath = resolveAntigravityBinary({ ...binaryOptions, paths: this.paths });
       // The ACP server keeps its settings, login selection and conversations under
       // GEMINI_HOME. Keep one Shoggoth-owned Home per account so native ~/.gemini
       // is never rewritten.
@@ -409,17 +400,13 @@ class RuntimeAccountResolver {
       strategy = "account-integration";
       spawnEnv = { HOME: home };
     } else if (runtime === "pi") {
-      binaryPath = resolvePiBinary(binaryOptions);
       spawnEnv = { HOME: this.userHome, PI_CODING_AGENT_DIR: nativeHome };
     } else if (runtime === "claude-code") {
-      binaryPath = resolveClaudeCodeBinary(binaryOptions);
       spawnEnv = { HOME: this.userHome, CLAUDE_CONFIG_DIR: nativeHome };
     } else if (runtime === "opencode") {
-      binaryPath = resolveOpenCodeBinary(binaryOptions);
       configSourceHome = resolveOpenCodeConfigHome(this.fs, this.parentEnv, this.userHome);
       spawnEnv = { HOME: this.userHome, XDG_DATA_HOME: nativeHome };
     } else if (runtime === "deepseek-harness") {
-      binaryPath = resolveDeepSeekHarnessBinary(binaryOptions);
       if (!this.paths) {
         throw resolverError(
           "RUNTIME_ACCOUNT_PATHS_REQUIRED",

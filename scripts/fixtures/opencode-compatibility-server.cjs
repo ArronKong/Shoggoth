@@ -15,6 +15,7 @@ else {
     const allowed = scenario === "no-auth" || request.headers.authorization === authorization;
     response.writeHead(allowed ? 200 : 401, { "Content-Type": "application/json" });
     response.end(JSON.stringify(!allowed ? {} : request.url === "/doc" ? { paths }
+      : scenario === "discovery" && request.url === "/provider" ? { connected: [], all: [] }
       : request.url === "/config" ? config : { healthy: true }));
   });
   server.listen(0, "127.0.0.1", () => console.log(`http://127.0.0.1:${server.address().port}`));

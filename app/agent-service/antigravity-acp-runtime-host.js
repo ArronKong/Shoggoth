@@ -12,6 +12,7 @@ const { safeSnapshot } = require("./codex-event-snapshot");
 const { contextToolContent } = require("./context-tool-content");
 const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
+const { PROXY_ENV_PAIRS, readMacSystemProxyEnvironmentAsync } = require("./proxy-environment");
 const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
@@ -30,6 +31,7 @@ const {
   prepareAntigravityKeychainContextAsync,
 } = require("./antigravity-runtime-paths");
 const { verifyAntigravityAcpServer } = require("./antigravity-acp-distribution");
+const { readAntigravityCliQuota } = require("./antigravity-cli-quota");
 const { antigravityAcpAuthType, prepareAntigravityAcpHome } = require("./antigravity-runtime-config");
 const { AntigravityAcpRuntimeLedger } = require("./antigravity-acp-runtime-ledger");
 const { AntigravityNativeToolResults, checkpointFailureStep, nativeToolCall } = require("./antigravity-native-tool-results");
@@ -42,9 +44,9 @@ const ACP_NAMING = Object.freeze({
 });
 const PARENT_ENV_ALLOWLIST = Object.freeze([
   "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
-  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  ...PROXY_ENV_PAIRS.flat(),
 ]);
+const PROXY_ADDRESS_KEYS = PROXY_ENV_PAIRS.filter(([key]) => key !== "NO_PROXY").flat();
 const STOP_REASONS = new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
 const TURN_ACCEPTANCE_UPDATE_KINDS = new Set([
   "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan",
@@ -204,7 +206,8 @@ function nativeCommandExitCode(update, output, call) {
 }
 
 // Only the Settings sign-in lets the server open a browser window.
-function antigravityAcpSpawnEnvironment({ parentEnv, userHome, home, geminiHome, openBrowser, credentialStorage = "keychain" }) {
+function antigravityAcpSpawnEnvironment({ parentEnv, userHome, home, geminiHome, openBrowser,
+  credentialStorage = "keychain", systemProxyEnvironment = {} }) {
   if (!["keychain", "file"].includes(credentialStorage)) {
     throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity credential storage is invalid");
   }
@@ -213,6 +216,16 @@ function antigravityAcpSpawnEnvironment({ parentEnv, userHome, home, geminiHome,
     const value = parentEnv[key];
     if (typeof value === "string" && value.isWellFormed() && !value.includes("\0")
       && Buffer.byteLength(value, "utf8") <= 4096) env[key] = value;
+  }
+  // The ACP server exempts its localhost WebSocket from proxies when it sees
+  // an explicit proxy environment. macOS automatic discovery alone skips that
+  // exemption and can route the harness handshake into the system SOCKS proxy.
+  if (!PROXY_ADDRESS_KEYS.some(key => env[key])) {
+    for (const [upper, lower] of PROXY_ENV_PAIRS) {
+      if (!env[upper] && !env[lower] && systemProxyEnvironment[upper]) {
+        env[upper] = env[lower] = systemProxyEnvironment[upper];
+      }
+    }
   }
   env.PATH = runtimePath(parentEnv.PATH, userHome);
   env.HOME = home;
@@ -392,7 +405,7 @@ class AntigravityAcpRuntimeHost {
       runtimeProfileId: this.runtimeProfileId,
       workspaceShardId,
     }).open());
-    this.server = await this.verifyServer({ paths: this.paths, fs: this.fs });
+    this.server = await this.verifyServer({ paths: this.paths, fs: this.fs, serverPath: this.runtimeEnvironment.binaryPath });
     if (this.modelOnlyInstance && this.server.contracts?.modelOnly !== 1
       || this.workspaceExecutionVersion === 1 && this.server.contracts?.workspaceExecution !== 1) {
       throw hostError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "Antigravity ACP has no verified managed tool boundary");
@@ -436,10 +449,12 @@ class AntigravityAcpRuntimeHost {
       this.mcpTimeoutEnv = { ...env, ANTIGRAVITY_HARNESS_PATH: bootstrapPath };
       this.registeredSecrets.push(env.SHOGGOTH_AGY_TIMEOUT_TOKEN);
     }
+    const readSystemProxy = this.options.readSystemProxyEnvironment || readMacSystemProxyEnvironmentAsync;
+    const systemProxyEnvironment = await readSystemProxy({ platform: this.platform });
     if (this.state !== "starting") throw hostError("RUNTIME_HOST_TERMINATED", "Antigravity host stopped before spawn");
     const child = this.spawnProcess(this.server.serverPath, [], {
       cwd: this.workspaceExecutionHome?.cwd || this.workspace || this.home,
-      env: this._spawnEnvironment(),
+      env: this._spawnEnvironment(systemProxyEnvironment),
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -480,7 +495,7 @@ class AntigravityAcpRuntimeHost {
     this.state = "ready";
   }
 
-  _spawnEnvironment() {
+  _spawnEnvironment(systemProxyEnvironment) {
     // The server may start a browser OAuth flow when credentials are missing.
     // Background runs must never open a window; login happens only from Settings.
     return { ...antigravityAcpSpawnEnvironment({
@@ -489,6 +504,7 @@ class AntigravityAcpRuntimeHost {
       home: this.runtimeEnvironment.spawnEnv.HOME,
       geminiHome: this.workspaceExecutionHome?.geminiHome || this.acpHome.geminiHome,
       credentialStorage: this.credentialStorage,
+      systemProxyEnvironment,
       openBrowser: false,
     }), ...this.mcpTimeoutEnv };
   }
@@ -561,6 +577,13 @@ class AntigravityAcpRuntimeHost {
       }
       throw error;
     }
+  }
+
+  accountQuotaRead() {
+    this._assertReady();
+    if (!this.controlInstance) return { status: "unsupported" };
+    return readAntigravityCliQuota({ homedir: this.userHome, parentEnv: this.parentEnv,
+      platform: this.platform, readSystemProxy: this.options.readSystemProxyEnvironment });
   }
 
   canRetireIdle() {

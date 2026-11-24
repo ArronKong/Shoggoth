@@ -4,6 +4,10 @@ const { createHash } = require("node:crypto");
 
 const MAX_WINDOWS = 32;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
+const UNAVAILABLE_REASONS = new Set([
+  "antigravity-cli-missing", "antigravity-cli-update-required",
+  "antigravity-cli-sign-in-required", "antigravity-cli-permission-denied",
+]);
 
 function validQuotaScope(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -89,6 +93,9 @@ function positiveResetCount(count) {
 
 function validQuotaSnapshot(snapshot) {
   if (exactObject(snapshot, ["status"])) return ["unavailable", "unsupported"].includes(snapshot.status);
+  if (exactObject(snapshot, ["status", "reason"])) {
+    return snapshot.status === "unavailable" && UNAVAILABLE_REASONS.has(snapshot.reason);
+  }
   if (!snapshot || typeof snapshot !== "object") return false;
   const hasAccountName = Object.hasOwn(snapshot, "accountName");
   const hasCredits = Object.hasOwn(snapshot, "credits");

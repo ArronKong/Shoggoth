@@ -428,6 +428,15 @@ class BackendRegistry extends EventEmitter {
     }))).flat();
   }
 
+  async getRuntimeCliLocations() {
+    return (await Promise.all([...this.backends.values()].map(async (backend) => {
+      try {
+        if (backend.getBackendDescriptor()?.surfaces?.runtimeStatus !== true) return [];
+        return (await backend.getRuntimeCliLocations()).map(row => ({ ...row, backendId: backend.id }));
+      } catch { return []; }
+    }))).flat();
+  }
+
   applyNativeRuntimeConfig(projection) {
     return this._nativeCapacityBackend().applyNativeRuntimeConfig(projection);
   }
