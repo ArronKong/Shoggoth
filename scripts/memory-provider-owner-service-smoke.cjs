@@ -4,7 +4,7 @@
 // key and payload belongs to a newly created isolated temporary fixture.
 const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
-const http = require("node:http"), { once } = require("node:events"), { spawn } = require("node:child_process");
+const http = require("node:http"), { once } = require("node:events"), { execFileSync, spawn } = require("node:child_process");
 const ROOT = path.resolve(__dirname, "..");
 // Keep macOS Unix socket paths short; Linux does not have /private/tmp.
 const fixtureTmpDir = process.platform === "darwin" ? "/private/tmp" : require("node:os").tmpdir();
@@ -356,15 +356,17 @@ for (const mode of ["crash", "closed-no-lock"]) {
     assert.equal((await f.apply(creation())).phase, "completed"); assert.equal(f.requests.length, 0);
   });
 }
-test("real Service requires a replaced instance owner to recover legacy catalog files after PID reuse", async t => {
+test("real Service requires a replaced instance owner to recover same-user legacy catalog files after PID reuse", async t => {
   const f = await fixture(t); await stoppedArtifact(f, "crash");
   const retiredInstance = JSON.parse(fs.readFileSync(f.paths.lockPath, "utf8"));
   fs.unlinkSync(f.paths.lockPath);
-  const startedAt = Date.now() - 1_000;
   const other = spawn("/bin/cat", [], { stdio: ["pipe", "ignore", "ignore"] });
   const exited = once(other, "exit");
   t.after(async () => { other.stdin.end(); await exited; });
   await once(other, "spawn");
+  const replacementStartedAt = readProcessStartedAt(other.pid);
+  assert.ok(replacementStartedAt, "fixture replacement process must have a recorded start time");
+  const startedAt = replacementStartedAt - 1_000;
 
   const lockPath = path.join(f.paths.stateDir, "memory-provider-owners.json.lock");
   const proofName = fs.readdirSync(f.paths.stateDir).find(name => /\.owner-write-.*\.json$/u.test(name));
@@ -392,6 +394,33 @@ test("real Service requires a replaced instance owner to recover legacy catalog 
   assert.equal(current.pid, process.pid);
   assert.equal(current.startedAt, readProcessStartedAt(process.pid));
   assert.doesNotThrow(() => process.kill(other.pid, 0));
+});
+test("real Service recovers an orphaned v1 catalog lock after PID reuse by a different user", async t => {
+  const processes = execFileSync("/bin/ps", ["-ax", "-o", "pid=,ruid="], {
+    encoding: "utf8", timeout: 1500,
+  }).trim().split("\n");
+  const foreignPid = processes.map(line => line.trim().split(/\s+/u).map(Number))
+    .find(([pid, uid]) => Number.isSafeInteger(pid) && pid > 1
+      && Number.isSafeInteger(uid) && uid !== process.getuid())?.[0];
+  if (!foreignPid) return t.skip("Requires a live process with a different real UID");
+  const currentStart = readProcessStartedAt(foreignPid);
+  assert.ok(currentStart);
+
+  const f = await fixture(t);
+  await f.close();
+  assert.equal(fs.existsSync(f.paths.lockPath), false);
+  const lockPath = path.join(f.paths.stateDir, "memory-provider-owners.json.lock");
+  fs.writeFileSync(lockPath, JSON.stringify({
+    version: 1, pid: foreignPid, startedAt: currentStart - 1000, token: crypto.randomBytes(32).toString("hex"),
+  }), { mode: 0o600 });
+
+  await f.open();
+  assert.equal((await f.ipc("service.status", {})).healthy, true);
+  assert.equal((await f.context()).catalogRevision, 0);
+  const current = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  assert.equal(current.version, 2);
+  assert.equal(current.pid, process.pid);
+  assert.equal(readProcessStartedAt(foreignPid), currentStart);
 });
 test("real Service preserves a live catalog lock with the same process start identity", async t => {
   const f = await fixture(t);

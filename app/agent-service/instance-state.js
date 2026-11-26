@@ -17,10 +17,9 @@ function pidIsAlive(pid) {
   }
 }
 
-function defaultProcessIdentity(pid, env) {
+function readProcessField(pid, field, env) {
   try {
-    // command/process.title 是可变展示字段，不能参与 PID reuse 身份判断。
-    return execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+    return execFileSync("/bin/ps", ["-o", `${field}=`, "-p", String(pid)], {
       encoding: "utf8",
       env,
       timeout: 500,
@@ -29,6 +28,11 @@ function defaultProcessIdentity(pid, env) {
   } catch {
     return "";
   }
+}
+
+function defaultProcessIdentity(pid, env) {
+  // command/process.title 是可变展示字段，不能参与 PID reuse 身份判断。
+  return readProcessField(pid, "lstart", env);
 }
 
 function readProcessStartedAt(pid) {
@@ -44,10 +48,17 @@ function recordedProcessHasExited(owner, replacedOwner) {
   } catch (error) {
     if (error?.code !== "EPERM") return error?.code === "ESRCH";
   }
-  // A v1 timestamp records the lock write. It needs corroboration from the
-  // removed Service lease, since a clock rollback can put it before process birth.
+  // A v1 timestamp records the lock write and may precede process birth after
+  // a clock rollback. When the old Service lease is missing, the kernel's real
+  // UID can independently rule out the writer of this user-owned lock.
   if (owner.version === 1
-    && (replacedOwner?.pid !== owner.pid || replacedOwner.createdAt > owner.startedAt)) return false;
+    && (replacedOwner?.pid !== owner.pid || replacedOwner.createdAt > owner.startedAt)) {
+    const serviceUid = process.getuid?.();
+    if (!Number.isSafeInteger(serviceUid)) return false;
+    const currentUidText = readProcessField(owner.pid, "ruid");
+    const currentUid = Number(currentUidText);
+    return /^\d+$/u.test(currentUidText) && Number.isSafeInteger(currentUid) && currentUid !== serviceUid;
+  }
   const startedAt = readProcessStartedAt(owner.pid);
   if (startedAt === null) return false;
   return owner.version === 2 ? startedAt !== owner.startedAt : startedAt > owner.startedAt;
