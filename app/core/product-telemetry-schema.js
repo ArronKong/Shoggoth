@@ -4,8 +4,8 @@ const catalog = require("./data/product-telemetry-catalog.json");
 const EVENT_NAME = "shoggoth_app_active";
 const DAILY_EVENT = "shoggoth_daily_feature_usage";
 const STEP_EVENT = "shoggoth_onboarding_step";
-const SCHEMA_VERSION = 2;
-const POLICY_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const POLICY_VERSION = 3;
 const DAY_MS = 86_400_000;
 const LIMITS = Object.freeze({
   stateBytes: 1024 * 1024, eventBytes: 16 * 1024, signalBytes: 16 * 1024,
@@ -104,6 +104,10 @@ for (const feature of Object.keys(catalog.features)) {
   for (const result of ["attempt", ...OUTCOMES]) dailyFields.set(feature + "_" + result + "_count", counter);
   for (const bucket of catalog.durationBuckets) dailyFields.set(feature + "_duration_" + bucket + "_count", counter);
 }
+const newDailyFields = new Map([["opened_completed_background_task", isTrue]]);
+for (const feature of catalog.errorBreakdownFeatures) {
+  for (const kind of ERROR_KINDS) newDailyFields.set(feature + "_error_" + kind + "_count", counter);
+}
 
 function validSnapshot(dimension, values) {
   if (typeof dimension !== "string" || !Object.hasOwn(snapshotFields, dimension)) return false;
@@ -139,7 +143,8 @@ function validateTelemetryEvent(raw) {
     const keys = plainKeys(p);
     if (!keys || !COMMON_KEYS.every(key => keys.includes(key))) return false;
     const current = p.schema_version === SCHEMA_VERSION && p.policy_version === POLICY_VERSION;
-    const legacy = raw.event === EVENT_NAME && p.schema_version === 1 && p.policy_version === 1;
+    const legacy = (p.schema_version === 2 && p.policy_version === 2)
+      || (raw.event === EVENT_NAME && p.schema_version === 1 && p.policy_version === 1);
     if ((!current && !legacy) || typeof p.app_version !== "string" || !VERSION.test(p.app_version)
       || !OS_FAMILIES.has(p.os_family) || !ARCHES.has(p.arch) || !isUtcDay(p.report_day)
       || !raw.timestamp.startsWith(p.report_day) || p.$process_person_profile !== false || p.$geoip_disable !== true) return false;
@@ -147,8 +152,9 @@ function validateTelemetryEvent(raw) {
     if (raw.event === EVENT_NAME) return extras.length === 0;
     if (raw.event === STEP_EVENT) return extras.length === 1 && extras[0] === "step" && STEPS.has(p.step);
     if (raw.event !== DAILY_EVENT || raw.timestamp !== p.report_day + "T00:00:00.000Z"
-      || p.catalog_version !== catalog.version
-      || !extras.every(key => key === "catalog_version" || dailyFields.get(key)?.(p[key]))) return false;
+      || p.catalog_version !== (current ? catalog.version : 1)
+      || !extras.every(key => key === "catalog_version" || dailyFields.get(key)?.(p[key])
+        || (current && newDailyFields.get(key)?.(p[key])))) return false;
     for (const [dimension, fields] of Object.entries(snapshotFields)) {
       if (!Object.keys(fields).some(key => keys.includes(key))) {
         if (p["observed_" + dimension]) return false;
@@ -167,6 +173,7 @@ function validateTelemetrySignal(signal) {
     const { kind, payload } = signal;
     switch (kind) {
       case "activity":
+      case "completed_background_task_opened":
         return exactObject(payload, []);
       case "page_used":
         return exactObject(payload, ["page"]) && PAGES.has(payload.page);
@@ -193,7 +200,7 @@ function validateTelemetrySignal(signal) {
 function isUuid(value) { return typeof value === "string" && UUID.test(value); }
 function isProjectToken(value) { return typeof value === "string" && TOKEN.test(value); }
 function isEligibleBuild(build) {
-  return Boolean(build && build.exportEnabled === true && build.isPackaged === true
+  return Boolean(build && build.officialRelease === true && build.exportEnabled === true && build.isPackaged === true
     && isProjectToken(build.projectToken) && (build.region === "us" || build.region === "eu")
     && Number.isSafeInteger(build.revision) && build.revision > 0
     && typeof build.appVersion === "string" && VERSION.test(build.appVersion));

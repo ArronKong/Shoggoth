@@ -18,6 +18,7 @@ const connectorDetails=loadConnectorDetails();
 const detailsFor=(dialog,key)=>dialog.root.findAllByType('details').find(node=>node.findAllByType('summary')[0]?.props.children==='mcpConnectors.'+key);
 let currentLanguage='en';
 const authorizations=[];
+const dialogWindow = Object.assign(new EventTarget(), { open: href => authorizations.push(href) });
 const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
 
  if(name==='../lib/productTelemetry')return connectorTelemetryStub;
@@ -35,7 +36,7 @@ const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
  if(name==='../../../core/flightaware-connector-policy.json')return {__esModule:true,default:JSON.parse(fs.readFileSync(new URL('../app/core/flightaware-connector-policy.json',import.meta.url),'utf8'))};
  if(name.endsWith('.module.css'))return {__esModule:true,default:{}};
  throw Error('Unexpected import '+name);
-},{window:{open:href=>authorizations.push(href)}});
+},{window:dialogWindow});
 let mounted;await Renderer.act(async()=>{mounted=Renderer.create(React.createElement(mod.default,{server,onClose(){},onChanged(){},onLatest:value=>observed.push(value)}));});
 assert.equal(subjectReads,0,'connector dialogs do not fetch an agent selector list');
 assert.equal(mounted.root.findByProps({'data-connector-footer':true}).findAllByType('button').filter(button=>button.props.children==='mcpConnectors.flow.remove').length,1,'installed connectors expose one Delete action in the common footer');
@@ -303,6 +304,48 @@ console.log('PASS installed dialog identities: registry, eight official componen
  }finally{if(dialog)await Renderer.act(async()=>dialog.unmount());currentLanguage='en';for(const key of Object.keys(api))delete api[key];Object.assign(api,originalApi);}
 }
 
+// A staged Personal-mode connector installs the CLI and follows native browser authorization.
+{
+ const originalApi = { ...api }, added = [], actions = [], verified = [];
+ const recommendation = recommendations.find(value => value.id === 'google-workspace');
+ const connected = { ...server, id: 'personal-workspace', name: recommendation.name, recommendationId: recommendation.id,
+   source: { kind: 'custom' }, transport: { kind: 'stdio-command', command: '/tmp/bin/gwscli' }, auth: { kind: 'none' } };
+ const enableApisUrl = 'https://console.cloud.google.com/flows/enableapi?apiid=fixture';
+ let state = 'missing', phase, saved, dialog;
+ Object.assign(api, {
+   getGoogleWorkspaceStatus: async () => ({ state, configured: state === 'signedIn', phase, enableApisUrl }),
+   changeGoogleWorkspaceSetup: async action => {
+     actions.push(action);
+     phase = action === 'install' ? 'installing' : 'waitingForConsent';
+     return { accepted: true, phase };
+   },
+   listMcpConnectors: async () => ({ revision: 8, servers: saved ? [saved] : [] }),
+   addMcpConnector: async value => { added.push(value); saved = { ...connected, status: state === 'signedIn' ? 'ready' : 'signedOut' }; return { revision: 9, server: saved }; },
+   verifyMcpConnector: async id => { verified.push(id); saved = connected; return { revision: 9, server: saved }; },
+   startMcpSignIn: async () => assert.fail('Personal mode must use the official CLI'),
+   getMcpOAuthInfo: async () => assert.fail('Workspace must not collect OAuth client credentials'),
+ });
+ const mount = async () => Renderer.act(async () => { dialog = Renderer.create(React.createElement(mod.default, { recommendation, catalogEntry: true, pending: true, onClose() {}, onChanged() {} })); });
+ const button = key => dialog.root.findAllByType('button').find(node => node.props.children === 'mcpConnectors.' + key);
+ const click = async key => Renderer.act(async () => button(key).props.onClick());
+ const focus = async () => Renderer.act(async () => dialogWindow.dispatchEvent(new Event('focus')));
+ try {
+   await mount(); assert.equal(added.length, 0); assert.deepEqual(actions, ['install']);
+   assert.equal(button('googleWorkspace.import'), undefined);
+   state = 'signedOut'; phase = undefined; await focus();
+   assert.ok(dialog.root.findAllByType('a').some(node => new URL(node.props.href).searchParams.get('apis') === 'ws,wsmcp,tasksmcp'));
+   assert.ok(dialog.root.findAllByType('a').some(node => node.props.href === enableApisUrl));
+   assert.equal(dialog.root.findAllByType('input').length, 0);
+   await click('googleWorkspace.import'); assert.deepEqual(actions, ['install', 'import']); assert.equal(added.length, 1);
+   assert.ok(button('cancelSignin'));
+   state = 'signedIn'; phase = undefined; await focus(); assert.equal(added.length, 1);
+   assert.deepEqual(JSON.parse(JSON.stringify(added[0])), { source: { kind: 'custom' }, name: 'Google Workspace', option: { kind: 'stdio-command', command: 'gwscli', args: [], cwd: '' }, expectedRevision: 8 });
+   assert.ok(button('flow.done')); await Renderer.act(async () => dialog.unmount()); dialog = null;
+   await mount(); assert.deepEqual(verified, [connected.id]); assert.deepEqual(actions, ['install', 'import']); assert.equal(added.length, 1); assert.ok(button('flow.done'));
+   console.log('PASS Workspace Personal mode: automatic CLI install, desktop import, browser progress, attach and existing-login reuse');
+ } finally { if (dialog) await Renderer.act(async () => dialog.unmount()); for (const key of Object.keys(api)) delete api[key]; Object.assign(api, originalApi); }
+}
+
 // Lifestyle presets distinguish local apps, public search, own instances, API keys and restricted providers.
 {
  const originalApi={...api},added=[],signedIn=[];let dialog;
@@ -366,7 +409,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const field=key=>dialog.root.findAllByType('label').find(node=>node.findAllByType('span').some(span=>span.props.children==='mcpConnectors.'+key)).findByType('input');
  const fill=async(node,value)=>Renderer.act(async()=>node.props.onChange({target:{value}}));
  try{
-  const clients=recommendations.filter(value=>value.setup==='oauth-client');assert.equal(clients.length,11);
+  const clients=recommendations.filter(value=>value.setup==='oauth-client');assert.deepEqual(clients.map(item=>item.id).sort(),['asana','box','dropbox','zoom']);
   for(const recommendation of clients){
    const before=added.length;await mount(recommendation);assert.equal(added.length,before,'opening never installs');
    assert.equal(button('save').props.disabled,true);assert.equal(detailsFor(dialog,'flow.advanced').props.open,true,'required credentials are expanded');
@@ -435,7 +478,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const rootRequire=createRequire(new URL('../package.json',import.meta.url));
  const {parseRegistryEntry}=rootRequire('./app/agent-service/mcp-registry-client');
  const featured=rootRequire('./app/agent-service/data/mcp-featured-servers.json');
- const hiddenIds=new Set(['gmail','google-calendar','google-contacts','google-docs','google-drive','google-sheets','google-slides','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
+ const hiddenIds=new Set(['google-workspace','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
  const chinesePresets=new Set(['amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
  const chineseOfficial=new Set(['agently-mail','alipay','baidu-maps','fliggy','meituan-paotui','quark-drive','rollinggo-hotel','weread']);
  const officialCatalog=rootRequire('./app/agent-service/data/official-skill-connectors.json');
@@ -650,6 +693,15 @@ console.log('PASS installed dialog identities: registry, eight official componen
   assert.equal(rendered.root.findByType(mod.default).props.server.id,'existing-zoom');
   assert.equal(rendered.root.findByType(mod.default).props.recommendation,zoom,'installed connections keep their setup and management metadata');
   console.log('PASS hidden OAuth-app recommendation: installed Zoom retains its icon, setup metadata and management dialog');
+  await unmount();
+  const googleWorkspace=recommendations.find(value=>value.id==='google-workspace');
+  installedServers=[{...installed,id:'saved-google-workspace',name:'Google Workspace',recommendationId:googleWorkspace.id,auth:{kind:'none'},transport:{kind:'stdio-command',command:'/Users/fixture/bin/gwscli'}}];
+  await mount();
+  assert.equal(section('installed').findByType('strong').children.join(''),'Google Workspace');
+  await Renderer.act(async()=>section('installed').findByType('button').props.onClick());
+  assert.equal(rendered.root.findByType(mod.default).props.server.id,'saved-google-workspace');
+  assert.equal(rendered.root.findByType(mod.default).props.recommendation,googleWorkspace);
+  console.log('PASS hidden Google Workspace recommendation: installed connector remains manageable');
   await unmount();
   const {validateMcpRemoteUrl}=rootRequire('./app/agent-service/native-mcp-store');
   const normalizedPresets=recommendations.filter(value=>value.url && validateMcpRemoteUrl(value.url)!==value.url);

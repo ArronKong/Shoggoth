@@ -14,6 +14,7 @@ const { validateOfficialSkillBridgeCredentials } = require("./official-skill-mcp
 const { matchTicketmasterBridgeLaunch, normalizeTicketmasterTransport, validateTicketmasterBridgeCredentials, KEY_FIELD } = require("./ticketmaster-mcp-launch");
 const { matchFlightawareBridgeLaunch, normalizeFlightawareTransport, validateFlightawareBridgeCredentials, flightawareConfiguredFields, KEY_FIELD: FLIGHTAWARE_KEY_FIELD } = require("./flightaware-mcp-launch");
 const { normalizeCustomMcpTransport } = require("./mcp-agent-setup-plan");
+const { isGoogleWorkspaceCommand, resolveGoogleWorkspaceCli } = require("./google-workspace-cli");
 const { McpAgentSetup } = require("./mcp-agent-setup");
 const catalogPresets = require("./data/mcp-featured-presets.json");
 const fail = code => { throw serviceError(code, code); };
@@ -36,6 +37,7 @@ function configured(fields) {
 const executionSignature = record => JSON.stringify([record.enabled, record.transport, record.auth, record.secretRef]);
 function credentialFields(fields = {}) { return Object.fromEntries(["env", "headers", "query", "oauthClient"].filter(k => fields[k] !== undefined && Object.keys(fields[k]).length > 0).map(k => [k, fields[k]])); }
 function noSecretsInTransport(transport, fields) {
+  if (isGoogleWorkspaceCommand(transport.command, transport.args) && Object.values(fields).some(value => value && Object.keys(value).length)) fail("MCP_SECRET_INVALID");
   validatedQueryCredentials(transport, fields.query);
   const serialized = JSON.stringify(transport);
   const values = Object.values(fields.env || {}).concat(Object.values(fields.headers || {}), Object.values(fields.oauthClient || {}), querySecretVariants(fields.query));
@@ -67,6 +69,7 @@ class McpConnectorController {
     // Display-only snapshots from the existing readiness probe. Reading a detail
     // dialog must never start a process, repeat a probe or call a business tool.
     this.toolDescriptions = new Map();
+    this.googleSignInTimers = new Map();
     this.requestsPath = path.join(paths.nativeMcpDir, "connection-requests-v1.json");
     this.agentSetup = new McpAgentSetup({ connector: this, publicRequest, waitForOwner: waitForSetupOwner });
   }
@@ -86,10 +89,40 @@ class McpConnectorController {
     } catch { fail("MCP_REQUEST_STORE_CORRUPT"); }
     this.requests = requests; this.closed = false;
     this.agentSetup.open();
+    for (const server of this.store.list().servers) this.watchGoogleSignIn(server);
     return this;
   }
   assertOpen() { if (this.closed) fail("MCP_CONNECTORS_UNAVAILABLE"); }
-  stopAdmission() { this.closed = true; this.runs.clear(); this.toolDescriptions.clear(); this.agentSetup.stop(); }
+  stopAdmission() {
+    this.closed = true; this.runs.clear(); this.toolDescriptions.clear(); this.agentSetup.stop();
+    for (const timer of this.googleSignInTimers.values()) clearTimeout(timer);
+    this.googleSignInTimers.clear();
+  }
+  // A Personal-mode callback may arrive after the settings sheet closes.
+  // Poll only pending Google connections. Unchanged sign-in state never writes to the registry.
+  watchGoogleSignIn(server, delay = 4000) {
+    if (this.closed || server.recommendationId !== "google-workspace" || !server.enabled || server.status !== "signedOut" || this.googleSignInTimers.has(server.id)) return;
+    const id = server.id;
+    const check = async () => {
+      const record = this.store.getPrivate(id);
+      if (!record?.enabled || record.status !== "signedOut" || !isGoogleWorkspaceCommand(record.transport.command, record.transport.args)) return;
+      try { await this.manager.probe(record); }
+      catch (error) {
+        if (!this.closed && error.code === "MCP_AUTH_REQUIRED") {
+          const current = this.store.get(id);
+          if (current) this.watchGoogleSignIn(current, Math.min(delay * 2, 120000));
+        }
+        return;
+      }
+      if (!this.closed && this.store.get(id)?.status === "signedOut") await this.verify(id);
+    };
+    const timer = setTimeout(() => {
+      this.googleSignInTimers.delete(id);
+      const operation = check(); this.allChecks.add(operation);
+      operation.catch(() => {}).finally(() => this.allChecks.delete(operation));
+    }, delay);
+    timer.unref(); this.googleSignInTimers.set(id, timer);
+  }
   async close() {
     this.stopAdmission();
     await this.oauth?.close();
@@ -196,6 +229,7 @@ class McpConnectorController {
       return { operation };
     });
     const result = await operation;
+    this.watchGoogleSignIn(result.server);
     if (result.server?.status === "ready") this.agentSetup.changed();
     return result;
   }
@@ -276,6 +310,11 @@ class McpConnectorController {
     if (transport.kind === "stdio-command" && matchFlightawareBridgeLaunch(transport.command, transport.args)) requiredFields = [`env:${FLIGHTAWARE_KEY_FIELD}`];
     configuredFields = flightawareConfiguredFields(transport, configuredFields, fields);
     noSecretsInTransport({ ...transport, name }, fields);
+    if (isGoogleWorkspaceCommand(transport.command, transport.args)) {
+      if (input.auth && input.auth.kind !== "none") fail("MCP_SECRET_INVALID");
+      const installed = this.store.list().servers.find(server => server.recommendationId === "google-workspace");
+      if (installed) return installed.id;
+    }
     if (fields.query && (fields.oauthClient || input.auth && input.auth.kind !== "headers")) fail("MCP_SECRET_INVALID");
     this.assertSecretSafe(JSON.stringify({ name, transport }));
     if (transport.kind === "stdio-package") await this.packageLauncher.prepare(transport);
@@ -447,9 +486,10 @@ class McpConnectorController {
         if (transport.kind === "stdio-command" && transport.commandLine) {
           const [command, ...args] = tokenizeCommand(transport.commandLine);
           transport = normalizeFlightawareTransport(normalizeTicketmasterTransport({ kind: "stdio-command", command, args, cwd: transport.cwd || this.paths.defaultWorkspaceDir }));
-          if (!path.isAbsolute(transport.command)) transport.command = resolveOnPath(transport.command);
+          if (!path.isAbsolute(transport.command)) transport.command = transport.command === "gwscli" ? resolveGoogleWorkspaceCli(process.env, this.paths.homeDir) : resolveOnPath(transport.command);
         }
         if (transport.kind === "stdio-command") { transport = normalizeFlightawareTransport(normalizeTicketmasterTransport(transport)); transport.cwd ||= this.paths.defaultWorkspaceDir; }
+        if (transport.command === "gwscli") transport.command = resolveGoogleWorkspaceCli(process.env, this.paths.homeDir);
         const savedFields = old.secretRef ? credentialFields(await this.secrets.get(old.secretRef) || {}) : {};
         validateTicketmasterBridgeCredentials(transport, savedFields);
         validateFlightawareBridgeCredentials(transport, savedFields);

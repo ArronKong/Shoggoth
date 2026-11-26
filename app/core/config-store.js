@@ -273,11 +273,11 @@ function normalizeGroupRuntimeHosts(value) {
   try { return require("../group-runtime-host-protocol").normalizePeers(value); } catch { return []; }
 }
 
-const TELEMETRY_POLICY_VERSION = 2;
+const TELEMETRY_POLICY_VERSION = 3;
 
 function normalizeTelemetryPreferences(raw) {
   if (raw !== undefined && (!raw || Object.getPrototypeOf(raw) !== Object.prototype
-    || ![undefined, 1, TELEMETRY_POLICY_VERSION].includes(raw.policyVersion)
+    || ![undefined, 1, 2, TELEMETRY_POLICY_VERSION].includes(raw.policyVersion)
     || [raw.enabled, raw.basicEnabled].some(value => value !== undefined && typeof value !== "boolean"))) return null;
   return {
     enabled: raw?.enabled !== false && raw?.basicEnabled !== false,

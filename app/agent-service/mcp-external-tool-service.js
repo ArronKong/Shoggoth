@@ -72,7 +72,7 @@ class McpExternalToolService {
     if(!isAppleDeviceTool(params.name)&&this.calls.size>=4096)fail("MCP_EXTERNAL_CAPACITY");
     const uuidHash=crypto.createHash("sha256").update(key).digest("hex");
     const callId=`${uuidHash.slice(0,8)}-${uuidHash.slice(8,12)}-4${uuidHash.slice(13,16)}-8${uuidHash.slice(17,20)}-${uuidHash.slice(20,32)}`;
-    const scope={mcpApproveHook:async({arguments:hookArgs,reason})=>{await this.approvalBroker.request({identity,name:params.name,arguments:{...params.arguments,arguments:hookArgs},assertCurrent,signal:combined,reason});await revalidateSubject();},runId:runKey,mcpSubject:{profileId:subjectProfileId,runId:runKey},mcpRun:entry.run,mcpIdentity:{...identity},signal:combined,assertCurrent,revalidateCurrent:revalidateSubject};
+    const scope={mcpApproveHook:async({arguments:hookArgs,reason,signal:reviewSignal})=>{await this.approvalBroker.request({identity,name:params.name,arguments:{...params.arguments,arguments:hookArgs},assertCurrent,signal:reviewSignal?AbortSignal.any([combined,reviewSignal]):combined,reason});await revalidateSubject();},runId:runKey,mcpSubject:{profileId:subjectProfileId,runId:runKey},mcpRun:entry.run,mcpIdentity:{...identity},signal:combined,assertCurrent,revalidateCurrent:revalidateSubject};
     const authority={profileId:permissionProfile.id,callId,federationClient:identity.backendId};
     const execute=async()=>{
       assertCurrent();

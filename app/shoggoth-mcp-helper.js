@@ -38,7 +38,7 @@ const {
   resolveCanonicalServicePaths,
 } = require("./agent-service/paths");
 const { ensurePrivateDirectoryTree, serviceError } = require("./agent-service/security");
-const { AUTHENTICATION_MESSAGES, mcpAuthStorageFailure } = require("./agent-service/mcp-helper-diagnostics");
+const { AUTHENTICATION_MESSAGES, mcpAuthStorageFailure, markMcpFailureStage } = require("./agent-service/mcp-helper-diagnostics");
 const { encodeInputChoicesDescription } = require("./core/shoggoth-interaction-contract");
 const {
   SERVICE_PROTOCOL_VERSION: MCP_SERVICE_PROTOCOL_VERSION,
@@ -127,7 +127,7 @@ function authenticationError(error, stage = null) {
       publicCode = "MCP_HELPER_RESPONSE_INVALID";
     }
   }
-  return helperError(publicCode, publicCode.toLowerCase());
+  return markMcpFailureStage(helperError(publicCode, publicCode.toLowerCase()), error, stage);
 }
 
 async function requestAuthentication(requestService, paths, request) {

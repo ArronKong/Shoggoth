@@ -133,7 +133,7 @@ function nestedHostOptionalDependencyPaths(appPath) {
   ];
 }
 
-function writeReleaseMarker(appPath, { mode, version, distribution }) {
+function writeReleaseMarker(appPath, { mode, version, distribution, telemetryToken }) {
   const official = releaseDistribution(mode, distribution) === "official";
   const markerPath = path.join(appPath, "Contents", "Resources", "shoggoth-release.json");
   const marker = {
@@ -143,6 +143,12 @@ function writeReleaseMarker(appPath, { mode, version, distribution }) {
     updateChannel: official ? "stable" : null,
     version: String(version || ""),
   };
+  if (official && telemetryToken) {
+    if (!require("../app/core/product-telemetry-schema").isProjectToken(telemetryToken)) {
+      throw new Error("Invalid public telemetry project token");
+    }
+    marker.productTelemetry = { projectToken: telemetryToken };
+  }
   fs.writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`, { encoding: "utf8", mode: 0o644 });
   return markerPath;
 }
@@ -255,7 +261,8 @@ exports.default = async function adhocSign(context) {
   console.log("  • packaged dependencies and retired connector absence verified before signing");
   // This marker is covered by the final App signature. Runtime update checks are
   // enabled only when it says this is an official Developer ID build.
-  writeReleaseMarker(appPath, { mode, distribution, version: context.packager.appInfo.version });
+  writeReleaseMarker(appPath, { mode, distribution, version: context.packager.appInfo.version,
+    telemetryToken: process.env.SHOGGOTH_POSTHOG_PROJECT_TOKEN });
   // arbitrary Resources 目录下的 native Node addons 不属于标准 bundle nesting，
   // --deep 不保证会重签。先逐个签这些 addons，保留 Codex/Cua 自带的第三方
   // Developer ID 可执行文件和 dylib，再签整个 App。

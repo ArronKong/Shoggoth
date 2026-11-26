@@ -10,6 +10,7 @@ const { readClientToken, requestService } = require("./client");
 const { resolveServicePaths, resolveCanonicalServicePaths, systemHome } = require("./paths");
 const { MAX_SCUTIL_PROXY_BYTES, normalizeProxyEnvironment,
   parseMacSystemProxyOutput: parseSystemProxyOutput } = require("./proxy-environment");
+const { claudeLaunchAgentEnvironment } = require("./claude-code-privacy");
 const { PROTOCOL_VERSION } = require("./server");
 const { ensurePrivateDirectory, lstatIfExists, rejectSymlink, serviceError } = require("./security");
 
@@ -81,13 +82,16 @@ function readMacSystemProxyEnvironment(options = {}) {
   }
 }
 
-function buildLaunchAgentPlist(config) {
+function buildLaunchAgentPlist(config, desktopEnv = {}) {
   const strings = [config.executablePath, ROLE_ARGUMENT]
     .map((value) => `      <string>${xmlEscape(value)}</string>`)
     .join("\n");
-  const proxyEnvironment = normalizeLaunchAgentProxyEnvironment(config.proxyEnvironment || {});
+  const environment = {
+    ...normalizeLaunchAgentProxyEnvironment(config.proxyEnvironment || {}),
+    ...claudeLaunchAgentEnvironment(desktopEnv),
+  };
   const runtimePath = normalizeLaunchAgentRuntimePath(config.runtimePath);
-  const proxyStrings = Object.entries(proxyEnvironment)
+  const environmentStrings = Object.entries(environment)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `    <key>${key}</key>\n    <string>${xmlEscape(value)}</string>`)
     .join("\n");
@@ -113,7 +117,7 @@ ${strings}
     <key>SHOGGOTH_BOOTSTRAP_PATH</key>
     <string>${xmlEscape(config.bootstrapPath)}</string>
 ${runtimePath ? `    <key>PATH</key>\n    <string>${xmlEscape(runtimePath)}</string>\n` : ""}
-${proxyStrings ? `${proxyStrings}\n` : ""}  </dict>
+${environmentStrings ? `${environmentStrings}\n` : ""}  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -247,8 +251,8 @@ function createLaunchAgentController(options = {}) {
     };
   }
 
-  function desiredPlist() {
-    return buildLaunchAgentPlist(config());
+  function desiredPlist(current = config()) {
+    return buildLaunchAgentPlist(current, options.parentEnv || process.env);
   }
 
   function writeStatus(enabled) {
@@ -475,7 +479,7 @@ function createLaunchAgentController(options = {}) {
       }
       const installed = plistStat?.isFile() === true;
       const configMatches = installed
-        && fs.readFileSync(paths.plistPath, "utf8") === buildLaunchAgentPlist(current);
+        && fs.readFileSync(paths.plistPath, "utf8") === desiredPlist(current);
       const state = await queryLaunchState();
       const executableMatches = !state.loaded || state.loadedExecutable === current.executablePath;
       return {
@@ -509,7 +513,7 @@ function createLaunchAgentController(options = {}) {
     async start(budget = createStartBudget()) {
       if (platform !== "darwin") return unsupported();
       const current = config();
-      const desired = buildLaunchAgentPlist(current);
+      const desired = desiredPlist(current);
       const previousStat = rejectSymlink(paths.plistPath);
       if (previousStat && !previousStat.isFile()) {
         throw serviceError("UNSAFE_PATH", "plist 路径不是普通文件");

@@ -31,7 +31,8 @@ function publicServer(r) {
   // This does not attest the installed package or relax executable validation.
   const recommendationId = r.source.kind === "custom" && r.transport.kind === "stdio-command" && matchTicketmasterBridgeLaunch(r.transport.command, r.transport.args)
     ? "ticketmaster" : r.source.kind === "custom" && r.transport.kind === "stdio-command" && matchFlightawareBridgeLaunch(r.transport.command, r.transport.args)
-    ? "flightaware" : r.source.kind === "custom" && r.transport.kind === "stdio-command"
+    ? "flightaware" : r.source.kind === "custom" && r.transport.kind === "stdio-command" && desktopPreset(r.transport.command, r.transport.args)?.identifier === "gwscli"
+    ? "google-workspace" : r.source.kind === "custom" && r.transport.kind === "stdio-command"
     && /^python(?:\d+(?:\.\d+)*)?$/u.test(path.basename(r.transport.command))
     && r.transport.args.length === 2 && r.transport.args[0] === "-m" && r.transport.args[1] === "blmcp"
     ? "blender-lab" : null;
@@ -85,7 +86,7 @@ class NativeMcpStore {
       validateFlightawareBridgeLaunch(command, args, { fsModule: this.fs });
       return;
     }
-    if (desktop && (!inside(this.paths.trustedRoot, command) || !inside(this.trustedRootReal, real))) {
+    if (desktop && (desktop.identifier || !inside(this.paths.trustedRoot, command) || !inside(this.trustedRootReal, real))) {
       this.validateDesktopPreset(command, args, real);
       return;
     }

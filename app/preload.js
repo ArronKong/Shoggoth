@@ -184,7 +184,7 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
     record: signal => ipcRenderer.send("shoggoth:telemetry:signal", signal),
     getSettings: () => ipcRenderer.invoke("shoggoth:telemetry:get-settings"),
     setEnabled: enabled => ipcRenderer.invoke("shoggoth:telemetry:set-enabled", enabled),
-    setDetailedEnabled: enabled => ipcRenderer.invoke("shoggoth:telemetry:set-detailed-enabled", enabled),
+    saveDiagnosticFile: () => ipcRenderer.invoke("shoggoth:telemetry:save-diagnostic-file"),
   },
   appUpdate: {
     getState: () => ipcRenderer.invoke("shoggoth:app-update:get-state"),

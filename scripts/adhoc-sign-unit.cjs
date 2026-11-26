@@ -111,7 +111,10 @@ try {
     updateChannel: "stable",
     version: "0.8.125",
   });
-  writeReleaseMarker(releaseFixture, { mode: "adhoc", version: "0.8.125" });
+  const telemetryToken = "phc_SyntheticProjectNotForProduction";
+  writeReleaseMarker(releaseFixture, { mode: "developer-id", version: "0.8.125", telemetryToken });
+  assert.deepEqual(JSON.parse(fs.readFileSync(markerPath)).productTelemetry, { projectToken: telemetryToken });
+  writeReleaseMarker(releaseFixture, { mode: "adhoc", version: "0.8.125", telemetryToken });
   assert.deepEqual(JSON.parse(fs.readFileSync(markerPath, "utf8")), {
     schemaVersion: 1,
     distribution: "internal",

@@ -6,7 +6,7 @@ import McpConnectorIcon from "../components/McpConnectorIcon";
 import ConnectorTools from "../components/ConnectorTools";
 import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "../components/ConnectorDetails";
 import { useConfirm } from "../components/ui";
-import { addMcpConnector, cancelMcpSignIn, getMcpSignIn, getMcpOAuthInfo, importMcpConnectors, listMcpConnectors, formatMcpError, searchMcpRegistry, removeMcpConnector, rebindMcpConnector, saveMcpCredentials, startMcpSignIn, updateMcpConnector, verifyMcpConnector, type McpFields, type McpMutation, type McpRegistryItem, type McpServer, type McpSignIn, type McpSetupField, type McpTransport } from "../api/mcpConnectors";
+import { getGoogleWorkspaceStatus, changeGoogleWorkspaceSetup, type GoogleWorkspaceStatus, addMcpConnector, cancelMcpSignIn, getMcpSignIn, getMcpOAuthInfo, importMcpConnectors, listMcpConnectors, formatMcpError, searchMcpRegistry, removeMcpConnector, rebindMcpConnector, saveMcpCredentials, startMcpSignIn, updateMcpConnector, verifyMcpConnector, type McpFields, type McpMutation, type McpRegistryItem, type McpServer, type McpSignIn, type McpSetupField, type McpTransport } from "../api/mcpConnectors";
 import { FIGMA_DESKTOP_URL, FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpFieldsFromInputs, parseMcpArguments, mcpRecommendationText, mcpRemoteUrlsMatch, mcpRecommendationPackageTransport, mcpRecommendationMatchesServer, mcpRecommendationForTarget, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
 import { mcpBrandId, mcpConnectorDeveloper, mcpConnectorName, mcpOfficialSkillBrand, mcpRegistrySummary } from "../lib/mcpRecommendationCatalog";
 import featuredPresets from "../../../agent-service/data/mcp-featured-presets.json";
@@ -15,6 +15,142 @@ import s from "./ConnectorsPage.module.css";
 import flightawarePolicy from "../../../core/flightaware-connector-policy.json";
 
 function InlineFrame({ children }: { children?: ReactNode }) { return <div>{children}</div>; }
+
+const googleWorkspaceCopy = {
+  "zh-CN": {
+    personal: "打开 Google 个人模式",
+    createClient: "在 Google 创建个人客户端并下载 JSON，然后回到这里选择文件。",
+    import: "选择 JSON 并登录", login: "登录 Google", authorizeWrite: "授权读写权限", readOnly: "首次登录申请只读权限。",
+    install: "重试安装", installing: "正在安装 Google Workspace CLI…",
+    choosingFile: "请选择从 Google 下载的 JSON 文件。",
+    signingIn: "正在准备 Google 授权…", waitingForConsent: "请在浏览器完成 Google 授权。授权后会自动连接。",
+    signedIn: "已检测到本机的 Google 授权。", checking: "正在连接 Google Workspace…",
+    advanced: "其他设置", enable: "在 Google Cloud 启用全部 17 个 API",
+    check: "重新检测并连接",
+    errors: {
+      GOOGLE_WORKSPACE_CLIENT_INVALID: "请选择 Google 个人模式下载的桌面客户端 JSON 文件。",
+      GOOGLE_WORKSPACE_CLIENT_REQUIRED: "请先导入 Google 个人模式的 JSON 文件。",
+      GOOGLE_WORKSPACE_INSTALL_FAILED: "安装 Google Workspace CLI 失败。请检查网络后重试。",
+      GOOGLE_WORKSPACE_DESKTOP_REQUIRED: "请在 Shoggoth 桌面 App 中完成连接。",
+      GOOGLE_WORKSPACE_BUSY: "正在处理上一次请求。",
+      GOOGLE_WORKSPACE_SIGNIN_FAILED: "Google 授权未完成。请重试，并在打开的浏览器中完成授权。",
+      GOOGLE_WORKSPACE_SIGNIN_TIMEOUT: "Google 授权超时。请重新登录。",
+      GOOGLE_WORKSPACE_SIGNIN_DENIED: "Google 授权已拒绝。可以重新登录。",
+      GOOGLE_WORKSPACE_BROWSER_FAILED: "无法打开系统浏览器。请确认默认浏览器可用后重试。",
+      GOOGLE_WORKSPACE_CONNECT_FAILED: "Google 已授权。请重新检测连接。",
+    },
+  },
+  en: {
+    personal: "Open Google Personal mode",
+    createClient: "Create a personal client in Google and download the JSON, then return here to select it.",
+    import: "Select JSON and sign in", login: "Sign in with Google", authorizeWrite: "Authorize write access", readOnly: "First sign-in requests read-only access.",
+    install: "Retry installation", installing: "Installing Google Workspace CLI…",
+    choosingFile: "Select the JSON file you downloaded from Google.",
+    signingIn: "Preparing Google authorization…", waitingForConsent: "Finish authorization in your browser. Shoggoth will connect automatically.",
+    signedIn: "A local Google authorization was found.", checking: "Connecting Google Workspace…",
+    advanced: "More settings", enable: "Enable all 17 APIs in Google Cloud",
+    check: "Check and connect again",
+    errors: {
+      GOOGLE_WORKSPACE_CLIENT_INVALID: "Select the desktop client JSON downloaded from Google Personal mode.",
+      GOOGLE_WORKSPACE_CLIENT_REQUIRED: "Import your Google Personal mode JSON file first.",
+      GOOGLE_WORKSPACE_INSTALL_FAILED: "Could not install Google Workspace CLI. Check your network and try again.",
+      GOOGLE_WORKSPACE_DESKTOP_REQUIRED: "Complete this connection in the Shoggoth desktop app.",
+      GOOGLE_WORKSPACE_BUSY: "The previous request is still in progress.",
+      GOOGLE_WORKSPACE_SIGNIN_FAILED: "Google authorization did not complete. Try again and finish in your browser.",
+      GOOGLE_WORKSPACE_SIGNIN_TIMEOUT: "Google authorization timed out. Sign in again.",
+      GOOGLE_WORKSPACE_SIGNIN_DENIED: "Google authorization was declined. You can sign in again.",
+      GOOGLE_WORKSPACE_BROWSER_FAILED: "Could not open the system browser. Check your default browser and try again.",
+      GOOGLE_WORKSPACE_CONNECT_FAILED: "Google authorized access. Check the connection again.",
+    },
+  },
+};
+type GoogleWorkspaceAction = Parameters<typeof changeGoogleWorkspaceSetup>[0];
+
+function GoogleWorkspaceSetup({ locked, connectOnOpen, connect }: {
+  locked: boolean; connectOnOpen: boolean; connect: (verify?: boolean) => Promise<void>;
+}) {
+  const { t, i18n } = useTranslation();
+  const copy = googleWorkspaceCopy[(i18n.resolvedLanguage || i18n.language).startsWith("zh") ? "zh-CN" : "en"];
+  const tr = (key: Exclude<keyof typeof copy, "errors">) => t(`mcpConnectors.googleWorkspace.${key}`, { defaultValue: copy[key] });
+  const [status, setStatus] = useState<GoogleWorkspaceStatus>();
+  const [error, setError] = useState<unknown>(), [opening, setOpening] = useState(false), [refresh, setRefresh] = useState(0);
+  const attemptedInstall = useRef(false), attemptedConnect = useRef(false), requesting = useRef(false), alive = useRef(true);
+  const connectRef = useRef(connect); connectRef.current = connect;
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const { state, phase, configured, errorCode, enableApisUrl } = status || {};
+  const start = async (action: GoogleWorkspaceAction) => {
+    if (requesting.current) return;
+    requesting.current = true; setOpening(true); setError(undefined);
+    try {
+      if (state === "signedOut" && (action === "import" || action === "login")) await connectRef.current(false);
+      if (!alive.current) return;
+      const result = await changeGoogleWorkspaceSetup(action);
+      if (alive.current) setStatus(previous => previous && { ...previous, phase: result.phase, errorCode: undefined });
+    } catch (cause) { if (alive.current) setError(cause); }
+    finally {
+      requesting.current = false;
+      if (alive.current) { setOpening(false); setRefresh(value => value + 1); }
+    }
+  };
+  useEffect(() => {
+    const controller = new AbortController();
+    let checking = false;
+    const check = async () => {
+      if (checking || controller.signal.aborted || requesting.current) return;
+      checking = true;
+      try {
+        const result = await getGoogleWorkspaceStatus(controller.signal);
+        if (!controller.signal.aborted && !requesting.current) setStatus(result);
+      } catch (cause) { if (!controller.signal.aborted) setError(cause); }
+      finally { checking = false; }
+    };
+    void check();
+    window.addEventListener("focus", check);
+    const timer = phase ? setInterval(check, 1500) : undefined;
+    return () => { controller.abort(); clearInterval(timer); window.removeEventListener("focus", check); };
+  }, [phase, refresh]);
+  useEffect(() => {
+    if (locked || opening || phase || !connectOnOpen) return;
+    if (state === "missing" && !errorCode && !attemptedInstall.current) {
+      attemptedInstall.current = true;
+      void start("install");
+    } else if (state === "signedIn" && !attemptedConnect.current) {
+      attemptedConnect.current = true;
+      void connectRef.current();
+    }
+  }, [state, phase, errorCode, locked, opening, connectOnOpen]);
+
+  const problem = error || (errorCode && { code: errorCode });
+  const code = (problem as { code?: keyof typeof copy.errors } | undefined)?.code;
+  const hint = phase ? tr(phase) : state === "signedIn" ? tr(locked ? "checking" : "signedIn") : undefined;
+  const personal = <a href="https://console.cloud.google.com/auth/overview/personal?apis=ws%2Cwsmcp%2Ctasksmcp&amp;clientType=desktop&amp;isAgent=true" target="_blank" rel="noreferrer">{tr("personal")}</a>;
+  const disabled = locked || opening || !!phase;
+  return <div className={s.desktopConnection}>
+    {!state && !problem && <p className={s.muted} role="status">{t("mcpConnectors.loading")}</p>}
+    {hint && <p className={s.muted} role="status">{hint}</p>}
+    {!phase && state === "missing" && (problem || !connectOnOpen
+      ? <button type="button" className="btn-dark btn-sm" disabled={disabled} onClick={() => void start("install")}>{tr("install")}</button>
+      : <p className={s.muted} role="status">{tr("installing")}</p>)}
+    {!phase && state === "signedOut" && <>
+      {!configured && <p>{tr("createClient")} {personal}</p>}
+      <div className={s.actions}>
+        <button type="button" className="btn-dark btn-sm" disabled={disabled} onClick={() => void start(configured ? "login" : "import")}>{tr(configured ? "login" : "import")}</button>
+        <span className={s.muted}>{tr("readOnly")}</span>
+      </div>
+    </>}
+    {(phase === "signingIn" || phase === "waitingForConsent") && <button type="button" className={s.textButton} disabled={opening} onClick={() => void start("cancel")}>{t("mcpConnectors.cancelSignin")}</button>}
+    {!phase && state && state !== "missing" && <details className={s.clientSetup}><summary>{tr("advanced")}</summary>
+      <div className={s.actions}>
+        {state === "signedIn" ? <button type="button" className={s.textButton} disabled={disabled} onClick={() => void start("authorizeWrite")}>{tr("authorizeWrite")}</button>
+          : configured && <>{personal}<button type="button" className={s.textButton} disabled={disabled} onClick={() => void start("import")}>{tr("import")}</button></>}
+        {enableApisUrl && <a href={enableApisUrl} target="_blank" rel="noreferrer">{tr("enable")}</a>}
+      </div>
+    </details>}
+    {!phase && (state === "signedIn" || problem) && <button type="button" className={s.textButton} disabled={disabled}
+      onClick={() => { setError(undefined); setRefresh(value => value + 1); if (state === "signedIn") void connectRef.current(); }}>{tr("check")}</button>}
+    {problem && <p className={s.error} role="alert">{code && Object.hasOwn(copy.errors, code) ? copy.errors[code] : formatMcpError(problem, t)}</p>}
+  </div>;
+}
 
 function McpServiceGroupDialog({ recommendation, server, initialUrl, catalogEntry, pending, autoAdd, onStage, onUnstage, onClose, onChanged, onReady, connectionRequest }: McpConnectorDialogProps & { recommendation: McpRecommendation }) {
   const { t, i18n } = useTranslation(), confirm = useConfirm();
@@ -210,6 +346,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
   const selection = serverSelection ?? connectionRequest;
   const language = i18n?.resolvedLanguage || i18n?.language || "en";
   const flightaware = recommendation?.id === "flightaware";
+  const googleWorkspace = recommendation?.id === "google-workspace";
   const builtinQuery = flightaware || recommendation?.id === "ticketmaster";
   const registryDescription = (entry: McpRegistryItem) => {
     const description = featuredPresets.find(value => value.registryName === entry.registryName)?.description || mcpRegistrySummary(entry.registryName)?.description;
@@ -309,6 +446,23 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       accept(await measureTelemetry("connector_add", "shoggoth", () => addMcpConnector({ source: { kind: "custom" }, name: tr("figmaDesktop.name"),
         option: { kind: "remote", protocol: "streamable-http", url: FIGMA_DESKTOP_URL }, expectedRevision: snapshot.revision })));
     }
+  });
+  const connectGoogleWorkspace = (verify = true) => act(async () => {
+    const snapshot = await listMcpConnectors();
+    if (!mounted.current || !recommendation) return;
+    const current = server ? snapshot.servers.find(value => value.id === server.id)
+      : snapshot.servers.find(value => mcpRecommendationMatchesServer(recommendation, value));
+    const option = { kind: "stdio-command" as const, command: "gwscli", args: [], cwd: "" };
+    if (server && !current) throw { code: "MCP_SERVER_NOT_FOUND" };
+    if (current && !mcpRecommendationMatchesServer(recommendation, current)) throw { code: "MCP_REGISTRY_REVISION_CONFLICT" };
+    const needsRebind = current?.status === "disabled" || current?.lastCheck?.errorCode === "MCP_SERVER_PATH_INVALID";
+    const result = current ? needsRebind ? await rebindMcpConnector(current.id, option, snapshot.revision)
+      : verify && current.status !== "ready" ? await verifyMcpConnector(current.id) : { revision: snapshot.revision, server: current }
+      : await measureTelemetry("connector_add", "shoggoth", () => addMcpConnector({
+        source: { kind: "custom" }, name: recommendation.name, option, expectedRevision: snapshot.revision,
+      }));
+    accept(result);
+    if (mounted.current && result.server.status === "failed" && result.server.lastCheck?.errorCode) setError(formatMcpError({ code: result.server.lastCheck.errorCode }, t));
   });
   const fieldValues = (): McpFields => {
     const fields: McpFields = mcpFieldsFromInputs({ env, headers, definitions: setupFields, values, includeDefaults: !server });
@@ -452,7 +606,8 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       : ready && !editing && !credentialsOnly ? <button type="button" className="btn-dark btn-sm" disabled={locked}
         onClick={connectionRequest && onReady ? () => onReady(server) : onClose}>
         {tr(connectionRequest?.busy ? "working" : "flow.done")}
-      </button> : recommendation?.setup === "restricted" ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : figmaDesktop ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button> : primaryAction}
+      </button> : googleWorkspace ? <button type="button" className="btn-secondary btn-sm" disabled={locked} onClick={onClose}>{tr("close")}</button>
+      : recommendation?.setup === "restricted" ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : figmaDesktop ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button> : primaryAction}
   </ConnectorFooter>;
   const maintenance = server && !credentialsOnly && <>
     <p className={s.muted}>{tr("currentTransport")} <code>{server.transport.kind === "remote" ? server.transport.url : server.transport.kind === "stdio-package" ? `${server.transport.identifier}@${server.transport.version}` : server.transport.command}</code></p>
@@ -489,11 +644,12 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
         </details>
       </section>}
       {setupVisible && <section className={s.connectionPanel}><ConnectorConnectionHeading title={t("mcpConnectors.flow.connectionTitle", { name: title })} status={connectionState} guide={guide} />
-      {added && !server && <p className={s.muted}>{tr("flow.pendingHint")}</p>}
+      {added && !server && !googleWorkspace && <p className={s.muted}>{tr("flow.pendingHint")}</p>}
       {canChooseFigmaMode && <div className={s.modeTabs} role="group" aria-label={tr("figmaDesktop.connectionMode")}>
         {(["desktop", "remote"] as const).map(value => <button type="button" key={value} className={figmaMode === value ? "btn-dark btn-sm" : "btn-secondary btn-sm"} aria-pressed={figmaMode === value} disabled={locked} onClick={() => { setFigmaMode(value); setError(""); clearValues(); }}>{tr(`figmaDesktop.${value}`)}</button>)}
       </div>}
-      {figmaDesktop ? <section className={s.desktopConnection} aria-label={tr("figmaDesktop.desktop")}>
+      {googleWorkspace ? <GoogleWorkspaceSetup locked={locked} connectOnOpen={!ready} connect={connectGoogleWorkspace} />
+      : figmaDesktop ? <section className={s.desktopConnection} aria-label={tr("figmaDesktop.desktop")}>
         {server?.status === "failed" && <p className={s.notice}>{tr("figmaDesktop.failedHint")}</p>}
         <p>{tr("figmaDesktop.description")}</p><p className={s.muted}>{tr(server?.status === "disabled" ? "figmaDesktop.disabledHint" : "figmaDesktop.setupHint")}</p>
         <details className={s.clientSetup} open={desktopStepsOpen} onToggle={event => setDesktopStepsOpen(event.currentTarget.open)}><summary>{tr("figmaDesktop.setupTitle")}</summary>

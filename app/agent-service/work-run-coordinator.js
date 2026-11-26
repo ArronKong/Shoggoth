@@ -2987,7 +2987,7 @@ class WorkRunCoordinator {
           : input.purpose === "device"
           ? `${input.packageName}：${String(input.reason || "请批准本次设备操作。").slice(0, 1024)}`
           : input.purpose === "connector"
-          ? `${input.packageName} 请求写入。仅允许以下最终参数执行一次。`
+          ? input.reason || `${input.packageName} 请求写入。仅允许以下最终参数执行一次。`
           : input.purpose === "hook"
           ? `持续规则要求确认以下最终参数：${String(input.reason || "执行前确认").slice(0, 1024)}`
           : `${input.packageName} 请求调用插件工具 ${input.toolName}。仅允许以下参数执行一次。${input.reason ? " 持续规则：" + String(input.reason).slice(0, 1024) : ""}`,

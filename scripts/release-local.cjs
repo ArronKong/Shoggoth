@@ -174,7 +174,7 @@ async function main() {
       run("npm", ["run", "licenses:check"]);
       state.prepared = true; state.reviewedSource = reviewed; save();
     }
-    const buildEnv = { RELEASE_SOURCE_SHA: sha, RELEASE_TAG: options.tag, GITHUB_RUN_ID: state.runId,
+    const buildEnv = { RELEASE_SOURCE_SHA: sha, RELEASE_TAG: options.tag, GITHUB_RUN_ID: state.runId, GITHUB_REPOSITORY: repository,
       SHOGGOTH_CODESIGN_MODE: "developer-id", SHOGGOTH_RELEASE_DISTRIBUTION: "official",
       SHOGGOTH_CODESIGN_IDENTITY: identity, SHOGGOTH_CODESIGN_KEYCHAIN: options.keychain,
       SHOGGOTH_NOTARY_KEYCHAIN_PROFILE: options["notary-profile"], SHOGGOTH_EXPECT_NOTARIZED: "1",

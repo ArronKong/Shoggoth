@@ -1106,6 +1106,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     avatarPool,
     chatReadStateStore,
     oauthAccountQuotaCache,
+    googleWorkspaceSetup,
   } = deps;
   const method = req.method || "GET";
   let rawPath = pathname;
@@ -3382,6 +3383,20 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       const ok = await hostOps.reveal(body.path) !== false;
       return sendJson(res, ok ? 200 : 500, { ok });
     }
+    if (segs[0] === "host" && segs[1] === "google-workspace" && segs.length === 2) {
+      const { publicGoogleWorkspaceError } = require("./google-workspace-setup");
+      try {
+        res.setHeader("Cache-Control", "no-store");
+        if (method === "GET") return sendJson(res, 200, await googleWorkspaceSetup.status());
+        if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "browser origin required" });
+        if (String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase() !== "application/json") return sendJson(res, 415, { error: "expected application/json" });
+        return sendJson(res, 200, googleWorkspaceSetup.start(await readJsonBody(req)));
+      } catch (error) {
+        const code = publicGoogleWorkspaceError(error);
+        return sendJson(res, code === "MCP_TOOL_INVALID_ARGUMENTS" ? 400 : code === "GOOGLE_WORKSPACE_BUSY" ? 409 : 503, { code });
+      }
+    }
     // 在系统终端里跑 external provider 的登录/断开命令（官方桌面版用内置终端，
     // 我们没有）。**故意不接受命令串**：只收 {provider,kind}，真实命令从 oauth
     // 目录里查——否则这就是一个本机任意进程可达的命令执行口子。
@@ -4400,6 +4415,17 @@ function startStaticServer(
   const cliExecutionGate = createCliExecutionGate();
   const attachmentRevealer = typeof hostOps?.reveal === "function"
     ? createChatAttachmentRevealer((file) => hostOps.reveal(file)) : null;
+  const { GoogleWorkspaceSetup } = require("./google-workspace-setup");
+  const googleWorkspaceSetup = new GoogleWorkspaceSetup({
+    homeDir, selectClient: hostOps?.selectGoogleWorkspaceClient, openExternal: hostOps?.openExternal,
+    onAuthorized: async () => {
+      const backend = registry?.getServiceBackend?.("shoggoth");
+      if (!backend?.connectorRequest) return;
+      const { servers } = await backend.connectorRequest("connector.mcp.list", {});
+      const pending = servers.find(server => server.recommendationId === "google-workspace" && server.enabled && server.status === "signedOut");
+      if (pending) await backend.connectorRequest("connector.mcp.verify", { id: pending.id });
+    },
+  });
   const apiDeps = {
     onSystemIssue,
     configStore,
@@ -4407,6 +4433,7 @@ function startStaticServer(
     attachmentRevealer,
     chatReadStateStore,
     oauthAccountQuotaCache,
+    googleWorkspaceSetup,
     productHost,
     managedOpenClawHost,
     managedHermesHost,
@@ -4680,6 +4707,7 @@ function startStaticServer(
       const { port } = server.address();
       const close = () => {
         if (closePromise) return closePromise;
+        googleWorkspaceSetup.close();
         closePromise = (async () => {
           const httpClosed = new Promise((resolveClose) => {
             if (!server.listening) {

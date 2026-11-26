@@ -12,6 +12,7 @@ const load = relative => require(path.join(ROOT, relative));
 const { createAgentService, PROTOCOL_VERSION } = load("app/agent-service/server.js");
 const { requestService, readClientToken } = load("app/agent-service/client.js");
 const { resolveServicePaths } = load("app/agent-service/paths.js");
+const { readProcessStartedAt } = load("app/agent-service/instance-state.js");
 const { DEFAULT_AGENT_PROFILE_ID: alpha, AGENT_PROFILE_FIELDS } = load("app/agent-service/product-store.js");
 const { EncryptedSecretStore } = load("app/agent-service/encrypted-secret-store.js");
 const { ShoggothBackend } = load("app/core/shoggoth-backend.js");
@@ -355,6 +356,68 @@ for (const mode of ["crash", "closed-no-lock"]) {
     assert.equal((await f.apply(creation())).phase, "completed"); assert.equal(f.requests.length, 0);
   });
 }
+test("real Service requires a replaced instance owner to recover legacy catalog files after PID reuse", async t => {
+  const f = await fixture(t); await stoppedArtifact(f, "crash");
+  const retiredInstance = JSON.parse(fs.readFileSync(f.paths.lockPath, "utf8"));
+  fs.unlinkSync(f.paths.lockPath);
+  const startedAt = Date.now() - 1_000;
+  const other = spawn("/bin/cat", [], { stdio: ["pipe", "ignore", "ignore"] });
+  const exited = once(other, "exit");
+  t.after(async () => { other.stdin.end(); await exited; });
+  await once(other, "spawn");
+
+  const lockPath = path.join(f.paths.stateDir, "memory-provider-owners.json.lock");
+  const proofName = fs.readdirSync(f.paths.stateDir).find(name => /\.owner-write-.*\.json$/u.test(name));
+  assert.ok(proofName);
+  const proofPath = path.join(f.paths.stateDir, proofName);
+  const proof = JSON.parse(fs.readFileSync(proofPath, "utf8"));
+  const legacyOwner = { ...proof.owner, version: 1, pid: other.pid, startedAt };
+  const legacyLock = JSON.stringify(legacyOwner);
+  const legacyProof = JSON.stringify({ ...proof, owner: legacyOwner });
+  fs.writeFileSync(lockPath, legacyLock, { mode: 0o600 });
+  fs.writeFileSync(proofPath, legacyProof, { mode: 0o600 });
+  // A timestamp before process birth could also come from a system clock rollback.
+  await failCode(() => f.open(), "MEMORY_OWNER_FORBIDDEN");
+  assert.equal(fs.readFileSync(lockPath, "utf8"), legacyLock);
+  assert.equal(fs.readFileSync(proofPath, "utf8"), legacyProof);
+
+  fs.writeFileSync(f.paths.lockPath, JSON.stringify({ ...retiredInstance, pid: other.pid,
+    startIdentity: "Sat Jan  1 00:00:00 2000", createdAt: startedAt - 1 }), { mode: 0o600 });
+  await f.open();
+  assert.equal((await f.ipc("service.status", {})).pid, process.pid);
+  assert.equal((await f.context()).catalogRevision, 0);
+  assert.equal(fs.existsSync(proofPath), false);
+  const current = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  assert.equal(current.version, 2);
+  assert.equal(current.pid, process.pid);
+  assert.equal(current.startedAt, readProcessStartedAt(process.pid));
+  assert.doesNotThrow(() => process.kill(other.pid, 0));
+});
+test("real Service preserves a live catalog lock with the same process start identity", async t => {
+  const f = await fixture(t);
+  const lockPath = path.join(f.paths.stateDir, "memory-provider-owners.json.lock");
+  const liveLock = fs.readFileSync(lockPath);
+  await f.close();
+  fs.writeFileSync(lockPath, liveLock, { mode: 0o600 });
+  await failCode(() => f.open(), "MEMORY_OWNER_FORBIDDEN");
+  assert.deepEqual(fs.readFileSync(lockPath), liveLock);
+});
+test("real Service recovers a v2 write proof after PID reuse with an earlier current process timestamp", async t => {
+  const f = await fixture(t); await stoppedArtifact(f, "closed-no-lock");
+  const proofFiles = fs.readdirSync(f.paths.stateDir)
+    .filter(name => /\.owner-write-.*\.json$/u.test(name));
+  assert.equal(proofFiles.length, 1);
+  const proofPath = path.join(f.paths.stateDir, proofFiles[0]);
+  const proof = JSON.parse(fs.readFileSync(proofPath, "utf8"));
+  assert.equal(proof.owner.version, 2);
+  proof.owner = { ...proof.owner, pid: process.pid, startedAt: readProcessStartedAt(process.pid) + 1_000 };
+  fs.writeFileSync(proofPath, JSON.stringify(proof), { mode: 0o600 });
+
+  await f.open();
+  assert.equal((await f.ipc("service.status", {})).pid, process.pid);
+  assert.equal(fs.existsSync(proofPath), false);
+  assert.equal((await f.apply(creation())).phase, "completed");
+});
 test("real Service startup preserves foreign temporary evidence and rejects an unowned live catalog lock", async t => {
   const f = await fixture(t); await f.close();
   const file = path.join(f.paths.stateDir, "memory-provider-owners.json.tmp"); fs.writeFileSync(file, "synthetic foreign catalog evidence", { mode: 0o600 });

@@ -3,9 +3,8 @@ import type { McpServer } from "../api/mcpConnectors";
 // Editorial order by broad familiarity and approximate adoption, not an audited user-count ranking.
 // Keep the same order in both languages and across registry/remote/desktop entries.
 export const mcpRecommendationOrder = [
-  "gmail", "google-drive", "outlook-mail", "google-calendar", "google-docs", "google-sheets",
-  "google-slides", "google-places", "amap", "outlook-calendar", "zoom", "canva", "github",
-  "google-contacts", "lark-cli", "agently-mail", "mijia", "didi", "uber", "luckin", "mcdonalds", "doordash", "uber-eats", "fliggy", "meituan-paotui", "weread", "alipay", "quark-drive", "dropbox", "notion", "figma", "blender-lab", "runway", "higgsfield",
+  "google-workspace", "outlook-mail", "google-places", "amap", "outlook-calendar", "zoom", "canva", "github",
+  "lark-cli", "agently-mail", "mijia", "didi", "uber", "luckin", "mcdonalds", "doordash", "uber-eats", "fliggy", "meituan-paotui", "weread", "alipay", "quark-drive", "dropbox", "notion", "figma", "blender-lab", "runway", "higgsfield",
   "hyperframes", "ticketmaster", "flightaware", "black-forest-labs", "fal-ai", "shop", "shopify", "stripe", "evernote",
   "atlassian", "asana", "box", "strava", "quickbooks", "monday", "miro", "airtable", "calendly",
   "clickup", "todoist", "1password", "cloudflare", "zapier", "replit", "vercel", "supabase",
@@ -82,8 +81,7 @@ export function mcpConnectorName(identity: string | undefined, fallback: string)
 // the provider's brand; user-supplied connector names are never publishers.
 const connectorDevelopers: Record<string, string> = {
   "day-one": "Bloom Built Inc", fantastical: "Flexibits", "home-assistant": "Open Home Foundation",
-  gmail: "Google", "google-calendar": "Google", "google-contacts": "Google", "google-docs": "Google",
-  "google-drive": "Google", "google-places": "Google", "google-sheets": "Google", "google-slides": "Google",
+  "google-workspace": "Google", "google-places": "Google",
   "outlook-calendar": "Microsoft", "outlook-mail": "Microsoft", "link-by-stripe": "Stripe",
   shop: "Shopify", shopify: "Shopify", "shop-pay": "Shopify", "shopify-ucp": "Shopify",
   "uber-eats": "Uber", quickbooks: "Intuit", "blender-lab": "Blender Foundation", "chrome-devtools": "Google", hyperframes: "HeyGen",

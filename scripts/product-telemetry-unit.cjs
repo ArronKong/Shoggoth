@@ -577,3 +577,83 @@ test("legacy basic state keeps the exact queued event and installation ID when m
     assert.equal(f.read().distinctId, legacy.distinctId);
   } finally { f.cleanup(); }
 });
+
+test("DNT, application and CI overrides purge a previous queue without changing saved preferences", async () => {
+  const { telemetryEnvironmentOverride } = require("../app/product-telemetry-build-config");
+  for (const [name, reason] of [["DO_NOT_TRACK", "environment"], ["SHOGGOTH_TELEMETRY_DISABLED", "environment"],
+    ["CI", "ci"], ["GITHUB_ACTIONS", "ci"]]) {
+    const f = fixture();
+    try {
+      const original = f.make();
+      original.recordActivity();
+      detail(original, "page_used", { page: "chat" });
+      original.close();
+      const saved = f.config.getTelemetryPreferences().preferences;
+      assert.equal(telemetryEnvironmentOverride({ [name]: "false" }), null);
+      const environmentOverride = telemetryEnvironmentOverride({ [name]: "  TRUE " });
+      assert.equal(environmentOverride, reason);
+      const blocked = f.make({ environmentOverride });
+      assert.equal(blocked.getSettings().disabledReason, reason);
+      assert.equal(blocked.getSettings().basicEpoch, null);
+      assert.equal(blocked.recordActivity(), false);
+      assert.equal(await blocked.flush(), false);
+      assert.equal(f.read().detail.draft, null);
+      assert.deepEqual(f.read().outbox, []);
+      assert.deepEqual(f.config.getTelemetryPreferences().preferences, saved);
+      blocked.close();
+      const resumed = f.make();
+      assert.equal(await resumed.flush(), false);
+      f.clock.advance(86_400_000);
+      assert.equal(resumed.recordActivity(), true);
+      await resumed.flush();
+      assert.deepEqual(f.sent.map(events => events.map(e => e.properties.report_day)), [["2026-09-11"]]);
+    } finally { f.cleanup(); }
+  }
+});
+
+test("daily breakdown is bounded to two features and the completed-card flag deduplicates", async () => {
+  const f = fixture();
+  try {
+    const c = f.make(); c.recordActivity();
+    assert.equal(detail(c, "completed_background_task_opened", {}), true);
+    assert.equal(detail(c, "completed_background_task_opened", {}), false);
+    assert.equal(detail(c, "completed_background_task_opened", { taskId: "SECRET_CANARY" }), false);
+    for (const feature of ["chat_send", "connector_auth", "task_create"]) {
+      for (const errorKind of require("../app/core/product-telemetry-schema").catalog.errorKinds) {
+        const operationId = randomUUID();
+        assert.equal(detail(c, "feature_start", { operationId, feature, backendType: "shoggoth" }), true);
+        assert.equal(detail(c, "feature_end", { operationId, outcome: "error", errorKind, usage: null }), true);
+      }
+    }
+    c.close();
+    const p = f.read().detail.draft.properties;
+    const counts = Object.keys(p).filter(k => /_error_.+_count$/.test(k));
+    assert.equal(counts.length, 14);
+    assert.ok(counts.every(k => /^(chat_send|connector_auth)_error_/.test(k) && p[k] === 1));
+    assert.equal(p.error_timeout_count, 3); assert.equal(p.opened_completed_background_task, true);
+    assert.ok(Buffer.byteLength(JSON.stringify(f.read().detail.draft)) <= LIMITS.eventBytes);
+  } finally { f.cleanup(); }
+});
+
+test("upgrade preserves v2 queued events and only writes v3 fields to a new day's draft", async () => {
+  const f = fixture();
+  try {
+    const old = f.make(); old.recordActivity(); detail(old, "page_used", { page: "chat" }); old.close();
+    const state = f.read();
+    for (const event of [state.outbox[0].event, state.detail.draft]) {
+      Object.assign(event.properties, { schema_version: 2, policy_version: 2 });
+    }
+    state.detail.draft.properties.catalog_version = 1;
+    fs.writeFileSync(f.statePath, JSON.stringify(state));
+    const c = f.make();
+    c.recordActivity();
+    assert.equal(detail(c, "completed_background_task_opened", {}), false);
+    await c.flush();
+    assert.deepEqual(f.sent[0], [state.outbox[0].event]);
+    f.clock.advance(86_400_000);
+    c.recordActivity(); detail(c, "completed_background_task_opened", {});
+    await c.flush(); await c.flush(); c.close();
+    assert.deepEqual(f.sent[2], [state.detail.draft]);
+    assert.equal(f.read().detail.draft.properties.opened_completed_background_task, true);
+  } finally { f.cleanup(); }
+});

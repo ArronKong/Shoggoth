@@ -1171,7 +1171,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 37);
+  assert.equal(PROTOCOL_VERSION, 38);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {
@@ -4258,6 +4258,23 @@ test("LaunchAgent 将 GUI 发现的 CLI PATH 传给常驻 Service", async () => 
   await controller.install();
   assert.match(fs.readFileSync(controller.paths.plistPath, "utf8"),
     /<key>PATH<\/key>\s*<string>\/Users\/test\/custom\/bin:\/usr\/bin<\/string>/);
+});
+
+test("LaunchAgent carries only enabled desktop Claude privacy flags under a Claude-specific key", async () => {
+  const parentEnv = {
+    DISABLE_TELEMETRY: "1",
+    DISABLE_ERROR_REPORTING: "true",
+    DO_NOT_TRACK: "0",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "invalid-private-value",
+    ANTHROPIC_API_KEY: "private-api-key",
+  };
+  const { controller, bundle } = launchFixture({ parentEnv });
+  await controller.install();
+  const plist = fs.readFileSync(controller.paths.plistPath, "utf8");
+  assert.match(plist, /<key>SHOGGOTH_CLAUDE_CODE_OPT_OUTS<\/key>\s*<string>DISABLE_TELEMETRY,DISABLE_ERROR_REPORTING<\/string>/);
+  assert.doesNotMatch(plist, /<key>DISABLE_|DO_NOT_TRACK|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC|private-api-key|invalid-private-value/);
+  assert.equal((await controller.status()).needsRepair, false);
+  assert.equal(buildLaunchAgentPlist(bundle, { DO_NOT_TRACK: "0" }), buildLaunchAgentPlist(bundle));
 });
 
 test("LaunchAgent 拒绝把带凭据、冲突或控制字符的代理写入 plist", () => {

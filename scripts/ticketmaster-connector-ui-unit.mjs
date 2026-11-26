@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { bundledBridgeVersions, connectorTelemetryFixture, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
+import { bundledBridgeVersions, connectorTelemetryStub, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 
 const uiRequire = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
@@ -35,11 +35,11 @@ for (const language of ["zh-CN", "en"]) {
     startMcpSignIn: async () => assert.fail("Ticketmaster must not attempt OAuth"),
   };
   const component = load("../app/manage-ui/src/pages/McpConnectorDialog.tsx", name => {
-    if (name === "../lib/productTelemetry") return connectorTelemetryFixture;
     if (name === "../components/ConnectorDetails") return connectorDetails;
     if (name === "../../../agent-service/data/mcp-bundled-bridge-versions.json") return bundledBridgeVersions;
 
  if (['../components/McpConnectorIcon','../components/ConnectorTools'].includes(name)) return {__esModule:true,default:()=>null};
+    if (name === "../lib/productTelemetry") return connectorTelemetryStub;
     if (name === "react") return React;
     if (name === "react/jsx-runtime") return uiRequire(name);
     if (name === "react-i18next") return { useTranslation: () => ({ t: key => key, i18n: { resolvedLanguage: language } }) };

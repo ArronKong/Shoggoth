@@ -1,7 +1,6 @@
 "use strict";
-const fs = require("node:fs/promises");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { writeDesktopExport } = require("./desktop-export-file");
 const { MAX_ARCHIVE_BYTES } = require("./agent-service/inspiration-media");
 const CHANNEL = "shoggoth:inspiration:save-archive";
 
@@ -19,7 +18,6 @@ function registerDesktopInspirationIpc({ ipcMain, dialog, getMainWindow, getDesk
       return { ok: false, error: "INVALID_ARCHIVE" };
     }
     saving = true;
-    let temporary;
     try {
       const { canceled, filePath } = await dialog.showSaveDialog(owner, {
         defaultPath: input.name, filters: [{ name: "Shoggoth", extensions: ["zip"] }],
@@ -27,14 +25,10 @@ function registerDesktopInspirationIpc({ ipcMain, dialog, getMainWindow, getDesk
       });
       if (canceled || !filePath) return { ok: true, canceled: true };
       if (ownerFor(event) !== owner || !path.isAbsolute(filePath)) return { ok: false, error: "PRIVILEGED_RENDERER_REQUIRED" };
-      temporary = path.join(path.dirname(filePath), `.shoggoth-export-${randomUUID()}.tmp`);
-      const handle = await fs.open(temporary, "wx", 0o600);
-      try { await handle.writeFile(input.bytes); await handle.sync(); }
-      finally { await handle.close(); }
-      await fs.rename(temporary, filePath); temporary = undefined;
+      await writeDesktopExport(filePath, input.bytes);
       return { ok: true, canceled: false };
     } catch { return { ok: false, error: "ARCHIVE_SAVE_FAILED" }; }
-    finally { if (temporary) await fs.unlink(temporary).catch(() => {}); saving = false; }
+    finally { saving = false; }
   });
   return () => ipcMain.removeHandler(CHANNEL);
 }

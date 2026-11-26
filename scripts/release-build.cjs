@@ -22,7 +22,10 @@ async function main() {
     "Unexpected files in the frozen public checkout");
   const version = require("../package.json").version;
   assert.equal(process.env.RELEASE_TAG, `v${version}`);
-  const run = (file, args, timeout = 30 * 60_000) => execFileSync(file, args, { cwd: root, stdio: "inherit", timeout });
+  // Only the official release job embeds the public ingestion key in its signed marker.
+  const env = { ...process.env, SHOGGOTH_POSTHOG_PROJECT_TOKEN: process.env.GITHUB_REPOSITORY === "ArronKong/Shoggoth"
+    ? "phc_qguMYNYWoGfZX8usbqzu8aNwDfuu93wnSmgB6GKDXw3f" : "" };
+  const run = (file, args, timeout = 30 * 60_000) => execFileSync(file, args, { cwd: root, stdio: "inherit", timeout, env });
   const app = path.join(root, "dist", arch === "arm64" ? "mac-arm64" : "mac", "Shoggoth.app");
   const evidence = path.join(root, "dist", `signing-${arch}`);
   fs.mkdirSync(evidence, { recursive: true });

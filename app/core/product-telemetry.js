@@ -15,9 +15,10 @@ const isFresh = (event, now) => now - Date.parse(event.timestamp) < LIMITS.ttlMs
 
 // The UI Host owns preferences, a single private state file and one sender.
 // Signals carry only bounded statistics and never own or await business work.
-function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, transport, buildConfig } = {}) {
+function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, transport, buildConfig, environmentOverride = null } = {}) {
   const build = Object.freeze({ ...buildConfig });
-  const eligible = isEligibleBuild(build);
+  const official = isEligibleBuild(build);
+  const eligible = official && !environmentOverride;
   const monotonic = clock.monotonic || clock.now;
   const fingerprint = eligible
     ? createHash("sha256").update(JSON.stringify([build.region, build.projectToken, build.revision])).digest("hex")
@@ -130,6 +131,7 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     }
     return {
       available: !!saved && !closed, collectionAvailable: eligible && !closed && !fault,
+      disabledReason: environmentOverride || (!official ? "build" : null),
       enabled: saved?.enabled ?? false, detailedEnabled: saved?.detailedEnabled ?? false,
       basicEpoch, detailedEpoch,
     };
@@ -142,7 +144,7 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     const settings = getSettings();
     const respond = error => ({ error, settings: getSettings() });
     if (typeof enabled !== "boolean" || !["enabled", "detailedEnabled"].includes(field)
-      || !settings.available || (field === "detailedEnabled" && (!settings.enabled || heldOff.has("enabled")))) {
+      || !settings.available || environmentOverride || (field === "detailedEnabled" && (!settings.enabled || heldOff.has("enabled")))) {
       return respond("unavailable");
     }
     const tier = field === "enabled" ? "all" : "detailed";
@@ -286,8 +288,13 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
       distinctId: state.distinctId, uuid: randomUUID(), nowMs: now, build,
     }, { catalog_version: catalog.version });
     const properties = { ...current.properties };
+    // A v2 draft from an upgrade day remains valid in its original format.
+    const supportsBreakdown = properties.catalog_version === catalog.version;
     let firstChat = false;
-    if (kind === "page_used") {
+    if (kind === "completed_background_task_opened") {
+      if (!supportsBreakdown || properties.opened_completed_background_task) return false;
+      properties.opened_completed_background_task = true;
+    } else if (kind === "page_used") {
       const key = "used_" + payload.page;
       if (properties[key]) return false;
       properties[key] = true;
@@ -316,7 +323,12 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
       const bucket = catalog.durationBuckets[[1000, 5000, 30_000, 120_000].filter(limit => elapsed >= limit).length];
       bump(properties, operation.feature + "_" + payload.outcome + "_count");
       bump(properties, operation.feature + "_duration_" + bucket + "_count");
-      if (payload.errorKind) bump(properties, "error_" + payload.errorKind + "_count");
+      if (payload.errorKind) {
+        bump(properties, "error_" + payload.errorKind + "_count");
+        if (supportsBreakdown && catalog.errorBreakdownFeatures.includes(operation.feature)) {
+          bump(properties, operation.feature + "_error_" + payload.errorKind + "_count");
+        }
+      }
       firstChat = operation.feature === "chat_send" && payload.outcome === "success";
       if (firstChat) {
         const { runtimeType = "unknown", providerId = "unknown", modelId = "unknown" } = payload.usage || {};
@@ -413,7 +425,10 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     draft = null;
   }
 
-  if (eligible) {
+  if (environmentOverride) {
+    // Clear an earlier eligible session before any sender or replay timer exists.
+    purge("all");
+  } else if (eligible) {
     try {
       loadState();
       sender = transport || createPostHogTransport({ projectToken: build.projectToken, region: build.region });
@@ -426,7 +441,7 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
   return {
     recordActivity, recordSignal, getSettings, setPreference, flush, close,
     getStatus: () => ({ collecting: basicEpoch !== null, closed,
-      pausedReason: fault || (eligible ? state?.pausedReason ?? null : "build_disabled"),
+      pausedReason: fault || environmentOverride || (eligible ? state?.pausedReason ?? null : "build_disabled"),
       queuedEvents: state?.outbox.length || 0, inFlight: Boolean(flight) }),
   };
 }

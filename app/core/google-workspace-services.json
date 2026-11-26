@@ -1,0 +1,11 @@
+{
+  "gmail": ["gmail.googleapis.com", "gmailmcp.googleapis.com"],
+  "drive": ["drive.googleapis.com", "drivemcp.googleapis.com"],
+  "docs": ["docs.googleapis.com", "docsmcp.googleapis.com"],
+  "sheets": ["sheets.googleapis.com", "sheetsmcp.googleapis.com"],
+  "slides": ["slides.googleapis.com", "slidesmcp.googleapis.com"],
+  "calendar": ["calendar-json.googleapis.com", "calendarmcp.googleapis.com"],
+  "chat": ["chat.googleapis.com", "chatmcp.googleapis.com"],
+  "people": ["people.googleapis.com"],
+  "tasks": ["tasks.googleapis.com", "tasksmcp.googleapis.com"]
+}

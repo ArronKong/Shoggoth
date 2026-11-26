@@ -4,6 +4,7 @@
 // resolve through this catalog; renderer inputs never name SecretStore entries.
 const fs = require("node:fs");
 const path = require("node:path");
+const { recordedProcessHasExited } = require("./instance-state");
 const privateFiles = require("./private-file");
 const protocol = require("./memory-provider-owner-protocol.cjs");
 const { MemoryProviderOwnerController, createMemoryOwnerManagementAuthority,
@@ -28,7 +29,7 @@ function createMemoryProviderOwnerRpc({ paths, secretStore, getConfig, getProfil
   };
   return {
     isMethod: method => protocol.METHODS.includes(method),
-    open() {
+    recoverStoppedOwners(replacedOwner) {
       protocol.need(!opened && !controller && !closing, "MEMORY_OWNER_CONFLICT");
       // The Service's exclusive instance lease and physical stopped-owner
       // proof are both required; no public recovery input can grant either.
@@ -37,16 +38,22 @@ function createMemoryProviderOwnerRpc({ paths, secretStore, getConfig, getProfil
       try { fs.lstatSync(lock); staleLock = true; }
       catch (error) { if (error?.code !== "ENOENT") throw error; }
       const recovery = { stateDir: paths.stateDir, trustedRoot: paths.trustedRoot, privateFiles,
-        authorizeStoppedOwner: info => createMemoryOwnerStoppedLeaseAuthority(() => assertExclusiveStoppedRecovery(info) === true) };
+        authorizeStoppedOwner: info => {
+          const stopped = recordedProcessHasExited(info, replacedOwner);
+          return createMemoryOwnerStoppedLeaseAuthority(() => stopped && assertExclusiveStoppedRecovery() === true);
+        } };
       // Owned catalog/receipt writes may survive a crash before lock link
       // publication. Recover their exact stopped-writer proofs even if the
       // catalog lock is absent; the Service instance lease remains required.
       recoverStoppedMemoryOwnerCatalogFiles(recovery);
       if (staleLock) recoverStoppedMemoryOwnerCatalogLock(recovery);
+    },
+    open(processStartedAt) {
+      protocol.need(!opened && !controller && !closing, "MEMORY_OWNER_CONFLICT");
       const current = new MemoryProviderOwnerController({ paths, secretStore, privateFiles, getConfig, getProfileIds,
         assertProfileCurrent, retireOwners, assertServiceCurrent: () => opened && controller === current && assertServiceCurrent() === true,
         authorizeManagement: (_scope, context) => createMemoryOwnerManagementAuthority(requestAssertion(context)) });
-      current.open(); controller = current; incarnation = Symbol("memory-provider-owner-generation"); opened = true;
+      current.open(processStartedAt); controller = current; incarnation = Symbol("memory-provider-owner-generation"); opened = true;
     },
     createRequestContext(assertCurrent) {
       assertReady(); protocol.need(typeof assertCurrent === "function", "MEMORY_OWNER_FORBIDDEN");

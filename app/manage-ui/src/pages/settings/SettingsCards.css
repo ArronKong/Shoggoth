@@ -374,6 +374,7 @@
   font-weight: 400;
 }
 .management-page.settings-page .settings-list-copy p { margin: 0; color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }
+.management-page.settings-page #settings-telemetry .settings-list-copy a { color: inherit; text-underline-offset: 0.15em; }
 .management-page.settings-page .settings-list-copy .ui-hint { color: var(--settings-muted-surface-1); opacity: 0.8; }
 .management-page.settings-page .settings-app-update-version {
   padding: 1px 8px;

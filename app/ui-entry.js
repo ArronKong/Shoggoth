@@ -82,10 +82,11 @@ const { registerDesktopMicrophoneIpc } = require("./desktop-microphone-ipc");
 const { registerDesktopTypewriterSoundIpc } = require("./desktop-typewriter-sound-ipc");
 const { registerDesktopChatClipboardIpc } = require("./desktop-chat-clipboard-ipc");
 const { registerDesktopTelemetryIpc } = require("./desktop-telemetry-ipc");
-const { createDesktopAppUpdateController } = require("./desktop-app-update");
+const { createDesktopAppUpdateController, readReleaseMarker } = require("./desktop-app-update");
 const { createDesktopAppInstallPreparation } = require("./desktop-app-install-preparation");
 const { createProductTelemetry } = require("./core/product-telemetry");
-const productTelemetryBuildConfig = require("./product-telemetry-build-config");
+const { getProductTelemetryBuildConfig, telemetryEnvironmentOverride } = require("./product-telemetry-build-config");
+const { localDiagnosticSummary } = require("./bootstrap-diagnostics");
 const { createBoardWidgetHost } = require("./board-widget-host");
 const { registerDesktopBoardWidgetIpc } = require("./desktop-board-widget-ipc");
 const {
@@ -257,7 +258,7 @@ const openClawCredentialGeneration = createManagedOpenClawEndpointGeneration({
 });
 let boardWidgetHost = null;
 let productTelemetry = null;
-let disposeTelemetryIpc = null;
+let desktopTelemetryIpc = null;
 let appUpdateController = null;
 const boardWidgetNavigation = createBoardWidgetNavigationGuard();
 
@@ -407,6 +408,13 @@ const hostOps = {
     if (typeof url === "string" && /^https?:\/\//i.test(url)) { await shell.openExternal(url); return true; }
     return false;
   },
+  selectGoogleWorkspaceClient: async () => {
+    const result = await dialog.showOpenDialog(mainWindow || undefined, {
+      defaultPath: app.getPath("downloads"), properties: ["openFile"],
+      filters: [{ name: "Google OAuth client JSON", extensions: ["json"] }],
+    });
+    return !result.canceled && result.filePaths.length === 1 ? result.filePaths[0] : null;
+  },
   selectSkillPackage: async () => {
     const kind = await dialog.showMessageBox(mainWindow || undefined, {
       type: "question",
@@ -499,6 +507,7 @@ function createMainWindow() {
     },
   });
   const windowForRecovery = mainWindow;
+  desktopTelemetryIpc?.observeWindow(mainWindow);
   const windowWebContentsId = windowForRecovery.webContents.id;
   let rendererRecoveryAttempts = 0;
   let rendererRecoveryTimer = null;
@@ -988,12 +997,14 @@ if (!gotLock) {
       productTelemetry = createProductTelemetry({
         statePath: path.join(telemetryStateDir, "state.json"),
         configStore,
-        buildConfig: { ...productTelemetryBuildConfig, isPackaged: app.isPackaged,
-          appVersion: APP_VERSION, platform: process.platform, arch: process.arch },
+        buildConfig: { ...getProductTelemetryBuildConfig(readReleaseMarker(process.resourcesPath), APP_VERSION),
+          isPackaged: app.isPackaged, platform: process.platform, arch: process.arch },
+        environmentOverride: telemetryEnvironmentOverride(process.env),
       });
-      disposeTelemetryIpc = registerDesktopTelemetryIpc({
+      desktopTelemetryIpc = registerDesktopTelemetryIpc({
         ipcMain, getMainWindow: () => mainWindow, getUiOrigin: () => serverOrigin,
-        powerMonitor, telemetry: productTelemetry,
+        powerMonitor, telemetry: productTelemetry, dialog,
+        diagnosticSummary: () => localDiagnosticSummary(getBootstrappedDesktopPaths(app).runtimeDir, APP_VERSION, process.platform),
       });
     } catch {
       productTelemetry?.close();
@@ -1563,7 +1574,7 @@ if (!gotLock) {
     if ([managedOpenClawProductHost, managedHermesProductHost].some(host => host?.isManaged()) && !managedQuitGate.complete()) return;
     if (appUpdateController?.handleBeforeQuit(event)) return;
     appIsQuitting = true;
-    disposeTelemetryIpc?.();
+    desktopTelemetryIpc?.dispose();
     productTelemetry?.close();
     groupSendJournalIpc.dispose();
     const sendJournalStore = groupSendJournalStore;

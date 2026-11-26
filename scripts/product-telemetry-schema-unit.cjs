@@ -46,12 +46,18 @@ test("release gate requires packaged build, public project token and fixed regio
     { exportEnabled: false }, { exportEnabled: "true" }, { isPackaged: false }, { projectToken: "" },
     { projectToken: "phx_PersonalSecret" }, { projectToken: "phs_ProjectSecret" },
     { projectToken: "phc_Token\n" }, { region: "https://attacker.test" }, { revision: 0 },
-    { appVersion: "private-workspace" },
+    { appVersion: "private-workspace" }, { officialRelease: false }, { officialRelease: undefined },
   ]) assert.equal(isEligibleBuild({ ...BUILD, ...patch }), false);
-  const releaseConfig = require("../app/product-telemetry-build-config");
-  const packagedBuild = { ...releaseConfig, appVersion: require("../package.json").version, isPackaged: true };
+  const { getProductTelemetryBuildConfig } = require("../app/product-telemetry-build-config");
+  const marker = { distribution: "official", signingMode: "developer-id", updateChannel: "stable",
+    version: BUILD.appVersion, productTelemetry: { projectToken: BUILD.projectToken } };
+  const packagedBuild = { ...getProductTelemetryBuildConfig(marker, BUILD.appVersion), isPackaged: true };
   assert.equal(isEligibleBuild(packagedBuild), true);
   assert.equal(isEligibleBuild({ ...packagedBuild, isPackaged: false }), false);
+  for (const changed of [null, { ...marker, distribution: "internal" }, { ...marker, productTelemetry: undefined },
+    { ...marker, version: "9.9.9" }, { ...marker, signingMode: "adhoc" }]) {
+    assert.equal(isEligibleBuild({ ...getProductTelemetryBuildConfig(changed, BUILD.appVersion), isPackaged: true }), false);
+  }
 });
 
 test("config health distinguishes first-run absence, errors and invalid root without exposing content", () => {
@@ -62,7 +68,7 @@ test("config health distinguishes first-run absence, errors and invalid root wit
     store.ensure();
     assert.equal(store.getReadStatus(), "ok");
     const original = store.read();
-    assert.deepEqual(original.telemetry, { enabled: true, detailedEnabled: true, policyVersion: 2 });
+    assert.deepEqual(original.telemetry, { enabled: true, detailedEnabled: true, policyVersion: 3 });
     store.write({ locale: "en", telemetry: { basicEnabled: false, detailedEnabled: true } });
     assert.equal(store.read().locale, "en");
     assert.deepEqual(store.read().telemetry, original.telemetry);
@@ -88,18 +94,18 @@ test("migration preserves opt-outs and distinguishes absent, invalid, and future
   try {
     put(undefined);
     assert.deepEqual(store.getTelemetryPreferences(), {
-      status: "ok", preferences: { enabled: true, detailedEnabled: true, policyVersion: 2 }, needsMigration: true,
+      status: "ok", preferences: { enabled: true, detailedEnabled: true, policyVersion: 3 }, needsMigration: true,
     });
     put({ enabled: true, basicEnabled: false, detailedEnabled: false, policyVersion: 1 });
-    assert.deepEqual(store.writeTelemetryPreferences(), { enabled: false, detailedEnabled: false, policyVersion: 2 });
+    assert.deepEqual(store.writeTelemetryPreferences(), { enabled: false, detailedEnabled: false, policyVersion: 3 });
     store.write({ theme: "dark", telemetry: { enabled: true, detailedEnabled: true } });
     assert.equal(store.getTelemetryPreferences().preferences.enabled, false);
     assert.equal(store.getTelemetryPreferences().preferences.detailedEnabled, false);
     assert.equal(store.read().theme, "dark");
     assert.throws(() => store.writeTelemetryPreferences("detailedEnabled", "true"));
     put({ detailedEnabled: "true" });
-    assert.deepEqual(store.writeTelemetryPreferences(), { enabled: true, detailedEnabled: false, policyVersion: 2 });
-    for (const invalid of [null, [], { enabled: "true" }, { basicEnabled: null }, { policyVersion: 3 }]) {
+    assert.deepEqual(store.writeTelemetryPreferences(), { enabled: true, detailedEnabled: false, policyVersion: 3 });
+    for (const invalid of [null, [], { enabled: "true" }, { basicEnabled: null }, { policyVersion: 4 }]) {
       put(invalid);
       assert.equal(store.getTelemetryPreferences().status, "invalid");
       assert.throws(() => store.writeTelemetryPreferences("enabled", true));
@@ -112,7 +118,7 @@ test("migration preserves opt-outs and distinguishes absent, invalid, and future
 test("detailed schema admits only catalog IDs, fixed counters and complete configuration projections", () => {
   const { uuid, distinct_id: distinctId, timestamp } = event();
   const daily = createTelemetryEvent(DAILY_EVENT, { uuid, distinctId, nowMs: Date.parse(timestamp), build: BUILD }, {
-    catalog_version: 1, used_inspiration: true, inspiration_create_attempt_count: 2,
+    catalog_version: 2, used_inspiration: true, inspiration_create_attempt_count: 2,
     observed_model: true, configured_model_ids: ["openai/gpt-6.1-sol"], configured_model_count: 1,
   });
   assert.equal(validateTelemetryEvent(daily), true);

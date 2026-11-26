@@ -478,116 +478,20 @@
     }
   },
   {
-    "id": "gmail",
-    "name": "Gmail",
-    "setup": "oauth-client",
-    "url": "https://gmailmcp.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "id": "google-workspace",
+    "name": "Google Workspace",
+    "setup": "local",
+    "hidden": true,
+    "transport": {
+      "kind": "stdio-command",
+      "command": "gwscli",
+      "args": []
+    },
+    "docsUrl": "https://developers.google.com/workspace/guides/workspace-cli",
     "description": {
-      "zh-CN": "搜索邮件并处理草稿。",
-      "en": "Search mail and work with drafts."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
-  },
-  {
-    "id": "google-calendar",
-    "name": "Google Calendar",
-    "setup": "oauth-client",
-    "url": "https://calendarmcp.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    "description": {
-      "zh-CN": "查看日历、空闲时间和事件。",
-      "en": "Read calendars, availability and events."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
-  },
-  {
-    "id": "google-contacts",
-    "name": "Google Contacts",
-    "setup": "oauth-client",
-    "url": "https://people.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    "description": {
-      "zh-CN": "查询联系人与组织目录。",
-      "en": "Look up contacts and directory entries."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
-  },
-  {
-    "id": "google-docs",
-    "name": "Google Docs",
-    "setup": "oauth-client",
-    "url": "https://docsmcp.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    "description": {
-      "zh-CN": "读取和编辑 Google 文档。",
-      "en": "Read and edit Google documents."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
-  },
-  {
-    "id": "google-drive",
-    "name": "Google Drive",
-    "setup": "oauth-client",
-    "url": "https://drivemcp.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    "description": {
-      "zh-CN": "搜索和管理云端文件。",
-      "en": "Search and manage cloud files."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
-  },
-  {
-    "id": "google-sheets",
-    "name": "Google Sheets",
-    "setup": "oauth-client",
-    "url": "https://sheetsmcp.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    "description": {
-      "zh-CN": "读取和编辑电子表格。",
-      "en": "Read and edit spreadsheets."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
-  },
-  {
-    "id": "google-slides",
-    "name": "Google Slides",
-    "setup": "oauth-client",
-    "url": "https://slidesmcp.googleapis.com/mcp/v1",
-    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    "description": {
-      "zh-CN": "读取和编辑演示文稿。",
-      "en": "Read and edit presentations."
-    },
-    "note": {
-      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
-      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
-    },
-    "clientSecretRequired": true
+      "zh-CN": "用 Google 官方 CLI 连接 Gmail、云端硬盘、文档、表格、幻灯片、日历、Chat、联系人和 Tasks。",
+      "en": "Use the official Google CLI for Gmail, Drive, Docs, Sheets, Slides, Calendar, Chat, People, and Tasks."
+    }
   },
   {
     "id": "zoom",

@@ -480,6 +480,18 @@
       "sha256": "30999ebc2ab525786ca6229a984a77e2e8799b4f5ee4052ccd3e72b90a72a31b"
     },
     {
+      "id": "google-workspace",
+      "page": "https://developers.google.com/workspace/guides/workspace-cli",
+      "asset": "google-workspace.png",
+      "assetUrl": "https://www.gstatic.com/images/branding/googleg/2x/googleg_standard_color_128dp.png",
+      "originalType": "image/png",
+      "originalWidth": 256,
+      "originalHeight": 256,
+      "bytes": 7453,
+      "sha256": "040b9adb2f9bbba2db1f33d725e820bbb2c866bb2fd36abdd4cbe831e63ad2cf",
+      "retrievedAt": "2026-11-25"
+    },
+    {
       "id": "granola",
       "page": "https://www.granola.ai/",
       "asset": "granola.png",

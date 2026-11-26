@@ -83,7 +83,7 @@ function publicServer(v){
   return exact(v,["id","name","enabled","createdAt","updatedAt","source","transport","auth","setup","status","lastCheck","disabledProfileIds"],["recommendationId"])
     &&id(v.id)&&text(v.name,256)&&typeof v.enabled==="boolean"&&Number.isSafeInteger(v.createdAt)&&v.createdAt>=0&&Number.isSafeInteger(v.updatedAt)&&v.updatedAt>=v.createdAt
     &&source(v.source)&&transport(v.transport,true)&&auth(v.auth)&&exact(v.setup,["requiredFields","configuredFields"])
-    &&(v.recommendationId===undefined||["blender-lab","ticketmaster","flightaware"].includes(v.recommendationId)&&v.source.kind==="custom"&&v.transport.kind==="stdio-command")
+    &&(v.recommendationId===undefined||["blender-lab","ticketmaster","flightaware","google-workspace"].includes(v.recommendationId)&&v.source.kind==="custom"&&v.transport.kind==="stdio-command")
     &&["requiredFields","configuredFields"].every(k=>Array.isArray(v.setup[k])&&v.setup[k].length<=128&&v.setup[k].every(s=>text(s,256)))
     &&["needsSetup","signedOut","checking","ready","failed","disabled"].includes(v.status)
     &&(v.lastCheck===null||exact(v.lastCheck,["at","toolCount","errorCode"])&&Number.isSafeInteger(v.lastCheck.at)&&v.lastCheck.at>=0
