@@ -360,11 +360,13 @@ test("real Service requires a replaced instance owner to recover same-user legac
   const f = await fixture(t); await stoppedArtifact(f, "crash");
   const retiredInstance = JSON.parse(fs.readFileSync(f.paths.lockPath, "utf8"));
   fs.unlinkSync(f.paths.lockPath);
-  const startedAt = Date.now() - 1_000;
   const other = spawn("/bin/cat", [], { stdio: ["pipe", "ignore", "ignore"] });
   const exited = once(other, "exit");
   t.after(async () => { other.stdin.end(); await exited; });
   await once(other, "spawn");
+  const replacementStartedAt = readProcessStartedAt(other.pid);
+  assert.ok(replacementStartedAt, "fixture replacement process must have a recorded start time");
+  const startedAt = replacementStartedAt - 1_000;
 
   const lockPath = path.join(f.paths.stateDir, "memory-provider-owners.json.lock");
   const proofName = fs.readdirSync(f.paths.stateDir).find(name => /\.owner-write-.*\.json$/u.test(name));
