@@ -35,6 +35,7 @@ const {
 const { ClaudeCodeRuntimeLedger } = require("./claude-code-runtime-ledger");
 const { loadClaudeAgentSdk, withClaudeConfigDir } = require("./claude-code-sdk");
 const { ClaudeCodeLiveSessions, liveSessionKey } = require("./claude-code-live-sessions");
+const { CLAUDE_PRIVACY_FLAGS, applyClaudeLaunchAgentOptOuts } = require("./claude-code-privacy");
 const { unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { quotaScopeDigest, quotaSnapshot } = require("../core/oauth-account-quota");
 
@@ -45,6 +46,7 @@ const PARENT_ENV_ALLOWLIST = Object.freeze([
   "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
   "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  ...CLAUDE_PRIVACY_FLAGS,
 ]);
 const SDK_ENV_ALLOWLIST = Object.freeze([
   "CLAUDE_AGENT_SDK_VERSION",
@@ -2478,6 +2480,7 @@ class ClaudeCodeRuntimeHost {
       if (typeof value === "string" && value.isWellFormed() && !value.includes("\0")
         && Buffer.byteLength(value, "utf8") <= 4096) env[key] = value;
     }
+    applyClaudeLaunchAgentOptOuts(env, this.parentEnv);
     env.PATH = runtimePath(env.PATH, this.userHome);
     env.HOME = this.runtimeEnvironment.spawnEnv.HOME;
     // Pass the config directory only when the user configured one, so the CLI

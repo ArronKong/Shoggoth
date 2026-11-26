@@ -198,32 +198,9 @@ const previews: Record<string, readonly Row[]> = {
     ["Find app actions", "查找应用操作", "Discover actions available through your connected apps.", "了解已连接应用提供的操作。"],
     ["Run automations", "执行自动化动作", "Run the actions you have authorized.", "执行自己已授权的应用动作。"],
   ],
-  gmail: [
-    ["Search mail", "搜索邮件", "Find messages in your authorized mailbox.", "查找已授权邮箱中的邮件。"],
-    ["Work with drafts", "处理邮件草稿", "Review and prepare mail drafts.", "查看和准备邮件草稿。"],
-  ],
-  "google-calendar": [
-    ["Read calendars", "查看日历", "Read calendars and events.", "查看日历与事件。"],
-    ["Check availability", "查询空闲时间", "Find available time for scheduling.", "查询可安排日程的时间。"],
-  ],
-  "google-contacts": [
-    ["Find contacts", "查找联系人", "Look up contacts and directory entries.", "查询联系人与组织目录。"],
-  ],
-  "google-docs": [
-    ["Read documents", "读取文档", "Read Google document content.", "读取 Google 文档内容。"],
-    ["Edit documents", "编辑文档", "Update document content.", "修改文档内容。"],
-  ],
-  "google-drive": [
-    ["Search files", "搜索云端文件", "Find files in Google Drive.", "查找 Google Drive 中的文件。"],
-    ["Manage files", "管理文件", "Work with authorized cloud files.", "处理已授权的云端文件。"],
-  ],
-  "google-sheets": [
-    ["Read spreadsheets", "读取电子表格", "Read spreadsheet data.", "读取电子表格数据。"],
-    ["Edit spreadsheets", "编辑电子表格", "Update spreadsheet content.", "修改电子表格内容。"],
-  ],
-  "google-slides": [
-    ["Read presentations", "读取演示文稿", "Read presentation content.", "读取演示文稿内容。"],
-    ["Edit presentations", "编辑演示文稿", "Update slides in a presentation.", "修改演示文稿中的幻灯片。"],
+  "google-workspace": [
+    ["Discover actions", "查看服务操作", "List the current Google Workspace commands and their parameters.", "查看各项 Google Workspace 服务当前支持的命令和参数。"],
+    ["Work with Workspace", "处理办公事务", "Search mail and files, prepare drafts, edit documents, and manage schedules within your granted scopes.", "在已授权范围内查找邮件和文件、起草回复、编辑文档和安排日程。"],
   ],
   zoom: [
     ["Work with meetings", "处理会议", "Use authorized Zoom meeting and collaboration tools.", "使用已授权的 Zoom 会议与协作工具。"],

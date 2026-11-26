@@ -12,6 +12,7 @@ dist/
 # Keep implementation ADRs reviewable; other local design notes remain ignored.
 /docs/*
 !/docs/architecture/
+!/docs/telemetry/
 !/docs/privacy.md
 !/docs/privacy.en.md
 /tasks/

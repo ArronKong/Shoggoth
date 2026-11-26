@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const BUILD = Object.freeze({
-  exportEnabled: true, isPackaged: true, projectToken: "phc_SyntheticProjectNotForProduction",
+  exportEnabled: true, officialRelease: true, isPackaged: true, projectToken: "phc_SyntheticProjectNotForProduction",
   region: "us", revision: 1, appVersion: "0.8.79", platform: "darwin", arch: "arm64",
 });
 

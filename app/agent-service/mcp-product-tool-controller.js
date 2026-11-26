@@ -2594,6 +2594,7 @@ class McpProductToolController {
     this.mcpConnectorController = options.mcpConnectorController || null;
     this.larkCliConnectorController = options.larkCliConnectorController || null;
     this.requestLarkWriteApproval = options.requestLarkWriteApproval || null;
+    this.requestGoogleWorkspaceApproval = options.requestGoogleWorkspaceApproval || null;
     this.appleDeviceController = options.appleDeviceController || null;
     this.getAppleDeviceCaller = options.getAppleDeviceCaller || null;
     this.resolveMcpSubject = options.resolveMcpSubject || null;
@@ -4159,6 +4160,22 @@ class McpProductToolController {
             if (localLark) return this.larkCliConnectorController.callAgentTool(args.toolName, actualArgs, { signal: scope?.signal, assertCurrent });
             return this.nativeMcpClientManager.callTool(args.serverId, args.toolName, safeJsonClone(actualArgs),
             { signal: scope?.signal,
+              reviewedWrite: !!(authority.federationClient && scope?.mcpRun && authority.confirmation === true),
+              requestApproval: async (message, signal) => {
+                assertCurrent();
+                const preview = { service: callArgs.service, action: callArgs.action, parameters: callArgs.parameters, confirmation: message };
+                this.#assertSecretSafe(JSON.stringify(preview));
+                if (scope?.mcpRun && scope.mcpApproveHook) {
+                  if (Buffer.byteLength(JSON.stringify(preview)) > 6500) throw toolError("MCP_TOOL_CAPACITY");
+                  try { await scope.mcpApproveHook({ arguments: preview, reason: "Google Workspace", signal }); }
+                  catch (error) { if (error.code === "MCP_EXTERNAL_APPROVAL_DENIED") return false; throw error; }
+                  assertCurrent(); return true;
+                }
+                if (!run || !this.requestGoogleWorkspaceApproval) throw toolError("MCP_TOOL_CONFIRMATION_REQUIRED");
+                const decision = await this.requestGoogleWorkspaceApproval({ profileId: authority.profileId, runId: run.id,
+                  toolName: `${callArgs.service}.${callArgs.action}`, arguments: preview, signal, assertCurrent });
+                assertCurrent(); return decision?.approved === true;
+              },
               localResult: !!this.secretExecution,
               ...(this.secretExecution ? { onResultSecrets: values => { resultSecrets = values; } } : {}),
               officialSessionId: authority.federationClient ? scope?.mcpIdentity?.sessionId

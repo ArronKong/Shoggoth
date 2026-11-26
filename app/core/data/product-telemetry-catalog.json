@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "errorBreakdownFeatures": ["chat_send", "connector_auth"],
   "pages": {
     "/chat": "chat",
     "/dashboard": "dashboard",
@@ -197,6 +198,7 @@
     "google-places",
     "google-sheets",
     "google-slides",
+    "google-workspace",
     "granola",
     "healthex",
     "higgsfield",

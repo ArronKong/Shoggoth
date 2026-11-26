@@ -11,6 +11,7 @@ export interface TelemetryUsage { runtimeType: string; providerId: string; model
 export interface TelemetrySettings {
   available: boolean;
   collectionAvailable: boolean;
+  disabledReason: "environment" | "ci" | "build" | null;
   enabled: boolean;
   detailedEnabled: boolean;
   basicEpoch: string | null;
@@ -21,6 +22,7 @@ export interface TelemetrySettingResult { error: TelemetrySettingError | null; s
 
 export type TelemetryPayload =
   | { kind: "activity"; payload: Record<string, never> }
+  | { kind: "completed_background_task_opened"; payload: Record<string, never> }
   | { kind: "page_used"; payload: { page: string } }
   | { kind: "feature_start"; payload: { feature: TelemetryFeature; operationId: string; backendType: string } }
   | { kind: "feature_end"; payload: { operationId: string; outcome: TelemetryOutcome; errorKind: string | null; usage: TelemetryUsage | null } }
@@ -32,7 +34,7 @@ export interface DesktopProductTelemetryBridge {
   record: (signal: TelemetrySignal) => void;
   getSettings: () => Promise<TelemetrySettings | null>;
   setEnabled: (enabled: boolean) => Promise<TelemetrySettingResult | null>;
-  setDetailedEnabled: (enabled: boolean) => Promise<TelemetrySettingResult | null>;
+  saveDiagnosticFile: () => Promise<"saved" | "canceled" | "failed">;
 }
 
 // The backends pass OpenClaw's CronSchedule through as a superset, so a few

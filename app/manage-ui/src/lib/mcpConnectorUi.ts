@@ -39,8 +39,7 @@ export function mcpRegistryHasRemote(item: McpRegistryItem, url?: string): boole
 }
 export function mcpRecommendationMatchesServer(value: McpRecommendation, server: McpServer): boolean {
   const transport = server.transport;
-  if (value.id === "ticketmaster") return server.recommendationId === "ticketmaster" && transport.kind === "stdio-command";
-  if (value.id === "flightaware") return server.recommendationId === "flightaware" && transport.kind === "stdio-command";
+  if (["ticketmaster", "flightaware", "google-workspace"].includes(value.id)) return server.recommendationId === value.id && transport.kind === "stdio-command";
   if (value.url) return transport.kind === "remote" && transport.protocol === "streamable-http"
     && [value.url, ...(value.endpoints || []).map(endpoint => endpoint.url)].some(url => mcpRemoteUrlsMatch(transport.url, url));
   if (value.transport?.kind === "stdio-command") {

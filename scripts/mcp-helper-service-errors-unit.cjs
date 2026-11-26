@@ -10,7 +10,8 @@ const { PassThrough } = require("node:stream");
 const root = path.resolve(process.env.SHOGGOTH_TEST_SOURCE_ROOT || path.join(__dirname, ".."));
 const { authenticateMcpSession, authenticateFederationMcpSession } = require(path.join(root, "app/shoggoth-mcp-helper"));
 const bootstrap = require(path.join(root, "app/bootstrap-role"));
-const { recordBootstrapFailure } = require(path.join(root, "app/bootstrap-diagnostics"));
+const { recordBootstrapFailure, localDiagnosticSummary } = require(path.join(root, "app/bootstrap-diagnostics"));
+const { mcpFailureStage } = require(path.join(root, "app/agent-service/mcp-helper-diagnostics"));
 const { resolveServicePaths } = require(path.join(root, "app/agent-service/paths"));
 const { ensureFederationMcpCredential, federationMcpAuthPath } = require(path.join(root, "app/agent-service/federation-mcp-auth"));
 const { CodexJsonlRpcClient } = require(path.join(root, "app/agent-service/codex-jsonl-rpc"));
@@ -35,9 +36,13 @@ function fixture(t) {
   ensureFederationMcpCredential(paths);
   return paths;
 }
-function assertPublic(error, code) {
+function assertPublic(error, code, stage) {
   assert.equal(error.code, code);
   assert.equal(error.message, code.toLowerCase());
+  if (stage) {
+    assert.equal(mcpFailureStage(error), stage);
+    assert.equal(JSON.stringify(error).includes(stage), false);
+  }
   assert.doesNotMatch(JSON.stringify(error), /PRIVATE_|Bearer|\/Users\//u);
   return true;
 }
@@ -61,7 +66,7 @@ test("native and federated startup distinguish unavailable/recovery/auth without
       } };
       const start = kind === "native" ? authenticateMcpSession(options)
         : authenticateFederationMcpSession({ ...options, client: "openclaw", authFile: federationMcpAuthPath(paths) });
-      await assert.rejects(start, error => assertPublic(error, expected));
+      await assert.rejects(start, error => assertPublic(error, expected, "mcp.service_request"));
       assert.equal(calls, 1, `${kind} ${cause} must not replay authentication or send a task`);
     }
   }
@@ -74,7 +79,7 @@ test("missing, corrupt, or insecure local federation files never contact Service
     client: "hermes", authFile, requestService: async () => assert.fail("local file failure cannot call Service"),
   });
   fs.chmodSync(authFile, 0o644);
-  await assert.rejects(authenticate(), error => assertPublic(error, storage));
+  await assert.rejects(authenticate(), error => assertPublic(error, storage, "mcp.credential_read"));
   fs.chmodSync(authFile, 0o600);
   fs.writeFileSync(authFile, "PRIVATE_CREDENTIAL_FILE_CORRUPT");
   await assert.rejects(authenticate(), error => assertPublic(error, storage));
@@ -103,7 +108,7 @@ test("exchange errors and local worker failures are distinct and clear the secre
         };
         throw failure;
       },
-    }), error => assertPublic(error, expected));
+    }), error => assertPublic(error, expected, localFailure ? "mcp.crypto" : "mcp.service_request"));
     assert.deepEqual(methods, localFailure ? ["mcp.auth.challenge"] : ["mcp.auth.challenge", "mcp.auth.exchange"]);
     if (!localFailure) assert.equal(secret.every(byte => byte === 0), true);
   }
@@ -151,11 +156,20 @@ test("Service preserves auth preparation storage errors across IPC and does not 
   await service.start();
   try {
     const [profile] = service.productStore.listAgentProfiles();
+    const argv = ["--shoggoth-internal-role=mcp"];
+    const authenticate = () => authenticateMcpSession({ paths,
+      runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
     for (let attempt = 0; attempt < 2; attempt++) {
-      await assert.rejects(authenticateMcpSession({ paths,
-        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId }),
-      error => assertPublic(error, storageFull));
+      await assert.rejects(bootstrap.main(argv, { NODE_ENV: "test" }, { defaultApp: true, verifyMcpParent: () => true },
+        { mcp: authenticate }), error => {
+        assert.equal(error.code, storageFull);
+        return recordBootstrapFailure(error, { paths, argv });
+      });
     }
+    const { error_details: [detail] } = JSON.parse(localDiagnosticSummary(paths.runtimeDir, "1.0.0", "darwin"));
+    assert.equal(detail.code, storageFull);
+    assert.equal(detail.count, 2);
+    assert.deepEqual(detail.stages, [{ stage: "mcp.service_request", count: 2, last_seen_at: detail.last_seen_at }]);
     assert.equal(loads, 1);
   } finally { await service.stop({ notify: false }); }
 });

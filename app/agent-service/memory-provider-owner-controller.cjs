@@ -24,6 +24,15 @@ function createMemoryOwnerStoppedLeaseAuthority(assertStopped) {
   if (typeof assertStopped !== "function") throw new TypeError("A verified stopped owner assertion is required");
   const authority = Object.freeze({}); stoppedAuthorities.set(authority, assertStopped); return authority;
 }
+function catalogOwner(value) {
+  const owner = P.record(value, {
+    version: version => { P.need(version === 1 || version === 2); return version; },
+    pid: pid => { P.need(Number.isSafeInteger(pid) && pid > 1); return pid; },
+    startedAt: P.integer, token: token => { P.need(typeof token === "string" && FP.test(token)); return token; },
+  }, ["version", "pid", "startedAt", "token"]);
+  P.need(owner.version === 1 || (owner.startedAt > 0 && owner.startedAt % 1000 === 0));
+  return owner;
+}
 // This is a trusted startup resource operation, never a public RPC parameter.
 // The authority must hold the Service's exclusive stopped-recovery lease for
 // this complete synchronous action, and prove the exact physical writer dead.
@@ -43,10 +52,7 @@ function recoverStoppedMemoryOwnerCatalogLock({ stateDir, trustedRoot, privateFi
     fd = fs.openSync(lockPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)); const opened = fs.fstatSync(fd);
     P.need(opened.dev === before.dev && opened.ino === before.ino && opened.size <= 4096, "MEMORY_OWNER_STORAGE_CHANGED");
     const bytes = fs.readFileSync(fd);
-    const info = P.record(JSON.parse(bytes.toString("utf8")), {
-      version: value => { P.need(value === 1); return value; }, pid: value => { P.need(Number.isSafeInteger(value) && value > 1); return value; },
-      startedAt: P.integer, token: value => { P.need(typeof value === "string" && FP.test(value)); return value; },
-    }, ["version", "pid", "startedAt", "token"]);
+    const info = catalogOwner(JSON.parse(bytes.toString("utf8")));
     const assertion = stoppedAuthorities.get(authorizeStoppedOwner(info)); P.need(assertion && assertion() === true, "MEMORY_OWNER_FORBIDDEN");
     if (before.nlink === 2) {
       const preparedPath = `${lockPath}.lease-${info.pid}-${info.startedAt}-${info.token}`;
@@ -98,8 +104,7 @@ function recoverStoppedMemoryOwnerCatalogFiles({ stateDir, trustedRoot, privateF
     try { const opened = fs.fstatSync(fd); P.need(opened.dev === pin.dev && opened.ino === pin.ino, "MEMORY_OWNER_STORAGE_CHANGED"); raw = fs.readFileSync(fd); }
     finally { fs.closeSync(fd); }
     const proof = P.record(JSON.parse(raw.toString("utf8")), { version: value => { P.need(value === 1); return value; },
-      owner: value => P.record(value, { version: value => { P.need(value === 1); return value; }, pid: P.integer, startedAt: P.integer,
-        token: value => { P.need(FP.test(value)); return value; } }, ["version", "pid", "startedAt", "token"]),
+      owner: catalogOwner,
       relativeTarget: value => { P.need(value === "memory-provider-owners.json" || /^memory-provider-owner-receipts\/[a-f0-9]{64}\.json$/u.test(value)); return value; },
       before: value => nullable(value, value => P.record(value, { dev: P.integer, ino: P.integer, hash: value => { P.need(FP.test(value)); return value; } }, ["dev", "ino", "hash"])),
       directory: value => P.record(value, { dev: P.integer, ino: P.integer }, ["dev", "ino"]),
@@ -260,14 +265,15 @@ class MemoryProviderOwnerController {
     this.opened = false; this.closing = false; this.poisoned = false; this.queue = Promise.resolve(); this.lifetime = new AbortController();
     for (const name of ["resolveOwner", "projectProviderMetadata", "close"]) this[name] = this[name].bind(this);
   }
-  open() {
+  open(processStartedAt = null) {
     P.need(!this.opened && !this.closing, "MEMORY_OWNER_CONFLICT");
     this.privateFiles.preparePrivateParent(this.file, this.paths.trustedRoot);
     this.parentIdentity = fs.lstatSync(this.paths.stateDir);
     this.#assertNoArtifacts(this.file); this.#assertNoArtifacts(this.lockPath);
     let fd, preparedPath, preparedIdentity, linked = false;
     try {
-      const info = { version: 1, pid: process.pid, startedAt: this.now(), token: crypto.randomBytes(32).toString("hex") }; P.integer(info.startedAt);
+      const info = catalogOwner({ version: processStartedAt === null ? 1 : 2, pid: process.pid,
+        startedAt: processStartedAt ?? this.now(), token: crypto.randomBytes(32).toString("hex") });
       const token = JSON.stringify(info); preparedPath = `${this.lockPath}.lease-${info.pid}-${info.startedAt}-${info.token}`;
       fd = fs.openSync(preparedPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0), 0o600);
       preparedIdentity = fs.fstatSync(fd); this.leaseFault("lease-created");

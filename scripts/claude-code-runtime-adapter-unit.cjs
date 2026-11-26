@@ -214,7 +214,7 @@ class FakeSdk {
       command: params.options.pathToClaudeCodeExecutable,
       args: ["--sdk-fake"],
       cwd: params.options.cwd,
-      env: params.options.env,
+      env: { ...params.options.env, ...this.behavior.sdkEnv },
       signal: new AbortController().signal,
     });
     const control = Array.isArray(params.options.tools) && params.options.tools.length === 0;
@@ -1168,6 +1168,48 @@ test("Claude Code 显式配置的 CLAUDE_CONFIG_DIR 原样传给 CLI", async () 
   } finally {
     await ctx.close();
     fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude Code forwards the parent's privacy preferences to auth, quota and chat processes", async () => {
+  const privacy = {
+    DISABLE_TELEMETRY: "1",
+    DISABLE_ERROR_REPORTING: "true",
+    DO_NOT_TRACK: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+  };
+  const desktopFlags = {
+    SHOGGOTH_CLAUDE_CODE_OPT_OUTS: "DISABLE_ERROR_REPORTING,DO_NOT_TRACK,ANTHROPIC_API_KEY",
+    DISABLE_ERROR_REPORTING: "0",
+  };
+  for (const [parentEnv, expected] of [
+    [privacy, privacy],
+    [desktopFlags, { DISABLE_ERROR_REPORTING: "1", DO_NOT_TRACK: "1" }],
+    [{}, {}],
+  ]) {
+    const ctx = fixture({ parentEnv, sdkEnv: { DISABLE_TELEMETRY: "0" } });
+    try {
+      const runtime = await ctx.adapter.acquire(bindingFor("privacy-profile"), {
+        workspace: ctx.workspace, permissionPolicy: PERMISSION,
+      });
+      await runtime.authenticationState();
+      await runtime.accountQuotaRead();
+      const started = await runtime.sessionStart({ source: "chat:privacy", cwd: ctx.workspace, model: "sonnet", permissionPolicy: PERMISSION });
+      await runTurn(runtime, ctx.workspace, started.session.id, "privacy-one", "test");
+
+      assert.ok(ctx.spawns.some(({ args }) => args[0] === "auth"));
+      assert.ok(ctx.sdk.usageCalls.length > 0);
+      assert.equal(ctx.sdk.turnQueries.length, 1);
+      for (const { args, options } of ctx.spawns) {
+        for (const name of Object.keys(privacy)) {
+          assert.equal(options.env[name], expected[name], `${args[0]}: ${name}`);
+        }
+        assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
+        assert.equal(options.env.SHOGGOTH_CLAUDE_CODE_OPT_OUTS, undefined);
+      }
+    } finally {
+      await ctx.close();
+    }
   }
 });
 

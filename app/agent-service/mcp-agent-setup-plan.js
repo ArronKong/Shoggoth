@@ -8,6 +8,7 @@ const { validateMcpRemoteUrl } = require("./native-mcp-store");
 const { tokenizeCommand, resolveOnPath } = require("./mcp-package-launcher");
 const { normalizeTicketmasterTransport } = require("./ticketmaster-mcp-launch");
 const { normalizeFlightawareTransport } = require("./flightaware-mcp-launch");
+const { resolveGoogleWorkspaceCli } = require("./google-workspace-cli");
 
 const MAX_CONFIG_BYTES = 32 * 1024;
 const SECRET_NAME = /token|secret|password|passwd|api.?key|authorization|credential|cookie|private.?key/iu;
@@ -35,7 +36,7 @@ function normalizeCustomMcpTransport(raw, paths) {
     const [identifier, version] = args[0].split("==");
     return { kind: "stdio-package", registryType: "pypi", identifier, version, packageArgs: args.slice(1) };
   }
-  if (!path.isAbsolute(transport.command)) transport.command = resolveOnPath(transport.command);
+  if (!path.isAbsolute(transport.command)) transport.command = transport.command === "gwscli" ? resolveGoogleWorkspaceCli(process.env, paths.homeDir) : resolveOnPath(transport.command);
   return transport;
 }
 

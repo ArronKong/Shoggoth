@@ -9,14 +9,15 @@ const DESKTOP_PRESETS = Object.freeze([
   Object.freeze({ command: "/Applications/Fantastical.app/Contents/Helpers/FantasticalMCP.app/Contents/MacOS/FantasticalMCP", args: Object.freeze([]), team: "85C27NK92C" }),
   Object.freeze({ command: "/usr/local/bin/dayone", args: Object.freeze(["mcp"]), team: "5U8NS4GX82" }),
   Object.freeze({ command: "/usr/local/bin/1password-mcp", args: Object.freeze([]), team: "2BUA8C4S2C" }),
+  Object.freeze({ command: "/usr/local/bin/gwscli", args: Object.freeze([]), team: "EQHXZ8M8AV", identifier: "gwscli" }),
 ]);
 
 function desktopPreset(command, args) {
   // 1Password installs a PATH entry rather than documenting one absolute path.
   // Accept only that executable name with no arguments, then verify its vendor
   // signature below. Other binaries from the same publisher are not matched.
-  const knownCommand = typeof command === "string" && path.isAbsolute(command) && path.basename(command) === "1password-mcp"
-    ? "/usr/local/bin/1password-mcp" : command;
+  const base = typeof command === "string" && path.isAbsolute(command) ? path.basename(command) : "";
+  const knownCommand = ["1password-mcp", "gwscli"].includes(base) ? `/usr/local/bin/${base}` : command;
   return DESKTOP_PRESETS.find(value => value.command === knownCommand && Array.isArray(args)
     && value.args.length === args.length && value.args.every((arg, index) => args[index] === arg));
 }
@@ -27,7 +28,8 @@ function validateDesktopPreset(command, args, realPath, options = {}) {
   const run = options.spawnSync || spawnSync;
   // A TeamIdentifier string alone is insufficient: require an Apple-trusted
   // signature with the pinned publisher as well as the exact MCP arguments.
-  const requirement = `=anchor apple generic and certificate leaf[subject.OU] = "${preset.team}"`;
+  const requirement = `=anchor apple generic and certificate leaf[subject.OU] = "${preset.team}"`
+    + (preset.identifier ? ` and identifier "${preset.identifier}"` : "");
   let result;
   try {
     result = run("/usr/bin/codesign", ["--verify", "--strict", "--test-requirement", requirement, realPath], {

@@ -17,17 +17,40 @@ function pidIsAlive(pid) {
   }
 }
 
-function defaultProcessIdentity(pid) {
+function defaultProcessIdentity(pid, env) {
   try {
     // command/process.title 是可变展示字段，不能参与 PID reuse 身份判断。
     return execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
+      env,
       timeout: 500,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   } catch {
     return "";
   }
+}
+
+function readProcessStartedAt(pid) {
+  const identity = defaultProcessIdentity(pid, { LC_ALL: "C", TZ: "UTC0" });
+  const startedAt = Date.parse(`${identity} GMT`);
+  return Number.isSafeInteger(startedAt) && startedAt > 0 ? startedAt : null;
+}
+
+function recordedProcessHasExited(owner, replacedOwner) {
+  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 1 || owner.pid > 0x7fffffff) return false;
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    if (error?.code !== "EPERM") return error?.code === "ESRCH";
+  }
+  // A v1 timestamp records the lock write. It needs corroboration from the
+  // removed Service lease, since a clock rollback can put it before process birth.
+  if (owner.version === 1
+    && (replacedOwner?.pid !== owner.pid || replacedOwner.createdAt > owner.startedAt)) return false;
+  const startedAt = readProcessStartedAt(owner.pid);
+  if (startedAt === null) return false;
+  return owner.version === 2 ? startedAt !== owner.startedAt : startedAt > owner.startedAt;
 }
 
 function parseLockRecord(contents) {
@@ -114,6 +137,7 @@ async function acquireInstanceLock(lockPath, options) {
     startIdentity: getProcessIdentity(process.pid),
     createdAt: Date.now(),
   };
+  let replacedOwner = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     let fd;
     let createdIdentity;
@@ -123,7 +147,7 @@ async function acquireInstanceLock(lockPath, options) {
       writeFully(fileSystem, fd, `${JSON.stringify(ownRecord)}\n`);
       fileSystem.fchmodSync(fd, 0o600);
       fileSystem.fsyncSync(fd);
-      return { fd, identity: createdIdentity, record: ownRecord };
+      return { fd, identity: createdIdentity, record: ownRecord, replacedOwner };
     } catch (error) {
       if (fd !== undefined) {
         cleanupFailedOwnedLock(fileSystem, lockPath, fd, createdIdentity, error);
@@ -174,6 +198,11 @@ async function acquireInstanceLock(lockPath, options) {
       try { afterContents = fs.readFileSync(lockPath, "utf8"); } catch { /* changed */ }
       if (!sameFile(before, after) || contents !== afterContents) continue;
       fs.unlinkSync(lockPath);
+      replacedOwner = identityMismatch && typeof record.startIdentity === "string"
+        && typeof record.nonce === "string" && record.nonce.length > 0
+        && Number.isSafeInteger(record.createdAt) && record.createdAt > 0
+        ? { pid: record.pid, createdAt: record.createdAt }
+        : null;
     }
   }
   throw serviceError("SERVICE_LOCK_FAILED", "无法取得 Service 单实例锁");
@@ -210,5 +239,7 @@ function writePrivateToken(tokenPath) {
 module.exports = {
   acquireInstanceLock,
   defaultProcessIdentity,
+  readProcessStartedAt,
+  recordedProcessHasExited,
   writePrivateToken,
 };

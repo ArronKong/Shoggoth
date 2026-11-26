@@ -11,7 +11,7 @@ export interface McpRegistryItem { registryName: string; name: string; descripti
   options: Array<{ id: string; transport: McpTransport; fields: McpSetupField[]; available?: boolean; errorCode?: string | null }> }
 export interface McpRegistryPage { items: McpRegistryItem[]; nextCursor: string | null; featured: string[]; cachedAt: number }
 export interface McpServer { id: string; name: string; enabled: boolean; createdAt: number; updatedAt: number;
-  recommendationId?: "blender-lab" | "ticketmaster" | "flightaware";
+  recommendationId?: "blender-lab" | "ticketmaster" | "flightaware" | "google-workspace";
   source: { kind: "custom" } | { kind: "registry"; registryName: string; version: string };
   transport: McpTransport; auth: { kind: "none" | "headers" | "oauth-dcr" | "oauth-client" };
   setup: { requiredFields: Array<string | McpSetupField>; configuredFields: string[] };
@@ -30,6 +30,15 @@ export interface McpConnectionRequest { requestId: string; kind: "connection" | 
   requiredFields: Array<{ name: string; label: string; kind: "env" | "header" | "oauthClient" }>;
   expiresAt: number; createdAt: number; updatedAt: number }
 export const MCP_CHANGE_EVENT = "shoggoth:mcp-connectors-changed";
+export type GoogleWorkspacePhase = "installing" | "choosingFile" | "signingIn" | "waitingForConsent" | "checking";
+export type GoogleWorkspaceStatus = {
+  state: "missing" | "signedOut" | "signedIn"; configured: boolean; phase?: GoogleWorkspacePhase; errorCode?: string; enableApisUrl: string;
+};
+export const getGoogleWorkspaceStatus = (signal?: AbortSignal) =>
+  jsonFetch<GoogleWorkspaceStatus>("/__api/host/google-workspace", { signal });
+export const changeGoogleWorkspaceSetup = (action: "install" | "import" | "login" | "authorizeWrite" | "cancel") =>
+  jsonFetch<{ accepted: true; phase?: GoogleWorkspacePhase }>("/__api/host/google-workspace", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action }) });
 const query = (input: object) => new URLSearchParams(Object.entries(input).filter(([,v]) => v !== undefined).map(([k,v]) => [k,String(v)])).toString();
 const read = <T,>(name: string, input: object = {}, signal?: AbortSignal) => jsonFetch<T>(`/__api/connectors/mcp/${name}?${query(input)}`, { signal });
 const write = <T,>(name: string, input: object) => jsonFetch<T>(`/__api/connectors/mcp/${name}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }).then(result => { window.dispatchEvent(new Event(MCP_CHANGE_EVENT)); return result; });

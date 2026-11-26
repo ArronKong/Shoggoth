@@ -44,16 +44,15 @@ async function refreshSettings() {
   if (ticket === request) publish({ ...view, settings });
 }
 
-export async function changeTelemetrySetting(field: "enabled" | "detailedEnabled", enabled: boolean) {
+export async function changeTelemetrySetting(enabled: boolean) {
   const bridge = getDesktopProductTelemetry(), current = view.settings;
-  if (!bridge || !current?.available || view.saving) return;
+  if (!bridge || !current?.available || current.disabledReason || view.saving) return;
   const ticket = ++request;
   // Drop the renderer's signal gate before the main process replies to opt-out.
-  const settings = enabled ? current : { ...current, detailedEpoch: null,
-    basicEpoch: field === "enabled" ? null : current.basicEpoch };
+  const settings = enabled ? current : { ...current, detailedEpoch: null, basicEpoch: null };
   publish({ settings, saving: true, error: null });
   try {
-    const result = await (field === "enabled" ? bridge.setEnabled(enabled) : bridge.setDetailedEnabled(enabled));
+    const result = await bridge.setEnabled(enabled);
     if (ticket === request) publish({ settings: result?.settings ?? settings, saving: false,
       error: result ? result.error : "unavailable" });
   } catch {
@@ -174,6 +173,11 @@ function activeDetailEpoch(): string | null {
   const epoch = view.settings?.detailedEpoch;
   return epoch && productPage() && document.visibilityState === "visible" && document.hasFocus()
     && detailDay === new Date().toISOString().slice(0, 10) ? epoch : null;
+}
+
+export function recordCompletedBackgroundTaskOpened() {
+  const epoch = activeDetailEpoch();
+  if (epoch) emit(epoch, { kind: "completed_background_task_opened", payload: {} });
 }
 
 export function startTelemetryOperation(feature: TelemetryFeature, backend?: unknown): TelemetryOperation | undefined {

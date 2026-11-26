@@ -29,6 +29,19 @@ async function start() {
 async function smoke() {
   const f=await start();
   try {
+    const workspaceRoute = `${f.url}/__api/host/google-workspace`;
+    const statusResponse = await fetch(workspaceRoute);
+    const workspace = await statusResponse.json();
+    assert.equal(statusResponse.status, 200);
+    assert.equal(statusResponse.headers.get("cache-control"), "no-store");
+    assert.ok(["missing", "signedOut"].includes(workspace.state));
+    assert.equal(workspace.configured, false);
+    assert.equal(new URL(workspace.enableApisUrl).searchParams.get("apiid").split(",").length, 17);
+    const postWorkspace = (body, origin) => fetch(workspaceRoute, { method: "POST",
+      headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) });
+    assert.equal((await postWorkspace({ action: "import" })).status, 403);
+    assert.equal((await postWorkspace({ action: "import", path: "/another/file.json" }, f.url)).status, 400);
+    assert.equal((await postWorkspace({ action: "import" }, f.url)).status, 503, "file selection requires a desktop host");
     const registry=f.service.mcpConnectorController.registry,registryFetch=registry.fetch;
     const registryEntry=require("./fixtures/mcp-registry/io.github.github__github-mcp-server.json");
     const registryBefore=f.service.nativeMcpStore.list();let registryReads=0;

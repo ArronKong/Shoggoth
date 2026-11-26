@@ -10,6 +10,7 @@ const { officialSkillBridgeEnvironment, validateOfficialSkillBridgeCredentials }
 const { OFFICIAL_SKILL_PUBLIC_MESSAGES } = require("../core/official-skill-connector-dto");
 const { ticketmasterBridgeEnvironment, validateTicketmasterBridgeCredentials } = require("./ticketmaster-mcp-launch");
 const { flightawareBridgeEnvironment, validateFlightawareBridgeCredentials } = require("./flightaware-mcp-launch");
+const { GoogleWorkspaceCliClient, isGoogleWorkspaceCommand } = require("./google-workspace-cli");
 // The SDK requires a finite response timer. Progress renews this idle window;
 // there is no maximum total duration. Cancellation still uses the owning signal.
 const MCP_PROGRESS_IDLE_TIMEOUT_MS = 60 * 60_000;
@@ -482,6 +483,10 @@ class NativeMcpClientManager {
     validatedQueryCredentials(spec.transport, secret.query);
     let client;
     if (spec.transport?.kind === "remote") client = new RemoteMcpClient(spec, { fetch: this.fetch, headers: secret.headers, query: secret.query, oauth: this.oauth, readinessTimeoutMs: this.readinessTimeoutMs });
+    else if (isGoogleWorkspaceCommand(spec.transport?.command, spec.transport?.args)) {
+      if (spec.secretRef || spec.auth?.kind !== "none") throw clientError("MCP_SECRET_INVALID", "Google Workspace uses the signed-in CLI account");
+      client = new GoogleWorkspaceCliClient(spec.transport, { env: safeEnvironment(this.env), spawn: this.spawn });
+    }
     else {
       let launch = spec.transport?.kind === "stdio-command" ? spec.transport : spec;
       if (spec.transport?.kind === "stdio-package") {
@@ -547,6 +552,9 @@ class NativeMcpClientManager {
       return scrub(result, spec, client.secretValues, currentSecrets);
     }
     catch (error) {
+      // Google CLI calls use independent child processes. A declined or invalid
+      // call must not interrupt an unrelated action waiting for user approval.
+      if (client instanceof GoogleWorkspaceCliClient && error.code !== "MCP_SERVER_PATH_INVALID") throw error;
       const record = this.clients.get(id);
       const existing = record ? await record.promise.catch(() => null) : null;
       try { await client.close(); if(existing===client)this.clients.delete(id); }

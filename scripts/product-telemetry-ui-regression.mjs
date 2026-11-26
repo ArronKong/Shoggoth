@@ -18,13 +18,13 @@ const transpile = text => ts.transpileModule(text, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
 } }).outputText;
 
-async function fixture(desktop = true) {
+async function fixture(desktop = true, detailed = true) {
   let at = Date.parse("2026-09-10T23:59:59.999Z");
   let mono = 0;
   let focused = true;
   let uuidCalls = 0;
-  let settings = { available: true, collectionAvailable: true, enabled: true, detailedEnabled: true,
-    basicEpoch: randomUUID(), detailedEpoch: randomUUID() };
+  let settings = { available: true, collectionAvailable: true, enabled: true, detailedEnabled: detailed,
+    basicEpoch: randomUUID(), detailedEpoch: detailed ? randomUUID() : null };
   const calls = [];
   const listeners = new Map();
   class Element {
@@ -50,7 +50,6 @@ async function fixture(desktop = true) {
       record: value => calls.push(JSON.parse(JSON.stringify(value))),
       getSettings: async () => settings,
       setEnabled: async enabled => set("enabled", enabled),
-      setDetailedEnabled: async enabled => set("detailedEnabled", enabled),
     } } } : {}) };
   const globals = { window, document, Element, performance: { now: () => mono },
     Date: class extends Date { constructor() { super(at); } },
@@ -107,25 +106,32 @@ assert.equal(await f.helpers.measureTelemetry("inspiration_create", "PRIVATE_BAC
 assert.deepEqual(f.calls.slice(-2).map(row => row.kind), ["feature_start", "feature_end"]);
 assert.equal(f.calls.at(-2).payload.backendType, "other");
 assert.equal(f.calls.at(-1).payload.outcome, "success");
+f.helpers.recordCompletedBackgroundTaskOpened();
+assert.deepEqual(f.calls.at(-1).payload, {});
+assert.equal(f.calls.at(-1).kind, "completed_background_task_opened");
 const operation = f.helpers.startTelemetryOperation("chat_send", "shoggoth");
 assert.ok(operation);
-await f.helpers.changeTelemetrySetting("detailedEnabled", false);
+await f.helpers.changeTelemetrySetting(false);
 const previous = f.calls.length, uuidCalls = f.uuidCalls();
 assert.equal(f.helpers.startTelemetryOperation("chat_send"), undefined);
 assert.equal(f.uuidCalls(), uuidCalls);
 f.advance(60_000); f.emit("wheel");
-assert.deepEqual(f.calls.slice(previous).map(row => row.kind), ["activity"]);
-await f.helpers.changeTelemetrySetting("detailedEnabled", true);
+assert.deepEqual(f.calls.slice(previous), []);
+await f.helpers.changeTelemetrySetting(true);
 operation.finish("success");
-assert.equal(f.calls.length, previous + 1, "a callback from a revoked epoch is ignored");
-await f.helpers.changeTelemetrySetting("enabled", false);
+assert.equal(f.calls.length, previous, "a callback from a revoked epoch is ignored");
+await f.helpers.changeTelemetrySetting(false);
 assert.equal(f.listeners.size, 0, "master opt-out detaches interaction listeners");
 f.advance(60_000); f.emit("keydown");
-assert.equal(f.calls.length, previous + 1);
+assert.equal(f.calls.length, previous);
 assert.equal(JSON.stringify(f.calls).includes("SECRET_CANARY"), false);
 assert.deepEqual(JSON.parse(JSON.stringify(f.helpers.telemetryModel("PRIVATE_PROVIDER", "SECRET_CANARY"))),
   { providerId: "custom", modelId: "custom" });
 f.dispose();
+const legacy = await fixture(true, false);
+legacy.emit("wheel"); legacy.helpers.recordCompletedBackgroundTaskOpened();
+assert.deepEqual(legacy.calls.map(row => row.kind), ["activity"]);
+legacy.dispose();
 const browser = await fixture(false);
 assert.equal(browser.listeners.size, 0);
 assert.equal(browser.helpers.startTelemetryOperation("chat_send"), undefined);

@@ -12,7 +12,7 @@ const {
   assertCodeIdentity,
 } = require("./agent-service/code-identity");
 const { resolveCanonicalServicePaths, resolveServicePaths } = require("./agent-service/paths");
-const { MCP_AUTH_STORAGE_CODES, MCP_HELPER_STARTUP_CODES } = require("./agent-service/mcp-helper-diagnostics");
+const { MCP_AUTH_STORAGE_CODES, MCP_HELPER_STARTUP_CODES, markMcpFailureStage } = require("./agent-service/mcp-helper-diagnostics");
 const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./agent-service/runtime-account");
 const { resolveCodexMcpParentBinaries } = require("./agent-service/codex-runtime-paths");
 const { CODEX_PARENT_VERIFY_TIMEOUT_MS } = require("./agent-service/codex-startup-timeouts");
@@ -498,19 +498,20 @@ function main(argv, env, runtime, loaders) {
       : bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error);
   }
   const dispatch = (runtimeMcpBridge = null) => {
+    const rejectMcpStartup = error => {
+      const publicCode = bootstrapFailureCode(error);
+      const failure = bootstrapFailure(publicCode.startsWith("MCP_HELPER_") ? publicCode : "BOOTSTRAP_MCP_START_FAILED");
+      throw markMcpFailureStage(failure, error);
+    };
     try {
       const dispatched = dispatchRole(role, loaders, runtimeMcpBridge);
       if (role !== "mcp" || !dispatched || typeof dispatched.then !== "function") {
         return dispatched;
       }
-      return Promise.resolve(dispatched).catch((error) => {
-        const code = bootstrapFailureCode(error);
-        throw bootstrapFailure(code.startsWith("MCP_HELPER_") ? code : "BOOTSTRAP_MCP_START_FAILED");
-      });
+      return Promise.resolve(dispatched).catch(rejectMcpStartup);
     } catch (error) {
       if (role !== "mcp") throw error;
-      const code = bootstrapFailureCode(error);
-      throw bootstrapFailure(code.startsWith("MCP_HELPER_") ? code : "BOOTSTRAP_MCP_START_FAILED");
+      return rejectMcpStartup(error);
     }
   };
   const actualEnv = env || process.env;
@@ -527,8 +528,8 @@ function main(argv, env, runtime, loaders) {
       .then(() => openBridge(context, runtime?.runtimeMcpBridgeOptions))
       .catch((error) => {
         const code = bootstrapFailureCode(error);
-        if (MCP_AUTH_STORAGE_CODES.includes(code)) throw bootstrapFailure(code);
-        throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error);
+        if (MCP_AUTH_STORAGE_CODES.includes(code)) throw markMcpFailureStage(bootstrapFailure(code), error, "bridge");
+        throw markMcpFailureStage(bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error), error, "bridge");
       })
       .then((bridge) => {
         delete actualEnv.SHOGGOTH_RUNTIME_MCP_GATE_FILE;

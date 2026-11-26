@@ -8,13 +8,14 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const phases = ["open-and-quit", "first", "restart", "disabled", "environment"];
 
 if (!process.versions.electron) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-telemetry-electron-"));
   const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" };
   delete env.ELECTRON_RUN_AS_NODE;
   try {
-    for (const phase of ["first", "restart", "disabled"]) {
+    for (const phase of phases) {
       const child = spawnSync(require("electron"), [__filename, "--fixture", root, phase], {
         env, encoding: "utf8", timeout: 40_000,
       });
@@ -22,7 +23,7 @@ if (!process.versions.electron) {
       if (child.stdout) process.stdout.write(child.stdout);
       if (child.status !== 0) throw new Error(`Electron ${phase} failed: ${child.stderr || child.error || child.status}`);
     }
-    console.log("Product telemetry Electron smoke: default export, two-row settings, real feature use, two-level opt-out, restart, UTC and disabled build passed");
+    console.log("Desktop telemetry: open-only DAU, two-row settings, local diagnostics, feature use, legacy preferences and blocked builds/environments passed");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 } else {
   const http = require("node:http");
@@ -32,13 +33,13 @@ if (!process.versions.electron) {
   const { createProductTelemetry } = require("../app/core/product-telemetry");
   const { createPostHogTransport, ENDPOINTS } = require("../app/core/product-telemetry-posthog");
   const { registerDesktopTelemetryIpc } = require("../app/desktop-telemetry-ipc");
-  const { exportEnabled } = require("../app/product-telemetry-build-config");
+  const { localDiagnosticSummary } = require("../app/bootstrap-diagnostics");
   const { BUILD, fakeClock } = require("./helpers/product-telemetry-fixtures.cjs");
   const at = process.argv.indexOf("--fixture");
   const root = process.argv[at + 1];
   const phase = process.argv[at + 2];
-  assert.ok(root && ["first", "restart", "disabled"].includes(phase));
-  const profile = path.join(root, phase === "disabled" ? "disabled-profile" : "enabled-profile");
+  assert.ok(root && phases.includes(phase));
+  const profile = path.join(root, ["disabled", "environment"].includes(phase) ? phase : "enabled-profile");
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
   app.setPath("userData", profile);
   app.setName("Shoggoth telemetry isolated test");
@@ -77,8 +78,12 @@ if (!process.versions.electron) {
         await app.dock.show();
       }
       if (phase !== "restart") configStore.write({ locale: "en", setupCompletedAt: 1, gatewayUrl: "", token: "", notifications: { chat: false, cron: false, task: false } });
-      else configStore.write({ locale: "zh-CN", theme: "dark", setupCompletedAt: 1, token: "synthetic-local-token" });
+      else {
+        configStore.write({ locale: "zh-CN", theme: "dark", setupCompletedAt: 1, token: "synthetic-local-token" });
+        configStore.writeTelemetryPreferences("detailedEnabled", false); // old basic-only installation
+      }
       const clock = fakeClock(phase === "restart" ? "2026-09-11T02:00:00Z" : "2026-09-10T23:59:59.999Z");
+      const previousOpen = phase === "first" && fs.existsSync(statePath) ? readState().outbox[0]?.event : null;
       const batches = [];
       const notes = [];
       sink = await listen((req, res) => {
@@ -131,7 +136,8 @@ if (!process.versions.electron) {
         fs.createReadStream(file).pipe(res);
       });
       telemetry = createProductTelemetry({ statePath, configStore, clock,
-        buildConfig: { ...BUILD, exportEnabled: phase !== "disabled" && exportEnabled },
+        buildConfig: { ...BUILD, officialRelease: phase !== "disabled" },
+        environmentOverride: phase === "environment" ? "environment" : null,
         transport: createPostHogTransport({ projectToken: BUILD.projectToken, region: "us", fetchImpl(url, options) {
           assert.equal(url, ENDPOINTS.us);
           // Test dependency injection only. Production has no custom endpoint switch.
@@ -140,11 +146,33 @@ if (!process.versions.electron) {
       });
       const power = new EventEmitter();
       power.getSystemIdleState = (threshold) => powerMonitor.getSystemIdleState(threshold);
-      dispose = registerDesktopTelemetryIpc({ ipcMain, getMainWindow: () => w, getUiOrigin: () => ui.url,
-        powerMonitor: power, telemetry, now: clock.now });
+      const diagnosticPath = path.join(profile, `test-diagnostics-${phase}.txt`);
+      const diagnosticTime = "2026-09-10T21:15:00.000Z";
+      if (phase === "restart") {
+        fs.writeFileSync(path.join(profile, "bootstrap-diagnostics.json"), JSON.stringify({ version: 1, records: [
+          { timeMs: Date.parse(diagnosticTime), role: "mcp", errors: [{ code: "MCP_HELPER_SERVICE_UNAVAILABLE" }] },
+        ] }), { mode: 0o600 });
+      }
+      let cancelDiagnostic = false, dialogs = 0;
+      const ipc = registerDesktopTelemetryIpc({ ipcMain, getMainWindow: () => w, getUiOrigin: () => ui.url,
+        powerMonitor: power, telemetry, now: clock.now, diagnosticSummary: () => localDiagnosticSummary(profile, BUILD.appVersion, "darwin"),
+        dialog: { async showSaveDialog(owner) { assert.equal(owner, w); dialogs++; return { canceled: cancelDiagnostic, filePath: diagnosticPath }; } } });
+      dispose = ipc.dispose;
       ipcMain.on("openclaw:get-config", (event) => { event.returnValue = { ...configStore.read(), effectiveLocale: configStore.read().locale }; });
       w = new BrowserWindow({ show: true, width: 1200, height: 850, title: "Shoggoth telemetry isolated test",
         webPreferences: { preload: path.join(__dirname, "../app/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
+      ipc.observeWindow(w);
+      if (phase === "open-and-quit") {
+        w.show(); app.focus({ steal: true }); w.focus();
+        await waitUntil(() => fs.existsSync(statePath), "native open persisted before the renderer loads");
+        const saved = readState();
+        assert.deepEqual(saved.outbox.map(row => row.event.event), ["shoggoth_app_active"]);
+        assert.equal(saved.detail.draft, null);
+        assert.equal(batches.length, 0);
+        console.log("Electron telemetry open-and-quit: PASS (closed before loading the UI or sending)");
+        passed = true;
+        return;
+      }
       const blocked = [];
       w.webContents.session.webRequest.onBeforeRequest((details, done) => {
         const url = new URL(details.url);
@@ -183,17 +211,23 @@ if (!process.versions.electron) {
       const evalUi = source => w.webContents.executeJavaScript(source);
       const checked = selector => evalUi(`document.querySelector(${JSON.stringify(selector)})?.getAttribute('aria-checked')`);
       const master = '[aria-labelledby="settings-telemetry-enabled"]';
-      const detail = '[aria-labelledby="settings-telemetry-detailed"]';
+      const diagnostics = '#settings-telemetry button:not([role="switch"])';
       const settingsSection = "#settings-telemetry";
       const click = async selector => {
-        const position = await evalUi(`(() => {
-          const node = document.querySelector(${JSON.stringify(selector)});
-          if (!node) return null;
-          node.scrollIntoView({block:'center', behavior:'instant'});
-          const r = node.getBoundingClientRect();
-          return { x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2) };
-        })()`);
-        assert.ok(position, `fixture missing ${selector}`);
+        let position;
+        await waitUntil(async () => {
+          position = await evalUi(`(async () => {
+            const node = document.querySelector(${JSON.stringify(selector)});
+            if (!node || node.matches(':disabled, [data-disabled], [aria-disabled="true"]')) return null;
+            node.scrollIntoView({block:'center', behavior:'instant'});
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const r = node.getBoundingClientRect();
+            const x = Math.round(r.left+r.width/2), y = Math.round(r.top+r.height/2);
+            return node.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
+          })()`);
+          return Boolean(position);
+        }, `clickable ${selector}`);
+        w.webContents.sendInputEvent({ type: "mouseMove", ...position });
         w.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...position });
         w.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...position });
       };
@@ -204,33 +238,52 @@ if (!process.versions.electron) {
       await w.loadURL(page); await ready(); await focus();
       const previousId = phase === "restart" ? readState().distinctId : null;
       const before = phase === "restart" ? fs.readFileSync(statePath, "utf8") : null;
-      await waitUntil(() => evalUi(`document.querySelector(${JSON.stringify(master)})?.matches('[aria-checked="${phase === "restart" ? "false" : "true"}"]:not([data-disabled])')`), "saved master setting");
-      assert.equal(await checked(detail), phase === "restart" ? "false" : "true");
+      const blockedBuild = phase === "disabled" || phase === "environment";
+      await waitUntil(() => evalUi(`document.querySelector(${JSON.stringify(master)})?.matches('[aria-checked="${phase === "first" ? "true" : "false"}"]${blockedBuild ? "[data-disabled]" : ":not([data-disabled])"}')`), "effective master setting");
       const rows = await evalUi(`Array.from(document.querySelectorAll('${settingsSection} .settings-list-row'),
         row => row.querySelector('[role="switch"]')?.getAttribute('aria-labelledby') ?? null)`);
-      assert.deepEqual(rows, ["settings-telemetry-enabled", "settings-telemetry-detailed"]);
-      assert.equal(await evalUi(`Boolean(document.querySelector('${settingsSection} [role="status"], ${settingsSection} button:not([role="switch"])'))`), false);
+      assert.deepEqual(rows, ["settings-telemetry-enabled", null]);
+      assert.equal(await evalUi(`document.querySelector('${settingsSection} a')?.href.endsWith('${phase === "restart" ? "privacy.md" : "privacy.en.md"}')`), true);
+      await click(diagnostics);
+      await waitUntil(() => fs.existsSync(diagnosticPath), "user-selected local export");
+      const expectedDetails = phase === "restart" ? [{ code: "MCP_HELPER_SERVICE_UNAVAILABLE", count: 1, last_seen_at: diagnosticTime,
+        stages: [{ stage: "mcp.startup", count: 1, last_seen_at: diagnosticTime }] }] : [];
+      assert.deepEqual(JSON.parse(fs.readFileSync(diagnosticPath)), { app_version: BUILD.appVersion, os_family: "macos",
+        error_codes: expectedDetails.map(entry => entry.code), record_limit_per_source: 8, error_details: expectedDetails });
+      await waitUntil(() => evalUi(`!document.querySelector('${diagnostics}').disabled && document.querySelector('${settingsSection} [role="status"]').textContent.includes('${phase === "restart" ? "已保存" : "Saved"}')`), "export acknowledged in settings");
+      cancelDiagnostic = true;
+      await focus();
+      // The first export exercised a native pointer click. Activate that same
+      // button through the DOM to test cancellation independently of pointer focus.
+      await evalUi(`document.querySelector('${diagnostics}').click()`);
+      try { await waitUntil(() => dialogs === 2, "canceled export"); }
+      catch (error) {
+        console.error("fixture diagnostic state", { dialogs, visible: w.isVisible(), focused: w.isFocused(),
+          idle: powerMonitor.getSystemIdleState(1), status: await evalUi(`document.querySelector('${settingsSection} [role="status"]').textContent`) });
+        throw error;
+      }
+      assert.equal(batches.length, 0);
       await w.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent("keydown", {key:"SECRET_CANARY",bubbles:true}));
         document.dispatchEvent(new Event("scroll", {bubbles:true}));
         window.scrollTo(0,200);`);
       await delay(200);
-      if (phase !== "restart") assert.equal(fs.existsSync(statePath), false, "startup and synthetic input must not create identity");
-      else assert.equal(fs.readFileSync(statePath, "utf8"), before);
+      if (phase === "restart") assert.equal(fs.readFileSync(statePath, "utf8"), before);
+      if (blockedBuild) assert.equal(fs.existsSync(statePath), false);
       if (phase === "first") {
-        // Formal navigation itself is not activity; test an actual excluded route
-        // with trusted input before any event has been generated.
+        assert.equal(readState().outbox.length, 1, "open before any page interaction");
+        assert.ok(previousOpen?.uuid, "the first process left the quick-open event on disk");
+        assert.equal(readState().outbox[0].event.uuid, previousOpen.uuid, "same-day restart preserves that event exactly once");
+        assert.equal(readState().detail.draft, null, "opening and diagnostics do not imply feature use");
         await w.webContents.executeJavaScript('location.hash="/glass"');
         await delay(250); await input();
-        assert.equal(fs.existsSync(statePath), false, "lab activity is excluded");
+        assert.equal(readState().detail.draft, null, "lab activity is excluded");
         await w.webContents.executeJavaScript('location.hash="/settings?probe=SECRET_CANARY"');
         await delay(250);
-        await click(detail);
-        await waitUntil(async () => await checked(detail) === "false", "detailed opt-out saved");
         assert.equal(configStore.getTelemetryPreferences().preferences.enabled, true);
-        assert.equal(fs.existsSync(statePath), false, "privacy controls do not create activity");
+        assert.equal(readState().outbox.length, 1);
       }
-      await input();
-      if (phase === "disabled") {
+      if (blockedBuild) {
+        await input();
         await telemetry.flush();
         assert.equal(fs.existsSync(statePath), false);
         assert.equal(batches.length, 0);
@@ -241,12 +294,13 @@ if (!process.versions.electron) {
         assert.equal(batches.length, 0, "restart preserves master opt-out");
         await click(master);
         await waitUntil(async () => await checked(master) === "true", "re-enable master");
-        assert.equal(await checked(detail), "false", "the detailed opt-out survives restart and master re-enable");
+        assert.equal(configStore.getTelemetryPreferences().preferences.detailedEnabled, false);
+        assert.ok(await evalUi(`document.querySelector('${settingsSection}').textContent.includes("仅统计 App 活跃")`));
         await input();
         await telemetry.flush();
         assert.equal(batches.length, 0, "same-day re-enable cannot duplicate activity");
       } else {
-        await waitUntil(() => fs.existsSync(statePath), "first trusted activity");
+        await waitUntil(() => fs.existsSync(statePath), "first window open");
         const first = readState().outbox[0].event;
         assert.equal(first.properties.report_day, "2026-09-10");
         assert.equal(readState().outbox.length, 1);
@@ -256,8 +310,6 @@ if (!process.versions.electron) {
         assert.equal(batches.length, 1);
         assert.deepEqual(batches[0].batch, [first]);
         await focus();
-        await click(detail);
-        await waitUntil(async () => await checked(detail) === "true", "detailed re-enable saved");
         await evalUi('location.hash="/inspirations"');
         await waitUntil(() => evalUi(`!!document.querySelector('textarea[aria-keyshortcuts="Enter"]')`), "production Inspiration composer");
         await focus();
@@ -276,13 +328,13 @@ if (!process.versions.electron) {
         await w.webContents.executeJavaScript(`window.__fixtureNow=${clock.now()};${signal}`);
         await delay(100);
         assert.equal(readState().outbox.length, 0, "even a forged bridge call fails while hidden");
-        await focus();
         power.emit("suspend");
+        await focus();
         await w.webContents.executeJavaScript(signal);
         await delay(100);
         power.emit("resume");
         assert.equal(readState().outbox.length, 0);
-        await input();
+        w.hide(); await focus();
         await waitUntil(() => readState().outbox.length === 2, "next-day activity and sealed previous-day details");
         assert.equal(readState().distinctId, first.distinct_id);
         assert.ok(readState().outbox.some(row => row.event.event === "shoggoth_app_active" && row.event.properties.report_day === "2026-09-11"));
@@ -300,8 +352,6 @@ if (!process.versions.electron) {
         assert.equal(daily.properties.inspiration_create_success_count, 1);
         await evalUi('location.hash="/settings"');
         await waitUntil(async () => await checked(master) === "true", "settings after navigation");
-        await click(detail);
-        await waitUntil(async () => await checked(detail) === "false", "detailed opt-out retained");
         await click(master);
         await waitUntil(async () => await checked(master) === "false", "total opt-out saved");
         clock.advance(86_400_000);

@@ -278,6 +278,7 @@ const { assertRuntimeProfileId } = require("./codex-runtime-paths");
 const {
   acquireInstanceLock,
   defaultProcessIdentity,
+  readProcessStartedAt,
   writePrivateToken,
 } = require("./instance-state");
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
@@ -1624,16 +1625,13 @@ function createAgentService(options) {
         .some(profile => profile.id === profileId),
       assertServiceCurrent: () => ["starting", "started"].includes(lifecycleState)
         && lifecycleGeneration === memoryProviderOwnerGeneration && !maintenanceQuiesced,
-      assertExclusiveStoppedRecovery: info => {
+      assertExclusiveStoppedRecovery: () => {
         if (lifecycleState !== "starting" || lifecycleGeneration !== memoryProviderOwnerGeneration
-          || lockFd === null || !ownedLockIdentity || !Number.isSafeInteger(info.pid) || info.pid <= 1
-          || info.pid === process.pid) return false;
+          || lockFd === null || !ownedLockIdentity) return false;
         try {
           const current = fs.lstatSync(paths.lockPath), held = fs.fstatSync(lockFd);
-          if (current.dev !== ownedLockIdentity.dev || current.ino !== ownedLockIdentity.ino
-            || held.dev !== current.dev || held.ino !== current.ino) return false;
-          try { process.kill(info.pid, 0); return false; }
-          catch (error) { return error?.code === "ESRCH"; }
+          return current.dev === ownedLockIdentity.dev && current.ino === ownedLockIdentity.ino
+            && held.dev === current.dev && held.ino === current.ino;
         } catch { return false; }
       },
       retireOwners: request => shoggothMemory.retireProviderOwners(request),
@@ -3447,6 +3445,9 @@ function createAgentService(options) {
       hookService, hookToolExecution,
       mcpConnectorController,
       larkCliConnectorController,
+      requestGoogleWorkspaceApproval: input => workRunCoordinator.requestToolApproval({
+        ...input, packageName: "Google Workspace", purpose: "connector", reason: "Google Workspace 请求确认本次操作。",
+      }),
       requestLarkWriteApproval: input => workRunCoordinator.requestToolApproval({
         ...input, packageName: "飞书 / Lark", purpose: "connector",
       }),
@@ -5566,6 +5567,10 @@ function createAgentService(options) {
           // available, and the old platform is never instantiated.
           try { markLegacyPluginPlatformRetired(paths, { activeServiceLock: ownedLockIdentity }); }
           catch (error) { connectorRetirementError = connectorPublicError(error).code; }
+          if (memoryProviderOwnerRpc) {
+            memoryProviderOwnerGeneration = generation;
+            memoryProviderOwnerRpc.recoverStoppedOwners(acquiredLock.replacedOwner);
+          }
           // 单实例锁取得后才打开 Store，确保整个产品状态只有 Service 这一位 writer。
           runtimeMcpGateIssuerOpened = true;
           await runtimeMcpGateIssuer.open();
@@ -5606,10 +5611,7 @@ function createAgentService(options) {
           nativeMemoryConfig.open();
           try { chatUiConfig.open(); } catch (error) { chatUiController.storageError = error; }
           nativeMemorySharingConfig.open();
-          if (memoryProviderOwnerRpc) {
-            memoryProviderOwnerGeneration = generation;
-            memoryProviderOwnerRpc.open();
-          }
+          if (memoryProviderOwnerRpc) memoryProviderOwnerRpc.open(readProcessStartedAt(process.pid));
           assertStartGeneration(generation);
           // A damaged record only stops built-in Agent creation; recreating an
           // Agent the user deleted would be worse than creating none.

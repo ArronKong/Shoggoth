@@ -11,7 +11,7 @@ const { CHANNELS, registerDesktopTelemetryIpc } = require("../app/desktop-teleme
 const { createConfigStore } = require("../app/core/config-store");
 const { tempProfile, fakeClock } = require("./helpers/product-telemetry-fixtures.cjs");
 
-function fixture() {
+function fixture(diagnostics = {}) {
   const ipcMain = new EventEmitter();
   const handlers = new Map();
   ipcMain.handle = (channel, handler) => handlers.set(channel, handler);
@@ -20,19 +20,36 @@ function fixture() {
   const state = { visible: true, focused: true, minimized: false, destroyed: false, idle: "active" };
   powerMonitor.getSystemIdleState = () => state.idle;
   const webContents = { mainFrame: { url: "http://127.0.0.1:18888/#/chat" }, isDestroyed: () => state.destroyed };
-  const w = { webContents, isDestroyed: () => state.destroyed, isVisible: () => state.visible,
-    isFocused: () => state.focused, isMinimized: () => state.minimized };
+  const w = Object.assign(new EventEmitter(), { webContents, isDestroyed: () => state.destroyed, isVisible: () => state.visible,
+    isFocused: () => state.focused, isMinimized: () => state.minimized });
   const clock = fakeClock();
   const calls = [], preferenceCalls = [];
   const signalValue = { kind: "activity", collectionEpoch: randomUUID(), payload: {} };
-  const dispose = registerDesktopTelemetryIpc({ ipcMain, powerMonitor, getMainWindow: () => w,
-    getUiOrigin: () => "http://127.0.0.1:18888", now: clock.now,
-    telemetry: { recordSignal(value) { calls.push(value); }, getSettings() { return { enabled: true }; },
+  const { dispose, observeWindow } = registerDesktopTelemetryIpc({ ipcMain, powerMonitor, getMainWindow: () => w,
+    getUiOrigin: () => "http://127.0.0.1:18888", now: clock.now, ...diagnostics,
+    telemetry: { recordActivity() { calls.push("open"); }, recordSignal(value) { calls.push(value); }, getSettings() { return { enabled: true }; },
       setPreference(field, enabled) { preferenceCalls.push([field, enabled]); return { error: null }; } } });
   const trusted = { sender: webContents, senderFrame: webContents.mainFrame };
   const signal = (value = signalValue) => ipcMain.emit(CHANNELS.signal, trusted, value);
-  return { ipcMain, powerMonitor, state, webContents, w, clock, calls, dispose, trusted, signal, signalValue, handlers, preferenceCalls };
+  return { ipcMain, powerMonitor, state, webContents, w, clock, calls, dispose, observeWindow, trusted, signal, signalValue, handlers, preferenceCalls };
 }
+
+test("visible main window counts at attachment and on return without renderer input", () => {
+  const f = fixture();
+  try {
+    f.observeWindow(f.w);
+    assert.deepEqual(f.calls, ["open"]);
+    f.state.visible = false; f.w.emit("focus");
+    f.state.visible = true; f.powerMonitor.emit("suspend"); f.w.emit("show"); f.powerMonitor.emit("resume");
+    f.w.webContents.mainFrame.url = "about:blank"; // A renderer reload has no window-open effect.
+    assert.deepEqual(f.calls, ["open"]);
+    f.w.emit("focus");
+    assert.deepEqual(f.calls, ["open"], "restoring the pre-sleep window is not another open");
+    f.w.emit("blur"); f.w.emit("focus");
+    f.w.emit("closed"); f.w.emit("focus");
+    assert.deepEqual(f.calls, ["open", "open"]);
+  } finally { f.dispose(); }
+});
 
 test("only the current main frame at the exact UI origin can submit an empty signal", () => {
   const f = fixture();
@@ -94,7 +111,39 @@ test("only the trusted visible document can modify boolean preferences", () => {
   } finally { f.dispose(); }
 });
 
-test("the actual preload exposes only the typed signal and preference bridge", () => {
+test("diagnostic export rechecks the main frame after the native dialog and rejects concurrent requests", async () => {
+  const profile = tempProfile();
+  const destination = path.join(profile.root, "chosen.txt");
+  let choose;
+  let dialogs = 0;
+  let reads = 0;
+  const f = fixture({
+    dialog: { showSaveDialog() { dialogs++; return new Promise(resolve => { choose = resolve; }); } },
+    diagnosticSummary() { reads++; return "diagnosis"; },
+  });
+  const save = f.handlers.get(CHANNELS.saveDiagnosticFile);
+  try {
+    assert.equal(await save({ sender: f.webContents, senderFrame: {} }), "failed");
+    assert.equal(await save(f.trusted, destination), "failed");
+    assert.equal(dialogs, 0);
+    const pending = save(f.trusted);
+    assert.equal(await save(f.trusted), "failed");
+    assert.equal(dialogs, 1);
+    const oldFrame = f.webContents.mainFrame;
+    f.webContents.mainFrame = { url: oldFrame.url };
+    choose({ canceled: false, filePath: destination });
+    assert.equal(await pending, "failed");
+    assert.equal(reads, 0);
+    assert.equal(fs.existsSync(destination), false);
+    const next = save({ sender: f.webContents, senderFrame: f.webContents.mainFrame });
+    choose({ canceled: false, filePath: destination });
+    assert.equal(await next, "saved");
+    assert.equal(reads, 1);
+    assert.equal(fs.readFileSync(destination, "utf8"), "diagnosis");
+  } finally { f.dispose(); profile.cleanup(); }
+});
+
+test("the actual preload exposes only the typed signal, preference, and diagnostic bridge", () => {
   let desktop;
   const messages = [];
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../app/preload.js"), "utf8"), {
@@ -105,7 +154,7 @@ test("the actual preload exposes only the typed signal and preference bridge", (
     },
     process: { platform: "linux" }, localStorage: { removeItem() {}, setItem() {} },
   });
-  assert.deepEqual(Object.keys(desktop.productTelemetry), ["record", "getSettings", "setEnabled", "setDetailedEnabled"]);
+  assert.deepEqual(Object.keys(desktop.productTelemetry), ["record", "getSettings", "setEnabled", "saveDiagnosticFile"]);
   desktop.productTelemetry.setEnabled(false);
   desktop.productTelemetry.getSettings();
   assert.deepEqual(messages, [[CHANNELS.setEnabled, false], [CHANNELS.getSettings]]);

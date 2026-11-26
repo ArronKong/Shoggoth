@@ -8,6 +8,7 @@ const HOST_CAPABILITIES = Object.freeze([
   { id: "ui.reveal-item", owner: "ui-process", exposure: "ui-only", hostOp: "reveal" },
   { id: "ui.open-workspace", owner: "ui-process", exposure: "ui-only", hostOp: "openPath" },
   { id: "ui.open-external-link", owner: "ui-process", exposure: "ui-only", hostOp: "openExternal" },
+  { id: "ui.select-google-workspace-client", owner: "ui-process", exposure: "ui-only", hostOp: "selectGoogleWorkspaceClient" },
   { id: "ui.select-skill-package", owner: "ui-process", exposure: "ui-only", hostOp: "selectSkillPackage" },
   { id: "ui.provider-terminal", owner: "ui-process", exposure: "ui-only", hostOp: "runInTerminal" },
   { id: "ui.resolve-cli-version", owner: "ui-process", exposure: "ui-only", hostOp: "resolveCliVersion" },

@@ -21,6 +21,24 @@ const MCP_HELPER_STARTUP_CODES = Object.freeze([
 const MCP_AUTH_STORAGE_CODES = Object.freeze([
   "MCP_HELPER_STORAGE_UNAVAILABLE", "MCP_HELPER_STORAGE_FULL", "MCP_HELPER_CACHE_UNAVAILABLE",
 ]);
+const MCP_DIAGNOSTIC_STAGES = Object.freeze({
+  service: "mcp.service_request",
+  credential: "mcp.credential_read",
+  storage: "mcp.storage_setup",
+  cache: "mcp.cache_setup",
+  crypto: "mcp.crypto",
+  bridge: "mcp.service_bridge",
+});
+// Keep the observed stage across sanitized error wrappers without adding it to
+// the public error object or forwarding a raw exception across IPC.
+const failureStages = new WeakMap();
+function mcpFailureStage(error) { return failureStages.get(error); }
+function markMcpFailureStage(error, cause, stage) {
+  const observed = mcpFailureStage(cause) ?? (Object.hasOwn(MCP_DIAGNOSTIC_STAGES, stage) ? MCP_DIAGNOSTIC_STAGES[stage] : undefined);
+  if (observed) failureStages.set(error, observed);
+  return error;
+}
+
 const FILE_FAILURES = new Set([
   "EACCES", "EPERM", "EIO", "EROFS", "ENOTDIR", "EISDIR", "ELOOP", "EMFILE", "ENFILE",
   "UNSAFE_PATH", "UNSAFE_SYMLINK", "UNSAFE_OWNER", "UNSAFE_PERMISSIONS", "UNSAFE_HARDLINK", "UNSAFE_FILE_CHANGED",
@@ -43,4 +61,5 @@ function mcpAuthStorageFailure(error, { missingIsStorage = false } = {}) {
   return null;
 }
 
-module.exports = { AUTHENTICATION_MESSAGES, MCP_HELPER_STARTUP_CODES, MCP_AUTH_STORAGE_CODES, mcpAuthStorageFailure };
+module.exports = { AUTHENTICATION_MESSAGES, MCP_HELPER_STARTUP_CODES, MCP_AUTH_STORAGE_CODES, mcpAuthStorageFailure,
+  MCP_DIAGNOSTIC_STAGES, mcpFailureStage, markMcpFailureStage };
