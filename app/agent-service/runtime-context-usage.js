@@ -52,8 +52,8 @@ function nativeCompaction(runtime) { return Object.hasOwn(NATIVE_COMPACTION, run
 function selfManagedCompaction(runtime) { return runtime === "antigravity"; }
 function runtimeContextCapabilities(runtime) {
   return validateRuntimeContextCapabilities({
-    "context.usage.exact": runtime === "codex" || runtime === "grok-build",
-    "context.usage.estimated": ["pi", "claude-code", "deepseek-harness"].includes(runtime),
+    "context.usage.exact": ["codex", "grok-build", "antigravity"].includes(runtime),
+    "context.usage.estimated": ["pi", "claude-code", "deepseek-harness", "opencode", "grok-build"].includes(runtime),
     "context.compact.native": nativeCompaction(runtime) !== null,
     // Capability describes what the CLI supports, not a guarantee that the
     // user's CLI configuration currently enables automatic compaction.
@@ -72,14 +72,17 @@ function codexRuntimeContextUsage(sessionId, event, observedAt = Date.now()) {
 }
 function piRuntimeContextUsage(sessionId, stats, contextWindow, observedAt = Date.now(), messages = null) {
   // stats.tokens is cumulative billing usage in both supported Pi generations.
-  // Only newer versions expose current contextUsage; older versions stay unknown.
+  // Older versions omit contextUsage. A reported null token count marks the
+  // interval after compaction before the first usable assistant response.
   const current = stats?.contextUsage;
-  const usedTokens = integer(current?.tokens) ? current.tokens : Array.isArray(messages)
+  const estimateFromMessages = current?.tokens === undefined && Array.isArray(messages);
+  const usedTokens = integer(current?.tokens) ? current.tokens : estimateFromMessages
     ? Math.ceil(Buffer.byteLength(JSON.stringify(messages), "utf8") / 3) : null;
   return validateRuntimeContextUsage({ runtimeSessionId: sessionId, usedTokens,
-    contextWindow: integer(contextWindow, 1) ? contextWindow : null,
+    contextWindow: integer(contextWindow, 1) ? contextWindow
+      : integer(current?.contextWindow, 1) ? current.contextWindow : null,
     quality: usedTokens === null ? "unknown" : "estimated",
-    source: !integer(current?.tokens) && Array.isArray(messages) ? "estimate" : "session_stats", observedAt });
+    source: estimateFromMessages ? "estimate" : "session_stats", observedAt });
 }
 
 function claudeRuntimeContextUsage(sessionId, usage, contextWindow, observedAt = Date.now()) {

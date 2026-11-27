@@ -328,6 +328,11 @@ function validRuntimeInstructionValue(value, nullable = false) {
     && value.isWellFormed() && !value.includes("\0");
 }
 
+// Per-turn instruction for the same chat-only rule (see turnDeveloperInstructions).
+function backgroundTaskInstructions(context) {
+  return context?.source === "chat" && BACKGROUND_TASK_RUNTIMES.has(context.runtime) ? [BACKGROUND_TASK_DISPATCH_INSTRUCTION] : [];
+}
+
 function shoggothProductDeveloperInstructions(context = null, { includeWorkSource = true } = {}) {
   if (context === null) return SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS;
   if (!context || typeof context !== "object" || Array.isArray(context)
@@ -353,7 +358,9 @@ function shoggothProductDeveloperInstructions(context = null, { includeWorkSourc
     ...(context.runtime === "codex" ? [
       "In the Codex runtime, never call the unnamespaced Codex request_user_input tool; it is unavailable in the runtime's Default mode. Use the namespaced Shoggoth product tool instead.",
     ] : []),
-    ...(context.source === "chat" && BACKGROUND_TASK_RUNTIMES.has(context.runtime) ? [BACKGROUND_TASK_DISPATCH_INSTRUCTION] : []),
+    // The session-stable copy omits it: a source-dependent line would make the
+    // policy differ between chat and proactive turns of one native thread.
+    ...(includeWorkSource ? backgroundTaskInstructions(context) : []),
     ...(includeWorkSource ? [`Trusted current work source: ${trusted}`] : []),
   ].join("\n");
 }
@@ -364,6 +371,7 @@ module.exports = {
   SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS,
   SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS,
   BACKGROUND_TASK_DISPATCH_INSTRUCTION,
+  backgroundTaskInstructions,
   shoggothProductDeveloperInstructions,
   productToolDescription,
   productToolAnnotations,

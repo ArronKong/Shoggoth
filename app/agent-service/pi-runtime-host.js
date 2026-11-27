@@ -284,7 +284,10 @@ class PiRuntimeHost {
     if (!this.paths?.stateDir || !this.paths?.trustedRoot) {
       throw hostError("PI_HOST_OPTIONS_INVALID", "Pi host paths are invalid");
     }
-    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
+    // Hosts are created per WorkRun: the shared store keeps what each native
+    // session already holds across Runs and restarts.
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)({
+      store: options.promptLedgerStore ?? null, scope: "pi" });
     this.binding = runtimeBinding(options.runtimeBinding || {
       runtime: PI_RUNTIME,
       runtimeProfileId: options.runtimeProfileId,
@@ -1131,16 +1134,27 @@ class PiRuntimeHost {
       active.commandRpc = true;
       let text;
       if (command.command.name === "compact") {
-        const result = await submit(() => {
-          this._acceptActive(active);
-          return active.process.request("compact", {
-            ...(command.args ? { customInstructions: command.args } : {}),
-          }, { timeoutMs: this.promptTimeoutMs });
-        });
-        text = `Pi context compacted${Number.isSafeInteger(result?.tokensBefore) ? ` (${result.tokensBefore} tokens before)` : ""}.`;
-        this._publish({ known: true, type: "context_compacted", sessionId: active.sessionId, turnId: active.turnId,
-          contextUsage: unknownRuntimeContextUsage(active.sessionId, { contextWindow: active.contextWindow,
-            observedAt: this.now(), source: "session_stats" }) });
+        let result;
+        try {
+          result = await submit(() => {
+            this._acceptActive(active);
+            return active.process.request("compact", {
+              ...(command.args ? { customInstructions: command.args } : {}),
+            }, { timeoutMs: this.promptTimeoutMs });
+          });
+        } catch (error) {
+          // Pi declines to compact a short session. That is an answer, not a
+          // failed turn: the session stays as it is and nothing was compacted.
+          if (error?.code !== "PI_COMPACT_NOTHING_TO_COMPACT") throw error;
+          result = null;
+        }
+        if (result === null) text = "Pi context is still short; there was nothing to compact.";
+        else {
+          text = `Pi context compacted${Number.isSafeInteger(result?.tokensBefore) ? ` (${result.tokensBefore} tokens before)` : ""}.`;
+          this._publish({ known: true, type: "context_compacted", sessionId: active.sessionId, turnId: active.turnId,
+            contextUsage: unknownRuntimeContextUsage(active.sessionId, { contextWindow: active.contextWindow,
+              observedAt: this.now(), source: "session_stats" }) });
+        }
       } else if (command.command.name === "thinking") {
         active.promptDispatched = true;
         this._acceptActive(active);
@@ -1163,7 +1177,7 @@ class PiRuntimeHost {
       const current = await active.process.request("get_state", {});
       if (current.sessionId !== active.remoteSessionId) throw hostError("PI_RPC_STATE_INVALID", "Pi command changed the session binding");
       this._recordSessionFile(active.sessionId, current.sessionFile);
-      await this._observeContextUsage(active);
+      await this._observeContextUsage(active, current);
       this._finishActive(active, {
         status: "completed", errorCode: null, texts: [text], usage: emptyPiUsage(),
         responseId: `pi-command-${active.turnId}`, provider: null, model: null,
@@ -1283,7 +1297,7 @@ class PiRuntimeHost {
     }
   }
 
-  async _observeContextUsage(active, messages = null) {
+  async _observeContextUsage(active, state, messages = null) {
     if (!active.observeContextUsage) return;
     let stats = null;
     try {
@@ -1291,8 +1305,10 @@ class PiRuntimeHost {
       if (stats?.sessionId !== undefined && stats.sessionId !== active.remoteSessionId) stats = null;
     } catch { /* Context observations cannot turn a completed task into a failure. */ }
     if (active.settled) return;
+    const window = state.model?.contextWindow;
+    const contextWindow = Number.isSafeInteger(window) && window > 0 ? window : active.contextWindow;
     this._publish({ known: true, type: "context_usage", sessionId: active.sessionId, turnId: active.turnId,
-      contextUsage: piRuntimeContextUsage(active.sessionId, stats, active.contextWindow, this.now(), messages) });
+      contextUsage: piRuntimeContextUsage(active.sessionId, stats, contextWindow, this.now(), messages) });
   }
 
   async _finishSettled(active) {
@@ -1308,7 +1324,7 @@ class PiRuntimeHost {
         throw hostError("PI_RPC_STATE_INVALID", "Pi terminal state is invalid");
       }
       this._recordSessionFile(active.sessionId, state.sessionFile);
-      await this._observeContextUsage(active, payload.messages);
+      await this._observeContextUsage(active, state, payload.messages);
       const turnMessages = payload.messages.slice(active.baselineMessageCount);
       const assistants = turnMessages.filter((message) => message?.role === "assistant");
       let usage = emptyPiUsage();
@@ -2076,6 +2092,7 @@ class PiRuntimeHost {
     const delivery = require("./native-instruction-delivery");
     const { blocks, commit } = delivery.promptBlocks(ledger, sessionId, {
       context: typeof input.context === "string" ? input.context : "",
+      contextIndex: input.contextIndex ?? null,
       run: delivery.splitTurnInstructions(delivery.turnInstructions(input)).run,
     });
     blocks.push(`CURRENT USER REQUEST\n${input.prompt}`);

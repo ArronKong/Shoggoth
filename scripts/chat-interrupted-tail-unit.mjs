@@ -49,13 +49,20 @@ async function fixture(status, options = {}) {
   const pendingThinkingRef = { current: new Map([[key, "original thought"], [other, "other thought"]]) };
   const pendingPlanRef = { current: new Map() }, progressCardsRef = { current: new Map() };
   const pendingPrompts = new Map([[key, [{ requestId: "old-request" }]]]);
-  const inFlight = new Set([key, other]), historyLoads = [], requests = [], events = [];
+  const inFlight = new Set([key, other]), historyLoads = [], requests = [], events = [], telemetryResults = [];
   const context = {
     withoutPlanSteps, classifyChatSendObservation,
     normalize: raw => ({ role: raw.role, parts: raw.content }),
     readPendingTrackedSends: () => records, backendOfSession: () => "shoggoth", agentOf: () => "fixture",
-    sendObservationEpochRef: { current: new Map() }, terminalObservedSendRef: { current: new Map() },
-    pendingChatSendStore: { clearTerminalObservation: () => true }, pendingSendDraftRef: { current: new Map() },
+    sendObservationEpochRef: { current: new Map() }, pendingReceiptReadsRef: { current: new Map() },
+    terminalObservedSendRef: { current: new Map() },
+    pendingChatSendStore: { clearTerminalObservation: () => true, telemetryId: () => "saved-statistics-id" },
+    pendingSendDraftRef: { current: new Map() }, telemetrySends: new Map(),
+    restoreChatTelemetryOperation: id => { assert.equal(id, "saved-statistics-id"); return {
+      finish: outcome => telemetryResults.push(outcome),
+    }; },
+    runtimeTelemetryType: () => "unknown",
+    nativeStopsRef: { current: new Map() }, clearNativeStop: () => {},
     liveTimelinesRef, liveToolsRef, pendingThinkingRef, pendingPlanRef, progressCardsRef,
     liveTextRef: { current: new Map([[key, "partial"]]) }, steerTextBaselineRef: { current: new Map() },
     activeKeyRef: { current: options.background ? other : key }, inFlightRef: { current: inFlight },
@@ -90,7 +97,7 @@ async function fixture(status, options = {}) {
   vm.runInNewContext(compiled, context);
   const original = plain(messages);
   await context.verify(key);
-  return { context, messages, original, records, inFlight, historyLoads, requests, events,
+  return { context, messages, original, records, inFlight, historyLoads, requests, events, telemetryResults,
     pendingPrompts, liveToolsRef, pendingThinkingRef };
 }
 
@@ -111,6 +118,7 @@ for (const status of ["interrupted", "canceled", "failed", "completed"]) {
     assert.equal(f.pendingThinkingRef.current.get(other), "other thought");
     assert.equal(f.inFlight.has(key), false); assert.equal(f.inFlight.has(other), true);
     assert.equal(f.records.length, 0);
+    assert.deepEqual(f.telemetryResults, [status === "completed" ? "success" : status === "canceled" ? "canceled" : "error"]);
     assert.equal(f.requests.some(request => request.method === "chat.send"), false, "recovery never replays the user message");
     assert.equal(f.requests.some(request => request.method === "chat.abort"), false, "display cleanup never aborts another turn");
     const frozen = JSON.stringify(f.messages[1]);
@@ -133,6 +141,7 @@ for (const status of ["running", "waiting_input", "waiting_approval", "starting"
   assert.deepEqual(plain(f.messages), f.original, "a live authoritative receipt must retain the current loading bubble");
   assert.equal(f.inFlight.has(key), true); assert.equal(f.records.length, 1);
   assert.equal(f.events.length, 0);
+  assert.deepEqual(f.telemetryResults, []);
 }
 const unresolved = await fixture(null, { unresolved: true });
 assert.deepEqual(plain(unresolved.messages), unresolved.original);

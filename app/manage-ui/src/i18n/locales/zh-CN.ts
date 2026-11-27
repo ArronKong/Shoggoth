@@ -3721,6 +3721,7 @@ const zhCN = {
     compactFailed: "压缩失败：{{msg}}",
     compactingCtx: "正在压缩上下文…",
     compactedCtx: "上下文压缩完成",
+    renewedCtx: "已换新线程继续，带上了最近的对话",
     recallingMemory: "正在回忆…",
     recalledMemory: "回忆完成",
     promptApproval: "命令审批",
@@ -3886,13 +3887,14 @@ const zhCN = {
     commandNoReply: "（命令已发送，但此后端没有返回文字回复）",
     sendFailed: "发送失败：{{msg}}",
     // 已知网关/模型错误串的显示层翻译（lib/gatewayErrors.ts 模式匹配；hover 可见英文原文；
-    // 只翻全串固定文案，provider 具体错误原样保留，原文链接自动追加）
+    // 翻译固定文案，保留上游诊断信息）
     gwErrors: {
       regionUnsupported: "Google 模型接口不支持当前请求所在地区，本次任务未完成；请检查服务的地区支持范围和当前网络出口",
       checkpointFailed: "上下文压缩检查点失败",
       runtimeFailureNoDetails: "Antigravity 本次任务执行失败，上游未提供可展示的具体原因；未自动重放，请查看原生会话后决定是否重试",
       runtimeFailureSummary: "{{summary}}",
       providerReason: "上游原因：{{detail}}",
+      insufficientBalance: "余额不足",
       startupDetail: "启动详情：{{detail}}",
       taskFailedCode: "Shoggoth 任务未完成 ({{code}})",
       requestFailedCode: "Shoggoth 请求失败 ({{code}})",
@@ -4122,6 +4124,7 @@ const zhCN = {
     hiddenN: "已隐藏 {{count}} 条",
     undo: "撤销",
     retry: "重试该轮（重发上一条消息）",
+    compactContext: "压缩上下文",
     retryNoSource: "找不到可重试的上一条消息",
     toolErrorNamed: "{{tool}} · 失败",
     toolError: "工具失败",
@@ -4893,11 +4896,6 @@ const zhCN = {
     oauthQuotaNotIntegrated: "此运行时的账号额度暂未接入。",
     oauthQuotaUnsupported: "当前登录方式未提供可读取的账号额度。",
     oauthQuotaUnavailable: "暂时无法读取账号额度，再次悬停可重试。",
-    oauthQuotaAntigravityCliSource: "来自 Antigravity CLI 登录的账号",
-    oauthQuotaAntigravityCliMissing: "安装 Antigravity CLI（agy）后可读取额度。",
-    oauthQuotaAntigravityCliUpdateRequired: "更新 Antigravity CLI（agy）后可读取额度。",
-    oauthQuotaAntigravityCliSignInRequired: "在 Antigravity CLI（agy）中登录后可读取额度。",
-    oauthQuotaAntigravityCliPermissionDenied: "Antigravity 拒绝了当前 CLI 账号的额度查询。",
     oauthQuotaLoading: "正在读取账号额度…",
     oauthQuotaWindow: "额度周期",
     oauthQuotaRemaining: "剩余 {{percent}}",

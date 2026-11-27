@@ -24,6 +24,8 @@
     "RUNTIME_COMPACTION_TIMEOUT": "对话上下文压缩超时。请在当前聊天输入 /compact 并发送，等待压缩成功后，再重新发送刚才的消息。",
     "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN": "暂时无法确认上下文压缩是否完成。请先确认压缩任务已结束，再在当前聊天发送 /compact；压缩成功后，再重新发送刚才的消息。",
     "RUNTIME_COMPACTION_UNSUPPORTED": "当前运行环境不支持对话压缩。请新建聊天继续，或切换到支持压缩的运行环境。",
+    "CONTEXT_COMPACTION_REQUIRED": "对话上下文已满，自动整理没有完成。请点击「压缩上下文」，或在当前聊天发送 /compact，完成后再重新发送刚才的消息；若仍失败，请新建会话继续。",
+    "CONTEXT_INPUT_TOO_LARGE": "这条消息加上必需的指令已超过当前模型的上下文上限。请缩短内容，或分成几条发送。",
     "RUNTIME_PERMISSION_REQUIRED": "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试",
     "RUNTIME_WORKSPACE_UNAVAILABLE": "会话工作目录不存在或不可访问；请恢复该目录或使用默认工作区新建会话，本次任务未发送",
     "CRON_AUTHORIZATION_DENIED": "定时任务遇到授权范围外的操作，未能给出完成结果。本轮已结束并释放执行名额，请查看任务记录",
@@ -238,7 +240,8 @@
     "INSPIRATION_ATTACHMENT_UNSUPPORTED": "灵感会话暂不支持附件",
     "ATTACHMENT_UPLOAD_CANCELED": "附件上传已取消",
     "PLUGIN_PLATFORM_RETIRED": "旧插件选择已停用，请重新选择连接器账号",
-    "OPEN_CONNECTOR_RETIRED": "OpenConnector 已退役，不能发送旧账号选择"
+    "OPEN_CONNECTOR_RETIRED": "OpenConnector 已退役，不能发送旧账号选择",
+    "WORK_RUN_SEND_REJECTED": "这条消息没有被受理，请重新发送"
   },
   "renderer": {
     "CHAT_CONTENT_RECOVERY_FAILED": "聊天内容暂时无法恢复，请重新加载会话",

@@ -58,6 +58,10 @@ for (const reason of ["Invalid API key for project example; request id abc", "Yo
   assert.equal(translate(reason, () => "统一文案"), reason);
 }
 assert.equal(translate("401 Invalid API Key", () => "密钥无效"), "密钥无效");
+assert.equal(translate("Insufficient Balance", tZh), "余额不足");
+assert.equal(translate("Insufficient Balance", tEn), "Insufficient Balance");
+const projectBalanceError = "错误：本次任务执行失败，未自动重放\n上游原因：Insufficient Balance for project example.\nHTTP 402 · QUOTA\n错误码：RUNTIME_TURN_FAILED";
+assert.equal(translate(projectBalanceError, tZh), projectBalanceError);
 const key = "agent:shoggoth-default:failure-fixture";
 const englishRegion = "Google's model API does not support the region of this request. The task did not complete; check the service's supported regions and your current network egress.";
 const englishMissing = "Antigravity failed to complete this task. The provider did not supply displayable error details. The task was not replayed automatically; check the native session before deciding whether to retry.";
@@ -82,17 +86,21 @@ for (const [code, expectedKey] of Object.entries({
   assert.equal(translate(`${message}; provider request id fixture`, () => "lost"), `${message}; provider request id fixture`);
 }
 const cases = [];
-for (const [code, failure, englishSummary, englishDetail, chineseSummary] of [
+const requestIdSuffix = " (request_id: balance-fixture)";
+for (const [code, failure, englishSummary, { englishDetail, chineseSummary, chineseDetail } = {}] of [
   ["ANTIGRAVITY_REGION_UNSUPPORTED", { message: "User location is not supported for the API use.", httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" }, englishRegion],
+  ["RUNTIME_TURN_FAILED", { message: `Insufficient Balance${requestIdSuffix}`, httpStatus: 402, upstreamCode: "QUOTA" },
+    "The task failed and was not replayed automatically. See the provider details below.", { chineseDetail: `余额不足${requestIdSuffix}` }],
   ["RUNTIME_QUOTA_EXHAUSTED", { message: "You exceeded your current quota; daily limit 100. Contact the project administrator.", httpStatus: 429, upstreamCode: "insufficient_quota" }, "The account's quota is exhausted and the request has stopped. Wait for the quota to reset, add quota, or switch accounts before retrying."],
   ["RUNTIME_QUOTA_EXHAUSTED", { message: "Free usage limit reached", upstreamCode: "FreeUsageLimitError" },
     "The free usage limit has been reached. Switch models or wait for the limit to reset before retrying.",
-    undefined, "免费用量已达上限。请更换模型，或等额度恢复后重试。"],
+    { chineseSummary: "免费用量已达上限。请更换模型，或等额度恢复后重试。" }],
   ["RUNTIME_UPSTREAM_UNAVAILABLE", { message: "Model service temporarily unavailable.", httpStatus: 502 },
     "The model provider is unavailable. Try again later or choose another available model."],
   ["ANTIGRAVITY_TURN_FAILED", { message: "Project verification required. Invalid API key for this project.", httpStatus: 403, upstreamCode: "project_verification_required" }, "The task failed and was not replayed automatically. See the provider details below."],
   ["ANTIGRAVITY_TURN_FAILED", null, englishMissing],
-  ["RUNTIME_AUTH_REQUIRED", { message: "Invalid credentials.\nAuthorization: Bearer fixture-secret\nContact user@example.com\nConfig /Users/alice/private.json\nURL http://[bad]", httpStatus: 401 }, "Agent authentication failed. Check the account under Models or sign in again before retrying.", "Invalid credentials.\n[REDACTED]\nContact [EMAIL REDACTED]\nConfig [PATH REDACTED]\nURL [URL REDACTED]"],
+  ["RUNTIME_AUTH_REQUIRED", { message: "Invalid credentials.\nAuthorization: Bearer fixture-secret\nContact user@example.com\nConfig /Users/alice/private.json\nURL http://[bad]", httpStatus: 401 }, "Agent authentication failed. Check the account under Models or sign in again before retrying.",
+    { englishDetail: "Invalid credentials.\n[REDACTED]\nContact [EMAIL REDACTED]\nConfig [PATH REDACTED]\nURL [URL REDACTED]" }],
   ["ANTIGRAVITY_REGION_UNSUPPORTED", null, englishRegion],
   ["RUNTIME_QUOTA_EXHAUSTED", null, "The account's quota is exhausted and the request has stopped. Wait for the quota to reset, add quota, or switch accounts before retrying."],
   ["RUNTIME_AUTH_REQUIRED", null, "Agent authentication failed. Check the account under Models or sign in again before retrying."],
@@ -123,8 +131,9 @@ for (const [code, failure, englishSummary, englishDetail, chineseSummary] of [
   const status = failure ? [failure.httpStatus ? `HTTP ${failure.httpStatus}` : null, failure.upstreamCode].filter(Boolean).join(" · ") : "";
   const detailLabel = code === "PI_TOOL_DESCRIPTION_TOO_LARGE" ? "Startup details" : "Provider error";
   const expectedEnglish = `Error: ${englishSummary}${failure ? `\n${detailLabel}: ${englishDetail || failure.message}${status ? `\n${status}` : ""}\nError code: ${code}` : ""}`;
-  const expectedChinese = chineseSummary
-    ? history.content[0].text.replace(catalog.runtime[code], chineseSummary) : history.content[0].text;
+  let expectedChinese = history.content[0].text;
+  if (chineseSummary) expectedChinese = expectedChinese.replace(catalog.runtime[code], chineseSummary);
+  if (chineseDetail) expectedChinese = expectedChinese.replace(failure.message, chineseDetail);
   assert.equal(translate(history.content[0].text, tEn), expectedEnglish);
   assert.equal(translate(history.content[0].text, tZh), expectedChinese);
   const execution = { id: runId, ideaId: 'error-idea', runId, profileId: 'fixture', agentId: 'shoggoth-default',

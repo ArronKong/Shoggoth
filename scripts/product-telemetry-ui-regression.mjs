@@ -10,6 +10,7 @@ const require = createRequire(path.join(root, "app/manage-ui/package.json"));
 const ts = require("typescript");
 const catalog = require(path.join(root, "app/core/data/product-telemetry-catalog.json"));
 const source = fs.readFileSync(path.join(root, "app/manage-ui/src/lib/productTelemetry.ts"), "utf8");
+const storageSource = fs.readFileSync(path.join(root, "app/manage-ui/src/lib/chatTelemetryStorage.ts"), "utf8");
 const clientSource = fs.readFileSync(path.join(root, "app/manage-ui/src/api/client.ts"), "utf8");
 const clientAst = ts.createSourceFile("client.ts", clientSource, ts.ScriptTarget.Latest, true);
 const bridgeFunction = clientAst.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "getDesktopProductTelemetry");
@@ -18,7 +19,7 @@ const transpile = text => ts.transpileModule(text, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
 } }).outputText;
 
-async function fixture(desktop = true, detailed = true) {
+async function fixture(desktop = true, detailed = true, installListener = true) {
   let at = Date.parse("2026-09-10T23:59:59.999Z");
   let mono = 0;
   let focused = true;
@@ -45,7 +46,9 @@ async function fixture(desktop = true, detailed = true) {
     settings = next;
     return { error: null, settings };
   };
+  const storage = new Map();
   const window = { location: { hash: "#/chat" }, addEventListener() {}, removeEventListener() {},
+    localStorage: { removeItem: key => storage.delete(key) },
     ...(desktop ? { openclawDesktop: { productTelemetry: {
       record: value => calls.push(JSON.parse(JSON.stringify(value))),
       getSettings: async () => settings,
@@ -56,14 +59,17 @@ async function fixture(desktop = true, detailed = true) {
     crypto: { randomUUID: () => { uuidCalls++; return randomUUID(); } } };
   const clientExports = {};
   vm.runInNewContext(transpile(bridgeFunction.getText(clientAst)), { ...globals, exports: clientExports });
+  const telemetryStorage = {};
+  vm.runInNewContext(transpile(storageSource), { ...globals, exports: telemetryStorage });
   const helpers = {};
   vm.runInNewContext(transpile(source), { ...globals, exports: helpers, require(id) {
     if (id === "../api/client") return clientExports;
+    if (id === "./chatTelemetryStorage") return telemetryStorage;
     if (id === "react") return {};
     assert.equal(id, "../../../core/data/product-telemetry-catalog.json");
     return catalog;
   } });
-  const dispose = helpers.installProductActivityListener();
+  const dispose = installListener ? helpers.installProductActivityListener() : () => {};
   await new Promise(resolve => setImmediate(resolve));
   const emit = (type, options = {}) => {
     const event = { type, isTrusted: true, target: new Element(), ...options };
@@ -72,7 +78,7 @@ async function fixture(desktop = true, detailed = true) {
     }
     listeners.get(type)?.(event);
   };
-  return { document, window, listeners, dispose, emit, Element, calls, helpers, uuidCalls: () => uuidCalls,
+  return { document, window, listeners, dispose, emit, Element, calls, helpers, storage, telemetryStorage, uuidCalls: () => uuidCalls,
     advance(ms) { at += ms; mono += ms; }, focus(value) { focused = value; } };
 }
 
@@ -111,7 +117,11 @@ assert.deepEqual(f.calls.at(-1).payload, {});
 assert.equal(f.calls.at(-1).kind, "completed_background_task_opened");
 const operation = f.helpers.startTelemetryOperation("chat_send", "shoggoth");
 assert.ok(operation);
+assert.equal(operation.recoveryId, f.calls.at(-1).payload.operationId);
+f.storage.set(f.telemetryStorage.PENDING_CHAT_TELEMETRY_KEY, "a saved link");
 await f.helpers.changeTelemetrySetting(false);
+assert.equal(f.storage.has(f.telemetryStorage.PENDING_CHAT_TELEMETRY_KEY), false);
+assert.equal(operation.recoveryId, undefined);
 const previous = f.calls.length, uuidCalls = f.uuidCalls();
 assert.equal(f.helpers.startTelemetryOperation("chat_send"), undefined);
 assert.equal(f.uuidCalls(), uuidCalls);
@@ -128,6 +138,14 @@ assert.equal(JSON.stringify(f.calls).includes("SECRET_CANARY"), false);
 assert.deepEqual(JSON.parse(JSON.stringify(f.helpers.telemetryModel("PRIVATE_PROVIDER", "SECRET_CANARY"))),
   { providerId: "custom", modelId: "custom" });
 f.dispose();
+const cold = await fixture(true, true, false);
+const restoredId = randomUUID();
+const restored = cold.helpers.restoreChatTelemetryOperation(restoredId);
+restored.finish("success");
+restored.finish("success");
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(cold.calls.map(row => [row.kind, row.payload.operationId, row.payload.outcome]),
+  [["feature_end", restoredId, "success"]], "a confirmed terminal before settings load completes the original attempt");
 const legacy = await fixture(true, false);
 legacy.emit("wheel"); legacy.helpers.recordCompletedBackgroundTaskOpened();
 assert.deepEqual(legacy.calls.map(row => row.kind), ["activity"]);

@@ -1,6 +1,6 @@
 "use strict";
 
-const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
+const { MAX_RUNTIME_COMMANDS, normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
 const { serviceError } = require("./security");
 
 // Terminal-owned commands are NOT advertised by app-server/ACP/SDK command APIs.
@@ -300,7 +300,11 @@ function mergeNativeCommands(runtime, live = [], reference = cliReferenceCommand
   })));
   // An alias in the authoritative catalog must not be stolen by a fallback name.
   const claimed = new Set(dynamic.flatMap((command) => [command.name, ...command.aliases]));
-  const fallback = reference.filter((command) => !claimed.has(command.name)).map((command) => ({
+  // Live catalogs grow with the user's installed skills. Reference rows only
+  // fill the remaining room, so a large live catalog never voids the whole
+  // list (and with it /compact and every other runtime command).
+  const room = Math.max(0, MAX_RUNTIME_COMMANDS - dynamic.length);
+  const fallback = reference.filter((command) => !claimed.has(command.name)).slice(0, room).map((command) => ({
     ...command, aliases: command.aliases.filter((alias) => !claimed.has(alias)),
   }));
   return normalizeRuntimeCommands([...dynamic, ...fallback]);

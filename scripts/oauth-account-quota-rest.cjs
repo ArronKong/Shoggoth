@@ -83,13 +83,12 @@ async function run() {
     const native = fixtureCodex(schema, "native-private-id", 61, resetsAt);
     const openClaw = fixtureOpenClaw(resetsAt * 1_000);
     let antigravityReads = 0;
-    let antigravityQuota = { status: "available", checkedAt: Date.now(), windows: [
-      { label: "Gemini Models", durationMinutes: 300, usedPercent: 25, resetsAt: resetsAt * 1_000 },
-    ] };
     const antigravityHost = { controlInstance: true, terminated: new Promise(() => {}),
       subscribe: () => () => {},
       authenticationState: async () => ({ authenticated: true, credentialPresent: true }),
-      accountQuotaRead: async () => { antigravityReads += 1; return antigravityQuota; },
+      modelsList: async () => ({ data: [{ model: "fixture-model", displayName: "Fixture Model",
+        description: "", isDefault: true, hidden: false }], nextCursor: null }),
+      accountQuotaRead: async () => { antigravityReads += 1; return { status: "unsupported" }; },
     };
     const antigravityAdapter = new AntigravityRuntimeAdapter({ runtimePool: {
       get: async () => antigravityHost, stop: async () => {}, stopAll: async () => {},
@@ -151,15 +150,14 @@ async function run() {
     assert.equal(nativeSnapshot.accountName, "native@example.test");
     assert.equal(nativeSnapshot.windows[0].usedPercent, 61);
 
-    const antigravity = await nativeAccount(ANTIGRAVITY);
+    assert.equal(await nativeAccount(ANTIGRAVITY, true), undefined);
+    const antigravity = await nativeAccount(ANTIGRAVITY, false);
     assert.equal(antigravity.status.loggedIn, true);
-    assert.equal(antigravity.canReadQuota, true);
-    assert.equal(antigravity.quotaSource, "antigravity-cli");
+    assert.equal(antigravity.canReadQuota, undefined);
+    assert.equal(antigravity.quotaSource, undefined);
+    assert.equal(antigravity.cachedQuota, undefined);
+    assert.deepEqual(await (await nativeQuota(ANTIGRAVITY)).json(), { status: "unsupported" });
     assert.equal(antigravityReads, 0);
-    assert.deepEqual(await (await nativeQuota(ANTIGRAVITY)).json(), antigravityQuota);
-    assert.equal((await nativeAccount(ANTIGRAVITY)).cachedQuota, undefined);
-    antigravityQuota = { status: "unavailable", reason: "antigravity-cli-sign-in-required" };
-    assert.deepEqual(await (await nativeQuota(ANTIGRAVITY)).json(), antigravityQuota);
 
     const cacheFile = path.join(userDataRoot, "ui-state", "oauth-account-quotas.json");
     assert.equal(fs.statSync(cacheFile).mode & 0o777, 0o600);

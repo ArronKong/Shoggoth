@@ -26,6 +26,7 @@ const TOOL_DEFS = {
   "quark-drive": require("./quark-skill-runtime").TOOL_DEFS,
   "baidu-maps": require("./baidu-map-skill-runtime").TOOL_DEFS,
   "agently-mail": require("./agently-mail-skill-runtime").TOOL_DEFS,
+  obsidian: require("./obsidian-skill-runtime").TOOL_DEFS,
   "rollinggo-hotel": require("./rollinggo-skill-runtime").TOOL_DEFS,
   fliggy: [["travel_search", "Search official travel products, flights, hotels and attractions. Trial access may return limited results.", object({ query: string(2000) }, ["query"])]],
   weread: [
@@ -144,7 +145,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     name === "account_bind" ? "Finish DoorDash PKCE authorization using the full callback URL entered in the connector's private window. Never ask the user to paste this URL or a token in chat." : description,
     name === "account_bind" ? object({ code: string(8192) }, ["code"]) : schema, write]) : ACCOUNT_DEFS;
   const isAgentMail = providerId === "agently-mail";
-  const supportedAccounts = providerId === "baidu-maps" ? accountDefinitions.filter(([name]) => name === "account_status")
+  const supportedAccounts = ["baidu-maps", "obsidian"].includes(providerId) ? accountDefinitions.filter(([name]) => name === "account_status")
     : isAgentMail ? accountDefinitions.filter(([name]) => name !== "account_bind") : accountDefinitions;
   const definitions = [
     ...supportedAccounts,
@@ -288,6 +289,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
 
   const shopAuth = providerId === "shop" ? require("./shop-skill-auth").createShopAuth({ root, home, fetch, now }) : null;
   const baidu = providerId === "baidu-maps" ? require("./baidu-map-skill-runtime").createBaiduMapAdapter({ fetch, env, account, now }) : null;
+  const obsidian = providerId === "obsidian" ? require("./obsidian-skill-runtime").createObsidianAdapter({ home, account, validate, assertManagedHome, parseJson, spawnImpl }) : null;
   const agentlyMail = isAgentMail ? require("./agently-mail-skill-runtime").createAgentlyMailAdapter({ root, home, run, now, account, guardedWrite, stopActiveChildren, parseJson }) : null;
   const quark = providerId === "quark-drive" ? require("./quark-skill-runtime").createQuarkAdapter({ root, home, run, now, account, guardedWrite }) : null;
   const rollinggo = providerId === "rollinggo-hotel" ? require("./rollinggo-skill-runtime").createRollingGoAdapter({ root, home, run, now, account, guardedWrite, stopActiveChildren, parseJson }) : null;
@@ -297,6 +299,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     rememberSecret: value => { if (!secrets.includes(value)) secrets.push(value); }, run: (args, options) => run("runtime/dd-cli", args, { ...options, native: true }) }) : null;
   async function accountAction(action, args, signal) {
     if (baidu) return baidu.account(action, args, signal);
+    if (obsidian) return obsidian.account(action, args, signal);
     if (rollinggo) return rollinggo.account(action, args, signal);
     if (quark) return quark.account(action, args, signal);
     if (doordash) return doordash.account(action, args, signal);
@@ -381,6 +384,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     if (name.startsWith("account_")) return accountAction(name.slice(8), args, signal);
     let result;
     if (baidu) result = await baidu.call(name, args, signal);
+    else if (obsidian) result = await obsidian.call(name, args, signal);
     else if (doordash) result = await doordash.call(name, args, { signal });
     else if (shop) result = await shop.call(name, args, { signal });
     else if (quark) result = await quark.execute(name, args, signal);
@@ -432,6 +436,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     async close() {
       closed = true;
       baidu?.close();
+      await obsidian?.close();
       await stopActiveChildren();
       authorization = null;
       children.clear(); previews.clear(); payments.clear();

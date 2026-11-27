@@ -1,6 +1,6 @@
 "use strict";
 
-const OFFICIAL_SKILL_IDS = Object.freeze(["doordash", "shop", "quark-drive", "rollinggo-hotel", "fliggy", "meituan-paotui", "weread", "alipay", "baidu-maps", "agently-mail"]);
+const OFFICIAL_SKILL_IDS = Object.freeze(["doordash", "shop", "quark-drive", "rollinggo-hotel", "fliggy", "meituan-paotui", "weread", "alipay", "baidu-maps", "agently-mail", "obsidian"]);
 const OFFICIAL_SKILL_METHODS = Object.freeze(["connector.official.status", "connector.official.install", "connector.official.remove", "connector.official.account"]);
 const OFFICIAL_SKILL_PUBLIC_MESSAGES = Object.freeze({
   OFFICIAL_SKILL_INVALID_ARGUMENT: "官方连接器参数无效",
@@ -36,6 +36,9 @@ const OFFICIAL_SKILL_PUBLIC_MESSAGES = Object.freeze({
   OFFICIAL_SKILL_AGENT_MAIL_AUTH_REQUIRED: "请先在 Agent Mail 连接器中授权专属邮箱",
   OFFICIAL_SKILL_AGENT_MAIL_FAILED: "Agent Mail 未能完成操作，请检查邮箱状态和请求参数",
   OFFICIAL_SKILL_AGENT_MAIL_CONFIRMATION_REQUIRED: "邮件操作需要有效的预览和确认",
+  OFFICIAL_SKILL_OBSIDIAN_CLI_UNAVAILABLE: "未检测到受支持的本机 Obsidian CLI，请安装 Obsidian 1.12.4 或更新版本并在设置中开启命令行接口",
+  OFFICIAL_SKILL_OBSIDIAN_NOT_RUNNING: "请先打开 Obsidian 桌面应用并开启命令行接口（CLI），再重试",
+  OFFICIAL_SKILL_OBSIDIAN_FAILED: "Obsidian CLI 操作未完成，请检查桌面应用状态、目标 Vault 与参数",
   OFFICIAL_SKILL_RATE_LIMITED: "服务请求过于频繁，请等待后再试；未自动重试",
   OFFICIAL_SKILL_PURCHASE_REVIEW_REQUIRED: "订单信息需要重新核对，请重新预览或使用官方结账链接",
   OFFICIAL_SKILL_OPERATION_UNCERTAIN: "操作结果尚未确认，请先在服务方应用核对，勿重复提交",
@@ -55,7 +58,7 @@ function validateOfficialSkillParams(method, value) {
   else if (method === "connector.official.account") {
     if (!exact(value, ["id", "expectedRevision", "action"], ["code"]) || !id(value.id) || !revision(value.expectedRevision)
       || !["status", "start", "bind", "logout"].includes(value.action)
-      || value.id === "baidu-maps" && value.action !== "status"
+      || (value.id === "baidu-maps" || value.id === "obsidian") && value.action !== "status"
       || value.id === "agently-mail" && value.action === "bind"
       || value.code !== undefined && (value.action !== "bind" || !text(value.code, value.id === "doordash" ? 8192 : value.id === "quark-drive" ? 4096 : 1024))) invalid();
   } else if (!exact(value, ["id", "expectedRevision"]) || !id(value.id) || !revision(value.expectedRevision)) invalid();
@@ -76,6 +79,7 @@ function validateOfficialSkillStatus(value) {
 const VERIFICATION_HOSTS = Object.freeze({
   "agently-mail": ["agent.qq.com"],
   "baidu-maps": [],
+  obsidian: [],
   doordash: ["identity.doordash.com"],
   shop: ["accounts.shop.app", "shop.com"],
   "quark-drive": ["pan.quark.cn"],

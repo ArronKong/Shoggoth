@@ -9,7 +9,7 @@ export function installModelAccountsFixture(state: any) {
   const descriptors = FALLBACK_BACKEND_DESCRIPTORS;
   const loggedIn = new Map(descriptors.map(({ id }) => [id, true]));
   const versions = new Map(descriptors.map(({ id }) => [id, 1]));
-  const quotaRuntimes = new Set(["codex", "codex-harness", "deepseek-harness", "grok-build", "antigravity"]);
+  const quotaRuntimes = new Set(["codex", "codex-harness", "deepseek-harness", "grok-build"]);
   state.accountCalls = [];
   const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
   return async (url: URL, init?: RequestInit): Promise<Response | undefined> => {
@@ -33,18 +33,10 @@ export function installModelAccountsFixture(state: any) {
         ["deepseek-harness", "DeepSeek"], ["grok-build", "Grok"], ["opencode", "OpenCode"], ["pi", "Pi"],
       ].map(([runtime, name]) => ({ ...account, name, canReadQuota: quotaRuntimes.has(runtime),
         id: runtime === "codex-harness" ? "shoggoth-internal-codex-default-v1" : `native-${runtime}-default-v1`,
-        ...(runtime === "antigravity" ? { quotaSource: "antigravity-cli" } : {}),
         ...(runtime === "codex-harness" ? {} : { connection: { id: runtime,
           enabled: !state.fixtureConfig().disabledBackends.includes(runtime) } }) })) : [account] });
     }
     if (route === "/__api/oauth/quota") {
-      if (quotaProvider === "native-antigravity-default-v1") {
-        if (state.antigravityQuotaDenied) return reply({ status: "unavailable", reason: "antigravity-cli-permission-denied" });
-        return reply({ status: "available", checkedAt: Date.now(), windows: [
-          { label: "Gemini Models", durationMinutes: 300, usedPercent: 25, resetsAt: Date.now() + 60_000 },
-          { label: "Claude and GPT models", durationMinutes: 10_080, usedPercent: 50, resetsAt: Date.now() + 60_000 },
-        ] });
-      }
       if (quotaProvider === "native-deepseek-harness-default-v1") return reply({
         status: "available", checkedAt: Date.now(), windows: [],
         credits: { kind: "wallets", wallets: [{ kind: "recharge", amount: 0, unit: "CNY" }] },
@@ -183,11 +175,8 @@ export async function runModelAccountsFixture(state: any) {
   await checkQuota("Grok", "剩余 40%");
   const antigravityQuotaCalls = () => state.accountCalls.filter((call: any) =>
     call.quotaProvider === "native-antigravity-default-v1").length;
-  check(antigravityQuotaCalls() === 0, "list and warmup do not query Antigravity's CLI quota");
-  await checkQuota("Antigravity", "来自 Antigravity CLI 登录的账号", "Gemini Models", "Claude and GPT models", "剩余 75%", "重置");
-  state.antigravityQuotaDenied = true;
-  await checkQuota("Antigravity", "Antigravity 拒绝了当前 CLI 账号的额度查询");
-  check(antigravityQuotaCalls() === 2, "reopening Antigravity quota reads the current CLI account again");
+  await checkQuota("Antigravity", "此运行时的账号额度暂未接入");
+  check(antigravityQuotaCalls() === 0, "Antigravity explains unintegrated quota without attempting an upstream read");
   check(!state.accountCalls.some((call: any) => call.quotaProvider === "native-opencode-default-v1"),
     "an unintegrated runtime explains its status without attempting an upstream read");
   const removeButton = buttons("#models-runtime-accounts button").find(button => button.title === "删除")!;

@@ -4,6 +4,7 @@ const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupF
 
 const { GrokBuildRuntimeHost, buildGrokSpawnEnv } = require("./grok-build-runtime-host");
 const { readGrokUsage } = require("./grok-build-usage");
+const { readGrokSessionContext } = require("./grok-build-session-context");
 const {
   GROK_BUILD_RUNTIME,
   grokBuildPermissionFingerprint,
@@ -84,14 +85,36 @@ class GrokBuildRuntimePool {
     this.stopAllPromise = null;
   }
 
-  async readUsage(value, options = {}) {
+  _accountEnvironment(value) {
     const binding = poolBinding(value);
-    const environment = validateResolvedEnvironment(this.runtimeAccountResolver.resolve(
+    return validateResolvedEnvironment(this.runtimeAccountResolver.resolve(
       binding, this.runtimeAccountLookup(binding.runtimeAccountId),
       { binaryPath: this.options.binaryPath ?? this.hostOptions.binaryPath },
     ), binding);
+  }
+
+  async readUsage(value, options = {}) {
+    const environment = this._accountEnvironment(value);
     const env = await buildGrokSpawnEnv(environment, { ...this.hostOptions, ...this.options });
     return readGrokUsage({ ...options, binaryPath: environment.binaryPath, env });
+  }
+
+  readStoredContext(session, profile, runs, previous, now) {
+    const sessionId = session.runtimeSessionId;
+    const last = runs.filter(run => run.runtimeSessionRef?.sessionId === sessionId)
+      .sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (last?.status !== "completed" || !Number.isSafeInteger(last.startedAt) || !Number.isSafeInteger(last.finishedAt)
+      || last.runtimeSessionRef.runtime !== "grok-build" || last.runtimeSessionRef.runtimeAccountId !== profile.runtimeAccountId
+      || last.runtimeSessionRef.runtimeProfileId !== profile.runtimeProfileId || last.workspace !== session.workspace
+      || previous?.observedAt > last.finishedAt) return null;
+    try {
+      const environment = this._accountEnvironment({ runtime: profile.runtime,
+        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
+      return readGrokSessionContext({ home: environment.home, cwd: session.workspace, sessionId,
+        model: session.modelOverride ?? profile.defaultModel,
+        sinceMs: Math.max(last.startedAt, session.updatedAt, now - 7 * 24 * 60 * 60_000),
+        untilMs: Math.min(last.finishedAt, now) });
+    } catch { return null; }
   }
 
   runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }

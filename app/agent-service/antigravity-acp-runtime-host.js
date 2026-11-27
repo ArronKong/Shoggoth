@@ -32,7 +32,6 @@ const {
   prepareAntigravityKeychainContextAsync,
 } = require("./antigravity-runtime-paths");
 const { verifyAntigravityAcpServer } = require("./antigravity-acp-distribution");
-const { readAntigravityCliQuota } = require("./antigravity-cli-quota");
 const { antigravityAcpAuthType, prepareAntigravityAcpHome } = require("./antigravity-runtime-config");
 const { AntigravityAcpRuntimeLedger } = require("./antigravity-acp-runtime-ledger");
 const { AntigravityNativeToolResults, checkpointFailureStep, nativeToolCall } = require("./antigravity-native-tool-results");
@@ -324,7 +323,10 @@ class AntigravityAcpRuntimeHost {
   constructor(options = {}) {
     this.options = options;
     this.paths = options.paths;
-    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
+    // Hosts are created per WorkRun: the shared store keeps what each native
+    // session already holds across Runs and restarts.
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)({
+      store: options.promptLedgerStore ?? null, scope: "antigravity" });
     if (!this.paths?.stateDir || !this.paths?.trustedRoot) {
       throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity host paths are invalid");
     }
@@ -629,13 +631,6 @@ class AntigravityAcpRuntimeHost {
       }
       throw error;
     }
-  }
-
-  accountQuotaRead() {
-    this._assertReady();
-    if (!this.controlInstance) return { status: "unsupported" };
-    return readAntigravityCliQuota({ homedir: this.userHome, parentEnv: this.parentEnv,
-      platform: this.platform, readSystemProxy: this.options.readSystemProxyEnvironment });
   }
 
   canRetireIdle() {
@@ -1154,6 +1149,7 @@ class AntigravityAcpRuntimeHost {
       stable: config?.developerInstructions ? `SHOGGOTH DEVELOPER INSTRUCTIONS\n${config.developerInstructions}` : "",
       rules: turn.rules,
       context: typeof input.context === "string" ? input.context : "",
+      contextIndex: input.contextIndex ?? null,
       run: turn.run,
     });
     const commands = this.commandCatalogs.get(sessionId) || [];
@@ -1459,7 +1455,12 @@ class AntigravityAcpRuntimeHost {
   }
 
   _commandCatalog(sessionId) {
-    return mergeNativeCommands("antigravity", this.commandCatalogs.get(sessionId) || []);
+    const live = this.commandCatalogs.get(sessionId) || [];
+    // The ACP server cannot compact; the Service answers /compact by renewing
+    // the thread on the same Binding, so the menu offers it like other Runtimes.
+    const renewal = live.some(command => command.name === "compact" || command.aliases?.includes("compact")) ? []
+      : [{ name: "compact", description: "Continue in a new thread with recent messages", source: "Shoggoth", execution: "runtime" }];
+    return mergeNativeCommands("antigravity", [...live, ...renewal]);
   }
 
   commandsList(input = {}) {
@@ -1536,12 +1537,20 @@ class AntigravityAcpRuntimeHost {
     }
     const active = this.activeTurns.get(sessionId);
     if (!active || active.timedOut || active.dispatchState !== "write_attempted") return;
-    if (TURN_ACCEPTANCE_UPDATE_KINDS.has(update.sessionUpdate)) {
+    const kind = update.sessionUpdate;
+    if (TURN_ACCEPTANCE_UPDATE_KINDS.has(kind)) {
       this.authVerified = true;
       this._acceptTurn(active);
     } else if (!active.accepted) return;
+    if (kind === "usage_update") {
+      const { used, size } = update;
+      if (Number.isSafeInteger(used) && used >= 0 && Number.isSafeInteger(size) && size >= 0) {
+        active.contextUsage = { runtimeSessionId: sessionId, usedTokens: used, contextWindow: size || null,
+          quality: "exact", source: "runtime_event", observedAt: this.now() };
+      }
+      return;
+    }
     const common = { known: true, method: "session/update", sessionId, turnId: active.turnId };
-    const kind = update.sessionUpdate;
     if (kind === "agent_message_chunk") {
       const text = update.content?.type === "text" && typeof update.content.text === "string" ? update.content.text : "";
       const combined = `${active.text}${text}`;
@@ -1597,10 +1606,12 @@ class AntigravityAcpRuntimeHost {
         // matching native result commits, without replaying execution.
         const bytes = Buffer.byteLength(JSON.stringify({ rawOutput, rawInput: update.rawInput,
           locations: update.locations, _meta: update._meta }));
-        const previousBytes = active.pendingToolResults.get(update.toolCallId)?.pendingBytes || 0;
+        const previous = active.pendingToolResults.get(update.toolCallId);
+        const previousBytes = previous?.pendingBytes || 0;
         if (active.pendingToolResultBytes - previousBytes + bytes <= MAX_PENDING_TOOL_RESULT_BYTES) {
           active.pendingToolResultBytes += bytes - previousBytes;
-          if (!active.pendingToolResults.size) active.nativeResultAttempts = 0;
+          // Each newly pending call gets a window for its native result to commit.
+          if (!previous) active.nativeResultAttempts = 0;
           active.pendingToolResults.set(update.toolCallId, {
             toolCallId: update.toolCallId, status: update.status, rawOutput, pendingBytes: bytes,
             observedAt: this.now(),
@@ -1896,6 +1907,7 @@ class AntigravityAcpRuntimeHost {
     this.activeTurns.delete(active.sessionId);
     if (active.timedOut) return;
     const common = { known: true, method: "session/update", sessionId: active.sessionId, turnId: active.turnId };
+    if (active.contextUsage) this._publish({ ...common, type: "context_usage", contextUsage: active.contextUsage });
     const usage = this.modelOnlyInstance && this.server.contracts?.modelUsage === 1 ? modelOnlyTurnUsage(response.usage) : null;
     if (usage) this._publish({ ...common, type: "usage", usage, responseId: `antigravity-usage-${active.turnId}` });
     if (text.length > 0) {

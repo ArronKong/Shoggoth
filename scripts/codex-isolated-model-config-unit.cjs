@@ -141,6 +141,29 @@ test("Codex 0.159.2 rejects isolated generation before starting a native thread"
   assert.equal(f.starts.length, 1);
 });
 
+test("a Binding's observed CLI version decides summary eligibility before any summary task is created", async () => {
+  const binding = { runtime: "codex", runtimeProfileId: "fixture", runtimeAccountId: "fixture" };
+  let version = "0.159.2";
+  const adapter = new CodexRuntimeAdapter({ runtimePool: { get: async () => ({ runtimeVersion: version }) } });
+  assert.equal(adapter.canGenerateModelOnlyFor(binding, "conversation_compaction"), true,
+    "no Host yet: the session guard still decides when the isolated thread starts");
+  await adapter.acquire(binding);
+  assert.equal(adapter.canGenerateModelOnlyFor(binding, "conversation_compaction"), false,
+    "0.159.2 cannot isolate; native compaction takes over without a failed summary");
+  assert.equal(adapter.canGenerateModelOnlyFor({ ...binding, runtimeProfileId: "other" }, "conversation_compaction"), true);
+  assert.equal(adapter.canGenerateModelOnlyFor(binding, "memory_review"), false, "other purposes stay closed");
+  // The registry forwards the Binding, so the coordinator's summary route sees it.
+  const { RuntimeAdapterRegistry } = require("../app/agent-service/runtime-adapter-registry");
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
+  registry.register("codex", adapter);
+  assert.equal(registry.canGenerateModelOnly("codex", { purpose: "conversation_compaction" }), true, "without a Binding: type level only");
+  assert.equal(registry.canGenerateModelOnly("codex", { purpose: "conversation_compaction", binding }), false);
+  version = "0.168.0";
+  await adapter.acquire(binding);
+  assert.equal(adapter.canGenerateModelOnlyFor(binding, "conversation_compaction"), true, "an upgraded CLI summarizes again");
+  assert.equal(registry.canGenerateModelOnly("codex", { purpose: "conversation_compaction", binding }), true);
+});
+
 test("isolated generation releases only its owned ephemeral thread and confirms the native acknowledgement", async () => {
   const f = await fixture();
   await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: true }), { code: "MODEL_ONLY_SESSION_INVALID" });

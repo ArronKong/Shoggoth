@@ -31,6 +31,8 @@ export default {
     RUNTIME_COMPACTION_TIMEOUT: "Conversation context compaction timed out. Type and send /compact in this chat, wait for it to succeed, then resend your previous message.",
     RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN: "Context compaction has not been confirmed. First check that the compaction task has ended, then send /compact in this chat. Once it succeeds, resend your previous message.",
     RUNTIME_COMPACTION_UNSUPPORTED: "This runtime does not support conversation context compaction. Start a new chat or switch to a runtime that supports compaction.",
+    CONTEXT_COMPACTION_REQUIRED: "The conversation context is full and automatic compaction did not finish. Click Compact context, or send /compact in this chat, then resend your previous message. If it still fails, start a new session.",
+    CONTEXT_INPUT_TOO_LARGE: "This message plus the required instructions exceeds the model's context limit. Shorten it or split it into several messages.",
     RUNTIME_PERMISSION_REQUIRED: "The agent needs additional permission for this action. Check the session’s workspace and permission settings, then try again.",
     RUNTIME_WORKSPACE_UNAVAILABLE: "This session’s working directory is missing or inaccessible. Restore it or start a new session with the default workspace. The message was not sent.",
     CRON_AUTHORIZATION_DENIED: "The scheduled task needed an action outside its approved scope and could not finish. This run has ended and freed its execution slot. Check the task history.",
@@ -246,6 +248,7 @@ export default {
     ATTACHMENT_UPLOAD_CANCELED: "The attachment upload was canceled.",
     PLUGIN_PLATFORM_RETIRED: "The old plugin selection is no longer available. Select the connector account again.",
     OPEN_CONNECTOR_RETIRED: "OpenConnector was retired. The request could not be sent with the old account selection.",
+    WORK_RUN_SEND_REJECTED: "This message was not accepted. Send it again.",
   },
   renderer: {
     CHAT_CONTENT_RECOVERY_FAILED: "Could not recover the chat content. Reload the session.",

@@ -72,6 +72,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   ...require("../core/chat-secret-contract").SECRET_MESSAGES,
   ...require("../core/connector-errors").CONNECTOR_PUBLIC_MESSAGES,
   PLUGIN_PLATFORM_RETIRED: "旧插件选择已停用，请重新选择连接器账号",
+  // A resend of an operation the Service confirmed it never admitted.
+  WORK_RUN_SEND_REJECTED: require("./chat-error-messages.json").chatRequests.WORK_RUN_SEND_REJECTED,
   ...require("./active-memory-command-protocol").MESSAGES,
   CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用本机 Codex",
   CODEX_DESKTOP_CONTEXT_CHANGED: "原对话的 Shoggoth 记忆或撤回状态已变化，请新建会话继续",

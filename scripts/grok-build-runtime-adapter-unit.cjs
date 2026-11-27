@@ -221,7 +221,10 @@ function standardServer(extra) {
     }
     if (["session/resume", "session/load", "session/set_model", "session/set_mode", "session/close", "session/delete"]
       .includes(message.method)) return rpcResult({});
-    return extra?.(message, child) ?? NO_RESPONSE;
+    const reply = extra?.(message, child) ?? undefined;
+    if (reply !== undefined) return reply;
+    if (message.method === "_x.ai/session/info") return rpcError(-32601, "unsupported");
+    return NO_RESPONSE;
   };
 }
 
@@ -697,8 +700,14 @@ test("ACP command catalog is session-scoped and recognized commands bypass promp
 });
 
 test("a completed bare /compact turn publishes its compacted notice before completion", async () => {
-  const prompts = [];
+  const prompts = [], contextRequests = [];
   const server = standardServer((message, child) => {
+    if (message.method === "_x.ai/session/info") {
+      const { sessionId } = message.params;
+      contextRequests.push(sessionId);
+      const used = prompts.at(-1) === "/compact" ? 20_000 : 85_000;
+      return rpcResult({ result: { sessionId, context: { used, total: 100_000 } } });
+    }
     if (message.method !== "session/prompt") return undefined;
     prompts.push(message.params.prompt[0].text);
     setImmediate(() => child.sendResult(message.id, { stopReason: "end_turn" }));
@@ -719,17 +728,129 @@ test("a completed bare /compact turn publishes its compacted notice before compl
     const compacted = await turn("operation-compact", "/compact");
     await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === compacted.turn.id), "compact turn");
     const kinds = events.filter((event) => event.turnId === compacted.turn.id).map((event) => event.type);
-    assert.deepEqual(kinds.slice(-2), ["context_compacted", "complete"]);
+    assert(kinds.includes("context_compacted") && kinds.indexOf("context_compacted") < kinds.indexOf("complete"));
     const notice = events.find((event) => event.type === "context_compacted");
     assert.equal(notice.contextUsage.runtimeSessionId, started.session.id);
+    assert.equal(notice.contextUsage.usedTokens, null);
+    await waitFor(() => events.find(event => event.turnId === compacted.turn.id
+      && event.type === "context_usage" && event.contextUsage.usedTokens === 20_000), "post-compact context");
     const ordinary = await turn("operation-ordinary", "compact the notes please");
     await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === ordinary.turn.id), "ordinary turn");
     assert.equal(events.filter((event) => event.type === "context_compacted").length, 1, "only the bare command compacts");
+    const context = (await waitFor(() => events.find(event => event.turnId === ordinary.turn.id
+      && event.type === "context_usage" && event.contextUsage.quality === "estimated"), "ordinary context")).contextUsage;
+    assert.equal(context?.usedTokens, 85_000);
+    assert.equal(context?.contextWindow, 100_000);
+    assert.equal(context?.quality, "estimated");
+    assert.deepEqual(contextRequests, [started.session.id, started.session.id]);
     assert.equal(prompts[0], "/compact");
     await fixture.adapter.stopAll();
   } finally {
     fixture.cleanup();
   }
+});
+
+test("Grok projects persisted occupancy before the one-turn host retires and restores a completed chat", async t => {
+  const sessionId = crypto.randomUUID(), cwd = "/tmp/workspace", model = "grok-4.6";
+  let clock = 1_800_000_000_000;
+  let exactUpdate = false;
+  const base = standardServer((message, child) => {
+    if (message.method === "_x.ai/session/info") return NO_RESPONSE;
+    if (message.method === "session/prompt") {
+      setImmediate(() => {
+        if (exactUpdate) {
+          child.sendNotification("session/update", { sessionId, update: {
+            sessionUpdate: "agent_message_chunk", content: { type: "text", text: "done" } } });
+          child.sendNotification("session/update", { sessionId, update: { sessionUpdate: "usage_update", used: 4300, size: 80000 } });
+        }
+        child.sendResult(message.id, { stopReason: "end_turn" });
+      });
+      return NO_RESPONSE;
+    }
+  });
+  const f = fixtureOptions((message, child) => message.method === "session/new" ? rpcResult({ sessionId }) : base(message, child),
+    { now: () => clock, readUsage: async () => [] });
+  t.after(async () => { await f.adapter.stopAll(); f.cleanup(); });
+  const runtime = await acquire(f);
+  await startSession(runtime);
+  const dir = path.join(f.nativeHome, "sessions", encodeURIComponent(cwd), sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify({ info: { id: sessionId, cwd }, current_model_id: model }));
+  const file = path.join(dir, "signals.json");
+  const signals = value => {
+    fs.writeFileSync(file, JSON.stringify(value));
+    fs.utimesSync(file, clock / 1000, clock / 1000);
+  };
+  const events = [];
+  runtime.subscribe(event => events.push(event));
+  const send = async (operationId, prompt) => {
+    const { turn } = await runtime.turnStart({ sessionId, operationId, prompt, model, cwd,
+      permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" } });
+    await waitFor(() => events.some(e => e.turnId === turn.id && e.type === "complete"), operationId);
+    return events.filter(e => e.turnId === turn.id);
+  };
+  signals({ contextTokensUsed: 7396, contextWindowTokens: 256000, contextWindowUsage: 2, totalTokens: 47864 });
+  const ordinary = await send("signals-ordinary", "hello");
+  const measurement = ordinary.find(e => e.type === "context_usage")?.contextUsage;
+  assert.deepEqual(measurement, { runtimeSessionId: sessionId, usedTokens: 7396, contextWindow: 256000,
+    quality: "estimated", source: "session_stats", observedAt: clock });
+  assert(ordinary.findIndex(e => e.type === "context_usage") < ordinary.findIndex(e => e.type === "complete"));
+  clock += 1000;
+  const compact = await send("signals-compact", "/compact");
+  assert(compact.some(e => e.type === "context_compacted" && e.contextUsage.usedTokens === null));
+  assert(!compact.some(e => e.contextUsage?.usedTokens === 7396), "a pre-compaction file stays invalid");
+  clock += 1000;
+  exactUpdate = true;
+  signals({ contextTokensUsed: 19252, contextWindowTokens: 256000 });
+  const exact = (await send("signals-exact", "live")).filter(e => e.type === "context_usage");
+  assert.deepEqual(exact.map(e => [e.contextUsage.quality, e.contextUsage.usedTokens, e.contextUsage.contextWindow]),
+    [["exact", 4300, 80000]]);
+  await f.adapter.stopAll();
+
+  const profile = binding();
+  const session = { runtimeSessionId: sessionId, workspace: cwd, modelOverride: model, updatedAt: clock - 200 };
+  const last = { runtimeSessionRef: { ...profile, sessionId }, status: "completed", workspace: cwd,
+    startedAt: clock - 500, finishedAt: clock + 500 };
+  const restore = (run = last, previous = null) => f.pool.readStoredContext(session, profile, [run], previous, clock + 1000);
+  signals({ contextTokensUsed: 19252, contextWindowTokens: 256000, contextWindowUsage: 7 });
+  assert.equal(restore(last, { observedAt: last.finishedAt }).usedTokens, 19252);
+  assert.equal(restore().observedAt, clock, "reopening preserves the native measurement time");
+  assert.equal(restore(last, { observedAt: last.finishedAt + 1 }), null, "a later invalidation wins");
+  assert.equal(restore({ ...last, status: "running" }), null);
+  assert.equal(restore({ ...last, runtimeSessionRef: { ...last.runtimeSessionRef, runtimeProfileId: "another-profile" } }), null);
+  assert.equal(restore({ ...last, startedAt: clock + 1 }), null);
+  assert.equal(restore({ ...last, finishedAt: clock - 1 }), null);
+  session.modelOverride = "different-model"; assert.equal(restore(), null); session.modelOverride = model;
+  signals({ contextTokensUsed: 0, contextWindowTokens: 256000 });
+  assert.equal(restore().usedTokens, 0);
+  for (const value of [{ contextTokensUsed: 1 }, { contextWindowTokens: 256000 },
+    { contextTokensUsed: 1, contextWindowTokens: 0 }, { contextWindowUsage: 7, totalTokens: 47864 }]) {
+    signals(value); assert.equal(restore(), null);
+  }
+  const otherFile = path.join(f.nativeHome, "other-signals.json");
+  signals({ contextTokensUsed: 19252, contextWindowTokens: 256000 });
+  fs.renameSync(file, otherFile); fs.symlinkSync(otherFile, file);
+  assert.equal(restore(), null);
+});
+
+test("Grok resolves a long workspace from its .cwd marker and verifies the session identity", t => {
+  const { readGrokSessionContext } = require("../app/agent-service/grok-build-session-context");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-stats-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const cwd = "/workspace/" + "long folder/".repeat(32) + "project", id = crypto.randomUUID();
+  const group = path.join(home, "sessions", "project-0000000000000001"), dir = path.join(group, id);
+  fs.mkdirSync(dir, { recursive: true });
+  const marker = path.join(group, ".cwd"), summary = path.join(dir, "summary.json");
+  fs.writeFileSync(marker, cwd);
+  fs.writeFileSync(summary, JSON.stringify({ info: { id, cwd } }));
+  fs.writeFileSync(path.join(dir, "signals.json"), JSON.stringify({ contextTokensUsed: 15, contextWindowTokens: 200 }));
+  const read = () => readGrokSessionContext({ home, cwd, sessionId: id, sinceMs: 0, untilMs: Date.now() });
+  assert.equal(read().usedTokens, 15);
+  fs.writeFileSync(marker, cwd + "-other");
+  assert.equal(read(), null);
+  fs.writeFileSync(marker, cwd);
+  fs.writeFileSync(summary, JSON.stringify({ info: { id: crypto.randomUUID(), cwd } }));
+  assert.equal(read(), null);
 });
 
 test("spawn PATH includes the real user's local bin while retaining native HOME", async () => {

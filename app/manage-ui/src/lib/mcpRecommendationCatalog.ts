@@ -4,7 +4,7 @@ import type { McpServer } from "../api/mcpConnectors";
 // Keep the same order in both languages and across registry/remote/desktop entries.
 export const mcpRecommendationOrder = [
   "google-workspace", "outlook-mail", "google-places", "amap", "outlook-calendar", "zoom", "canva", "github",
-  "lark-cli", "agently-mail", "mijia", "didi", "uber", "luckin", "mcdonalds", "doordash", "uber-eats", "fliggy", "meituan-paotui", "weread", "alipay", "quark-drive", "dropbox", "notion", "figma", "blender-lab", "runway", "higgsfield",
+  "lark-cli", "agently-mail", "mijia", "didi", "uber", "luckin", "mcdonalds", "doordash", "uber-eats", "fliggy", "meituan-paotui", "weread", "alipay", "quark-drive", "dropbox", "notion", "obsidian", "figma", "blender-lab", "runway", "higgsfield",
   "hyperframes", "ticketmaster", "flightaware", "black-forest-labs", "fal-ai", "shop", "shopify", "stripe", "evernote",
   "atlassian", "asana", "box", "strava", "quickbooks", "monday", "miro", "airtable", "calendly",
   "clickup", "todoist", "1password", "cloudflare", "zapier", "replit", "vercel", "supabase",
@@ -91,7 +91,7 @@ const connectorDevelopers: Record<string, string> = {
   mijia: "小米", "meituan-paotui": "美团", weread: "腾讯", "agently-mail": "腾讯", "quark-drive": "夸克",
   "rollinggo-hotel": "RollingGo", wind: "万得", variflight: "飞常准", eastmoney: "东方财富", ifind: "同花顺",
   airtable: "Airtable", amplitude: "Amplitude", canva: "Canva", miro: "Miro", monday: "monday.com",
-  neon: "Neon", sentry: "Sentry", todoist: "Doist", webflow: "Webflow",
+  neon: "Neon", obsidian: "Obsidian", sentry: "Sentry", todoist: "Doist", webflow: "Webflow",
 };
 
 export function mcpConnectorDeveloper(identity: string | undefined, catalogName?: string): string | undefined {
@@ -105,7 +105,7 @@ export function mcpConnectorDeveloper(identity: string | undefined, catalogName?
 // authority; those operations still require the official controller's record.
 export function mcpOfficialSkillBrand(server?: McpServer): string | undefined {
   if (server?.source.kind !== "custom" || server.transport.kind !== "stdio-command") return undefined;
-  return /^official-(agently-mail|alipay|baidu-maps|doordash|fliggy|meituan-paotui|quark-drive|rollinggo-hotel|shop|weread)-[a-f0-9]{8}$/u.exec(server.id)?.[1];
+  return /^official-(agently-mail|alipay|baidu-maps|doordash|fliggy|meituan-paotui|obsidian|quark-drive|rollinggo-hotel|shop|weread)-[a-f0-9]{8}$/u.exec(server.id)?.[1];
 }
 
 export function mcpRecommendationRank(identity: string): number {

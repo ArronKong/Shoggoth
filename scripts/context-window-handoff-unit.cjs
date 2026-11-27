@@ -220,7 +220,49 @@ test("a queued send survives a pre-compaction refusal and resumes once after Ser
   } finally { await f.close(); }
 });
 
-test("a native compact that leaves pressure above budget stops after one attempt", async () => {
+test("an Agent-wide revocation does not block native compaction of a thread made after it", async () => {
+  const f = await openHandoffFixture();
+  try {
+    const { coordinator, current, host, session } = await nativePressure(f, "native-revoked-clean");
+    // The 2026-11-26 case: migrated revocation records name another session;
+    // this thread's memory anchor is current and it holds no historical source.
+    coordinator.conversationCheckpointStore.hasRevocations = () => true;
+    let calls = 0;
+    host.threadCompactStart = async ({ threadId }) => {
+      calls++;
+      host.emit({ known: true, type: "context_compacted", threadId });
+      return {};
+    };
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "native-revoked-clean-next", prompt: "keep going" });
+    await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "compacted input");
+    const next = coordinator.getRun(ack.run.id);
+    assert.equal(next.status, "running", next.errorCode);
+    assert.equal(calls, 1, "the thread was compacted natively");
+    assert.equal(next.runtimeSessionRef.sessionId, current.runtimeSessionId, "on the same thread");
+    await f.complete(next);
+  } finally { await f.close(); }
+});
+
+test("a thread holding a historical memory source is renewed instead of compacted natively", async () => {
+  const f = await openHandoffFixture();
+  try {
+    const { coordinator, current, host, session } = await nativePressure(f, "native-historical");
+    coordinator.conversationCheckpointStore.hasHistoricalSource = () => true;
+    let calls = 0;
+    host.threadCompactStart = async () => { calls++; return {}; };
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "native-historical-next", prompt: "keep going" });
+    await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "renewed input");
+    const next = coordinator.getRun(ack.run.id);
+    assert.equal(next.status, "running", next.errorCode);
+    assert.equal(calls, 0, "a native summary cannot keep the historical annotation");
+    assert.notEqual(next.runtimeSessionRef.sessionId, current.runtimeSessionId);
+    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).retiredRuntimeSessions.at(-1).runtimeSessionId,
+      current.runtimeSessionId);
+    await f.complete(next);
+  } finally { await f.close(); }
+});
+
+test("a native compact that leaves pressure above budget renews the thread after one attempt", async () => {
   const f = await openHandoffFixture();
   try {
     const { coordinator, current, host, session } = await nativePressure(f, "native-still-full");
@@ -235,12 +277,16 @@ test("a native compact that leaves pressure above budget stops after one attempt
     };
     const ack = await coordinator.send({ sessionKey: session.sessionKey,
       operationId: "native-still-full-next", prompt: "Do not send while full" });
-    await waitUntil(() => coordinator.getRun(ack.run.id).status === "failed", 5000, "bounded native compact");
-    assert.equal(coordinator.getRun(ack.run.id).errorCode, "CONTEXT_COMPACTION_REQUIRED");
+    await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "bounded native compact");
+    const next = coordinator.getRun(ack.run.id);
+    assert.equal(next.status, "running", next.errorCode);
     assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" })[0]?.status, "completed");
-    assert.equal(calls, 1);
-    assert.equal(host.turnStartCalls, 1);
-    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).runtimeSessionId, current.runtimeSessionId);
+    assert.equal(calls, 1, "no second native attempt");
+    const renewed = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.notEqual(renewed.runtimeSessionId, current.runtimeSessionId, "the full thread was renewed on its binding");
+    assert.equal(renewed.retiredRuntimeSessions.at(-1).runtimeSessionId, current.runtimeSessionId);
+    assert.equal(next.runtimeSessionRef.sessionId, renewed.runtimeSessionId, "the input ran once, on the fresh thread");
+    await f.complete(next);
   } finally { await f.close(); }
 });
 
@@ -256,13 +302,16 @@ test("automatic native compaction never sends a literal prompt when the runtime 
     };
     const ack = await coordinator.send({ sessionKey: session.sessionKey,
       operationId: "native-unsupported-next", prompt: "Do not send a compact prompt" });
-    await waitUntil(() => coordinator.getRun(ack.run.id).status === "failed", 5000, "unsupported native compact");
-    assert.equal(coordinator.getRun(ack.run.id).errorCode, "RUNTIME_COMPACTION_UNSUPPORTED");
-    assert.equal(host.turnStartCalls, 1);
+    await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "unsupported native compact");
+    const next = coordinator.getRun(ack.run.id);
+    assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" })[0]?.errorCode, "RUNTIME_COMPACTION_UNSUPPORTED");
+    assert.equal(next.status, "running", "the unsupported compact falls back to a renewed thread");
+    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).retiredRuntimeSessions.length, 1);
+    await f.complete(next);
   } finally { await f.close(); }
 });
 
-test("manual recovery queued before the automatic attempt still releases later input", async () => {
+test("an input blocked by an unsupported automatic compact renews; a queued /compact still completes", async () => {
   const f = await openHandoffFixture();
   try {
     const { coordinator, host, session, first } = await nativePressure(f, "native-queued-repair", false);
@@ -283,17 +332,20 @@ test("manual recovery queued before the automatic attempt still releases later i
     const repair = await coordinator.send({ sessionKey: session.sessionKey,
       operationId: "native-queued-repair", prompt: "/compact" });
     await f.complete(first);
+    await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(blocked.run.id).status), 5000, "earlier blocked input");
+    const renewedInput = coordinator.getRun(blocked.run.id);
+    assert.equal(renewedInput.status, "running", "an unsupported automatic compact falls back to a renewed thread");
+    assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" })[0]?.errorCode, "RUNTIME_COMPACTION_UNSUPPORTED");
+    await f.complete(renewedInput);
     await waitUntil(() => coordinator.getRun(repair.run.id).status === "completed", 5000, "queued explicit repair");
-    await waitUntil(() => coordinator.getRun(blocked.run.id).status === "failed", 5000, "settlement of the earlier blocked input");
-    assert.equal(coordinator.getRun(blocked.run.id).status, "failed");
     const next = await f.send(session.sessionKey, "native-queued-after-repair");
     assert.equal(next.status, "running", next.errorCode);
-    assert.equal(host.turnStartCalls, 2, "only the newly authorized input is sent");
+    assert.equal(host.turnStartCalls, 3, "each input is sent once and /compact never as a prompt");
     await f.complete(next);
   } finally { await f.close(); }
 });
 
-test("failed native compaction blocks its input across restart and permits an explicit compact recovery", async () => {
+test("a failed native compaction renews the thread once and is not replayed across restart", async () => {
   let f = await openHandoffFixture();
   try {
     const { coordinator, current, host, session } = await nativePressure(f, "native-failure");
@@ -301,39 +353,24 @@ test("failed native compaction blocks its input across restart and permits an ex
     host.threadCompactStart = async () => { calls++; throw new Error("private compact failure"); };
     const ack = await coordinator.send({ sessionKey: session.sessionKey,
       operationId: "native-failure-next", prompt: "Do not replay this input" });
-    await waitUntil(() => coordinator.getRun(ack.run.id).status === "failed", 5000, "failed native compact");
-    assert.equal(coordinator.getRun(ack.run.id).errorCode, "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN");
+    await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "failed native compact");
+    const renewedInput = coordinator.getRun(ack.run.id);
+    // The input never reached the CLI, so a fresh thread can take it without
+    // replaying the compact whose outcome is unknown.
+    assert.equal(renewedInput.status, "running", renewedInput.errorCode);
+    assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" })[0]?.errorCode, "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN");
     assert.equal(calls, 1);
-    assert.equal(host.turnStartCalls, 1);
-    const root = f.root, threads = structuredClone(host.threads);
+    assert.notEqual(renewedInput.runtimeSessionRef.sessionId, current.runtimeSessionId);
+    await f.complete(renewedInput);
+    const root = f.root;
     await f.close({ remove: false });
     f = await openHandoffFixture({ root });
     const after = f.service.workRunCoordinator;
-    const blocked = await f.send(session.sessionKey, "native-failure-after-restart");
-    assert.equal(blocked.status, "failed");
-    assert.equal(blocked.errorCode, "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN");
+    const resumed = await f.send(session.sessionKey, "native-failure-after-restart");
+    assert.equal(resumed.status, "running", "the old failed compact no longer blocks the renewed thread");
     assert.equal(after.dispatcher.listRuns({ source: "compaction" }).length, 1, "restart does not replay compact");
-    const acquire = after.runtimeManager.acquire.bind(after.runtimeManager);
-    after.runtimeManager.acquire = async (...args) => {
-      const handle = await acquire(...args);
-      if (!handle.host.nativeRecoveryFixtureInitialized) {
-        handle.host.threads = structuredClone(threads);
-        handle.host.turnStartCalls = 1; // Native turn IDs do not reset on resume.
-        handle.host.nativeRecoveryFixtureInitialized = true;
-      }
-      handle.host.threadCompactStart = async ({ threadId }) => {
-        assert.equal(threadId, current.runtimeSessionId);
-        handle.host.emit({ known: true, type: "context_compacted", threadId });
-        return {};
-      };
-      return handle;
-    };
-    const repair = await f.send(session.sessionKey, "native-failure-explicit-repair", "/compact");
-    assert.equal(repair.status, "completed", repair.errorCode);
-    const next = await f.send(session.sessionKey, "native-failure-repaired-next");
-    assert.equal(next.status, "running", next.errorCode);
-    assert.equal(after.getRun(ack.run.id).status, "failed", "recovery never replays the failed input");
-    await f.complete(next);
+    assert.equal(after.getRun(ack.run.id).status, "completed", "the renewed input ran exactly once");
+    await f.complete(resumed);
   } finally { await f.close(); }
 });
 
@@ -371,6 +408,67 @@ test("a smaller Codex model cannot implicitly use Pi and preserves its source se
   } finally { await f.close(); }
 });
 
+test("the earlier-messages excerpt shares the retained budget and lists only eligible user openings", async () => {
+  const f = await openHandoffFixture();
+  try {
+    enable(f);
+    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
+    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
+    const session = f.createSession();
+    await f.complete(await f.send(session.sessionKey, "excerpt-first"));
+    const before = chatSessionStore.getSession(session.sessionKey);
+    const append = (id, kind, content, extra = {}) => transcriptStore.appendEvent({
+      profileId: session.profileId, sessionId: session.id, id, kind, content, ...extra });
+    append("eligible-old", "user", { text: "Remember the blue folder plan for the launch." });
+    append("system-prompt", "user", { text: "SYSTEM_CHECK_PROMPT", inputOrigin: "system" });
+    append("cron-prompt", "user", { text: "CRON_SCHEDULED_PROMPT", cronOutputVersion: 1 });
+    append("borrowed-old", "user", { text: "BORROWED_MEMORY_TEXT", borrowedMemoryDerived: true });
+    append("excluded-old", "user", { text: "EXCLUDED_USER_TEXT" }, { contextExcluded: true });
+    appendHistory(f, session, 8);
+    append("recent-ask", "user", { text: "What did we decide?" });
+    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
+      revision: before.revision, clearModelOverride: false });
+    const run = await f.send(session.sessionKey, "excerpt-continue", "Continue.");
+    assert.equal(run.status, "running", run.errorCode);
+    const contract = f.transport.acquisitions.at(-1).options.executionContract;
+    assert.equal(contract.contextRequest.recentHistoryOnly, true);
+    const excerpt = contract.dynamicContext.split("EARLIER USER MESSAGES")[1] ?? "";
+    assert.match(excerpt, /\[eventId=eligible-old\] USER: Remember the blue folder plan/u);
+    assert.doesNotMatch(contract.dynamicContext, /SYSTEM_CHECK_PROMPT|CRON_SCHEDULED_PROMPT|BORROWED_MEMORY_TEXT|EXCLUDED_USER_TEXT/u);
+    assert.ok(contract.contextRequest.estimatedTokens <= contract.contextRequest.limitTokens);
+    const { estimateContextTokens: estimate } = require("../app/agent-service/conversation-context-budget");
+    const history = contract.dynamicContext.slice(contract.dynamicContext.indexOf("EARLIER USER MESSAGES"));
+    assert.ok(estimate(history) <= require("../app/agent-service/conversation-context-budget").conversationContextBudget(SMALL_WINDOW).retainedTokens + 64,
+      "excerpt and recent originals together stay within the retained target");
+    await f.complete(run);
+  } finally { await f.close(); }
+});
+
+test("a newest message too large for the retained target is named by event ID only", async () => {
+  const f = await openHandoffFixture();
+  try {
+    enable(f);
+    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
+    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
+    const session = f.createSession();
+    await f.complete(await f.send(session.sessionKey, "oversized-first"));
+    const before = chatSessionStore.getSession(session.sessionKey);
+    appendHistory(f, session, 4);
+    transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id, id: "huge-latest", kind: "assistant",
+      content: { text: `HUGE_BODY ${"long words ".repeat(20000)}` } });
+    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
+      revision: before.revision, clearModelOverride: false });
+    const run = await f.send(session.sessionKey, "oversized-continue", "Continue.");
+    assert.equal(run.status, "running", run.errorCode);
+    const contract = f.transport.acquisitions.at(-1).options.executionContract;
+    assert.equal(contract.contextRequest.recentHistoryOnly, true);
+    assert.match(contract.dynamicContext, /\[eventId=huge-latest\] ASSISTANT: \[too long to include; look up the original\]/u);
+    assert.doesNotMatch(contract.dynamicContext, /HUGE_BODY/u);
+    assert.match(contract.dynamicContext, /\[eventId=large-0\] USER: SOURCE_0/u);
+    await f.complete(run);
+  } finally { await f.close(); }
+});
+
 test("a detached direct chat without a summary runtime resumes once with recent original messages", async () => {
   let f = await openHandoffFixture();
   try {
@@ -405,7 +503,11 @@ test("a detached direct chat without a summary runtime resumes once with recent 
     assert.match(contract.dynamicContext, /\[eventId=recent-request\] USER: Please inspect the invoice/u);
     assert.match(contract.dynamicContext, /\[eventId=recent-result\] ASSISTANT: The invoice is ready/u);
     assert.match(contract.turnDeveloperInstructions, /conversation_search.*conversation_get/u);
-    assert.doesNotMatch(contract.dynamicContext, /SOURCE_0|EXCLUDED_HISTORY_BODY|DO_NOT_REPLAY_TOOL_PAYLOAD|Continue from there/u);
+    // Older user messages are named by their opening line only.
+    assert.match(contract.dynamicContext, /EARLIER USER MESSAGES[\s\S]*\[eventId=large-0\] USER: SOURCE_0 ordinary words/u);
+    assert.ok(contract.dynamicContext.split("SOURCE_0 ")[1].length < contract.dynamicContext.length
+      && !/SOURCE_0 (?:ordinary words ){20}/u.test(contract.dynamicContext), "an excerpt never carries a full older message");
+    assert.doesNotMatch(contract.dynamicContext, /EXCLUDED_HISTORY_BODY|DO_NOT_REPLAY_TOOL_PAYLOAD|Continue from there/u);
     assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" }).length, 0);
     assert.ok(f.transport.acquisitions.every(entry => entry.binding.runtime === "codex"));
     const after = chatSessionStore.getSession(session.sessionKey);
@@ -1435,10 +1537,13 @@ for (const outcome of ["success", "failure", "timeout", "unsupported", "no-reduc
         coordinator.getRuntimeModelContextWindow = () => 200000;
         const required = await coordinator.send({ sessionKey: session.sessionKey, operationId: `early-${outcome}-required`, prompt: "at capacity" });
         await waitUntil(() => ["failed", "running"].includes(coordinator.getRun(required.run.id).status), 10000, "required after advisory");
-        assert.equal(coordinator.getRun(required.run.id).status, "failed");
-        assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" }).length, 2);
-        const blocked = await f.send(session.sessionKey, `early-${outcome}-blocked`);
-        assert.equal(blocked.status, "failed", "required failure still blocks subsequent inputs");
+        const renewedRun = coordinator.getRun(required.run.id);
+        assert.equal(renewedRun.status, "running", "a required compaction that cannot run renews the thread instead of refusing");
+        assert.notEqual(f.service.chatSessionStore.getSession(session.sessionKey).runtimeSessionId, current.runtimeSessionId);
+        await f.complete(renewedRun);
+        const after = await f.send(session.sessionKey, `early-${outcome}-after`);
+        assert.equal(after.status, "running", "the renewed thread accepts later inputs");
+        await f.complete(after);
       }
     } finally { await f.close(); }
   });

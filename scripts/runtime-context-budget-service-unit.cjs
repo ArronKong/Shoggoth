@@ -1,9 +1,57 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { UNKNOWN_WINDOW_BUDGET } = require("../app/agent-service/conversation-context-budget");
+
+test("reopening a Grok chat recovers its scoped native statistics through chat.session.list", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync("/tmp/sh-grok-context-"));
+  const home = path.join(root, ".grok");
+  fs.mkdirSync(home, { mode: 0o700 });
+  const options = { root, serviceOptions: { grokBuildBinaryPath: process.execPath,
+    parentEnv: { GROK_HOME: home, CODEX_HOME: path.join(root, ".codex"), PATH: process.env.PATH } } };
+  let f = await openHandoffFixture(options);
+  try {
+    const config = f.service.nativeRuntimeConfig.read();
+    f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+      flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+    const { NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
+    f.service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "grok-build",
+      runtimeAccountId: NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID }, { operationId: "add-grok-context" });
+    const { sessionKey } = f.createSession(), sessionId = randomUUID();
+    await f.switch(sessionKey, "grok-build");
+    f.collideNextSessionId("grok-build", sessionId);
+    const run = await f.send(sessionKey, "grok-context-legacy-turn");
+    assert.equal(run.runtimeSessionRef?.sessionId, sessionId, run.errorCode);
+    const observation = Date.now();
+    f.service.workRunCoordinator.invalidateRuntimeContext(sessionKey);
+    await f.complete(run);
+    const session = f.service.chatSessionStore.getSession(sessionKey);
+    const dir = path.join(home, "sessions", encodeURIComponent(session.workspace), sessionId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify({ info: { id: sessionId, cwd: session.workspace },
+      current_model_id: "fixture-model" }));
+    const file = path.join(dir, "signals.json");
+    fs.writeFileSync(file, JSON.stringify({ contextTokensUsed: 19252, contextWindowTokens: 256000 }));
+    fs.utimesSync(file, observation / 1000, observation / 1000);
+    await f.close({ remove: false });
+    f = await openHandoffFixture(options);
+    const listUsage = async () => {
+      const { sessions } = await f.service.chatServiceController.handle("chat.session.list", {
+        profileId: f.profile.id, includeArchived: false, cursor: null, limit: 10 });
+      return sessions.find(s => s.sessionKey === sessionKey).contextUsage;
+    };
+    const usage = await listUsage();
+    assert.deepEqual([usage.usedTokens, usage.contextWindow, usage.quality], [19252, 256000, "estimated"]);
+    assert.equal(f.transport.acquisitions.length, 0, "listing the restored chat never starts a runtime");
+    f.service.workRunCoordinator.invalidateRuntimeContext(sessionKey);
+    assert.equal((await listUsage()).quality, "unknown", "a newer invalidation wins over the old file");
+  } finally { await f.close(); }
+});
 
 test("idle time does not discard a matching native meter and recount retired sessions", async () => {
   const f = await openHandoffFixture();

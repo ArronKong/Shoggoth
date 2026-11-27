@@ -33,6 +33,11 @@ if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-
   && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !nativeStop && !groupContinuation && !ordinaryRecovery && !inspirationBuffered && !storageRejection && !modelHandoff && !codexComposer
   || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
 const key = `agent:${backend}-recovery-fixture:${inspirationBuffered ? "dashboard:inspiration-fixture" : "11111111-1111-4111-8111-111111111111"}`;
+// Cron conversations are opened from a task result, even when the account has
+// no ordinary topic that could serve as the sidebar's initial selection.
+if (nativeRejection || legacyRecovery) {
+  window.history.replaceState(null, "", `#/chat?session=${encodeURIComponent(key)}&backend=${backend}`);
+}
 const agentId = key.split(":")[1];
 const originalOperation = "original-operation-fixture", originalText = "Use this selected connector account exactly once";
 const captured = ["connection-selected-one"], selection = scenario === "newer"

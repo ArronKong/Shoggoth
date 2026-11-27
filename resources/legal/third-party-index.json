@@ -1987,6 +1987,19 @@
         "licenses/source/openclaw-memory/undici-milo.txt"
       ],
       "notes": "Same-major security refresh of the independently vendored HTTP client. The upstream package files and MIT notice are preserved. The separate Fetch MIT notice and the bundled Milo parser ISC notice are retained as well."
+    },
+    {
+      "name": "Obsidian Skills connector icon",
+      "license": "MIT",
+      "source": "https://github.com/obsidianmd/obsidian-skills/blob/9c9560a870fd490b0e1a847f2c8401a50e2d931d/plugins/obsidian/assets/icon.png",
+      "revision": "9c9560a870fd490b0e1a847f2c8401a50e2d931d",
+      "localFiles": [
+        "app/manage-ui/src/assets/mcp-logos/obsidian.png"
+      ],
+      "licenseFiles": [
+        "licenses/source/OBSIDIAN-SKILLS.txt"
+      ],
+      "notes": "Resized from the upstream icon. At connector installation, Shoggoth fetches the official skills at the pinned revision."
     }
   ]
 }

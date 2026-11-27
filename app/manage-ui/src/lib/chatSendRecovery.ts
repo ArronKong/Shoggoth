@@ -1,3 +1,5 @@
+import { PENDING_CHAT_TELEMETRY_KEY } from "./chatTelemetryStorage";
+
 // Pending operations are observation records, never replayable chat payloads.
 // Keep the native v1 key so an update retains an earlier uncertain operation.
 export const PENDING_CHAT_SENDS_KEY = "shoggoth.chat.pending-native-sends.v1";
@@ -13,6 +15,8 @@ export function chatVerificationNoticeKey(pending?: PendingChatSend) {
     : pending ? "chat.sendNeedsVerification" : "chat.observeNeedsVerification";
 }
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const TELEMETRY_LINK_TTL_MS = 7 * 86_400_000;
 const PENDING_CHAT_STOPS_KEY = "shoggoth.chat.pending-native-stops.v1";
 const TERMINAL_RUN_STATES = new Set(["completed", "failed", "canceled", "interrupted", "skipped"]);
 export type PendingNativeChatStop = { key: string; backendId: string } & ({ idempotencyKey: string; runId?: never }
@@ -92,18 +96,49 @@ export function createPendingChatSendStore(storage: () => StorageLike, now = Dat
     if (entries.length > 256) return false;
     try { storage().setItem(PENDING_CHAT_SENDS_KEY, JSON.stringify(entries)); return true; } catch { return false; }
   };
+  const readTelemetryLinks = (): Record<string, unknown> => {
+    try {
+      const links = JSON.parse(storage().getItem(PENDING_CHAT_TELEMETRY_KEY) || "{}");
+      return links && typeof links === "object" && !Array.isArray(links) && Object.keys(links).length <= 256 ? links : {};
+    } catch { return {}; }
+  };
+  const writeTelemetryLinks = (entries: PendingChatSend[], idem?: string, telemetryId?: string) => {
+    try {
+      const previous = readTelemetryLinks();
+      const links: Record<string, string> = {};
+      const earliest = now() - TELEMETRY_LINK_TTL_MS;
+      for (const entry of entries) {
+        if (!UUID.test(entry.idem) || entry.at <= earliest) continue;
+        const id = previous[entry.idem] ?? (entry.idem === idem ? telemetryId : undefined);
+        if (typeof id === "string" && UUID.test(id)) links[entry.idem] = id;
+      }
+      storage().setItem(PENDING_CHAT_TELEMETRY_KEY, JSON.stringify(links));
+    } catch { /* statistics must not affect the send fence */ }
+  };
   const read = () => decode() ?? [];
   return {
     read,
     has: (key: string) => read().some(entry => entry.key === key),
-    remember(key: string, idem: string, _historicalSelection?: readonly RecoveryConnectorSelection[], backendId?: string) {
+    telemetryId(idem: string) {
+      const id = readTelemetryLinks()[idem];
+      if (!UUID.test(idem) || typeof id !== "string" || !UUID.test(id)) return;
+      const entries = decode();
+      if (entries?.some(entry => entry.idem === idem && now() - entry.at < TELEMETRY_LINK_TTL_MS)) return id;
+      if (entries) writeTelemetryLinks(entries);
+    },
+    remember(key: string, idem: string, _historicalSelection?: readonly RecoveryConnectorSelection[], backendId?: string,
+      telemetryId?: string) {
       if (_historicalSelection?.length) return false; // Retired selections are never accepted for a new send.
       const entries = decode();
       if (!entries || entries.some(entry => entry.key === key && entry.idem !== idem)) return false;
       const previous = entries.find(entry => entry.key === key && entry.idem === idem);
       if (previous?.backendId && backendId && previous.backendId !== backendId) return false;
       const entry = previous ?? { key, idem, at: now(), ...(backendId ? { backendId } : {}) };
-      return entryValid(entry) && write([...entries.filter(item => item.key !== key || item.idem !== idem), entry]);
+      if (!entryValid(entry)) return false;
+      const next = [...entries.filter(item => item.key !== key || item.idem !== idem), entry];
+      if (!write(next)) return false;
+      if (telemetryId) writeTelemetryLinks(next, idem, telemetryId);
+      return true;
     },
     accepted(key: string, idem: string) {
       const entries = decode();
@@ -127,7 +162,11 @@ export function createPendingChatSendStore(storage: () => StorageLike, now = Dat
     },
     forget(key: string, idem?: string) {
       const entries = decode();
-      return entries !== null && write(entries.filter(entry => entry.key !== key || (idem !== undefined && entry.idem !== idem)));
+      if (!entries) return false;
+      const next = entries.filter(entry => entry.key !== key || (idem !== undefined && entry.idem !== idem));
+      if (!write(next)) return false;
+      if (entries.length !== next.length) writeTelemetryLinks(next);
+      return true;
     },
   };
 }

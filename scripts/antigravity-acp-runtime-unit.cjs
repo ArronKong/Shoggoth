@@ -14,7 +14,7 @@ const {
   modelCatalogFromConfig,
 } = require("../app/agent-service/antigravity-acp-runtime-host");
 const { AntigravityRuntimeAdapter } = require("../app/agent-service/antigravity-runtime-adapter");
-const { readAntigravityCliQuota } = require("../app/agent-service/antigravity-cli-quota");
+const { RUNTIME_ACCOUNT_QUOTA_RUNTIMES } = require("../app/agent-service/runtime-account-service-protocol");
 const { ANTIGRAVITY_ACP_SERVER_VERSION, ANTIGRAVITY_ACP_CONTRACTS } = require("../app/agent-service/antigravity-acp-distribution");
 const {
   antigravityUsedOnThisMac,
@@ -26,77 +26,25 @@ const { normalizeInteractiveRequestV1 } = require("../app/core/shoggoth-interact
 const { DatabaseSync } = require("node:sqlite");
 const { AntigravityNativeToolResults, nativeToolCall } = require("../app/agent-service/antigravity-native-tool-results");
 
-test("Antigravity quota uses the signed CLI's native login and structured /usage windows", async t => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-quota-unit-")));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const binary = path.join(home, ".local", "bin", "agy");
-  fs.mkdirSync(path.dirname(binary), { recursive: true });
-  fs.writeFileSync(binary, "fixture", { mode: 0o700 });
-  const parentEnv = { PATH: "/usr/bin:/bin", GEMINI_HOME: "/isolated-acp", GOOGLE_API_KEY: "fixture-secret" };
-  const resetsAt = "2026-11-24T12:00:00Z";
-  const calls = [];
-  const options = { homedir: home, platform: "darwin", parentEnv,
-    readSystemProxy: async () => ({ HTTPS_PROXY: "http://127.0.0.1:9999" }),
-    execute: async (command, args, options) => {
-      calls.push({ command, args, ...options });
-      if (command === "/usr/bin/codesign") return {};
-      if (args[0] === "--version") return { stdout: "1.5.15\n" };
-      return { stdout: JSON.stringify({ status: "SUCCESS", conversation_id: "", num_turns: 0, usage: { total_tokens: 0 },
-        command: { name: "usage", data: { groups: [
-          { name: "Gemini Models", buckets: [
-            { window: "5h", remaining_fraction: 0.75, reset_time: resetsAt },
-            { window: "5h", remaining_fraction: 0.5, disabled: true },
-            { window: "weekly", remaining_fraction: "0.8" },
-          ] },
-          { name: "Claude and GPT models", buckets: [{ window: "weekly", remaining_fraction: 0, reset_time: resetsAt }] },
-        ] } } }) };
-    } };
-  const quota = await readAntigravityCliQuota(options);
-  assert.equal(quota.status, "available");
-  assert.deepEqual(quota.windows, [
-    { label: "Gemini Models", durationMinutes: 300, usedPercent: 25, resetsAt: Date.parse(resetsAt) },
-    { label: "Claude and GPT models", durationMinutes: 10080, usedPercent: 100, resetsAt: Date.parse(resetsAt) },
-  ]);
-  assert.equal(quota.quotaScope, undefined);
-  assert.equal(calls[0].command, "/usr/bin/codesign");
-  assert.match(calls[0].args[2], /anchor apple generic.*EQHXZ8M8AV/u);
-  assert.deepEqual(calls.slice(1).map(call => [call.command, ...call.args.slice(0, 2)]),
-    [[binary, "--version"], [binary, "-p", "/usage"]]);
-  assert.equal(calls[2].env.HOME, home);
-  assert.equal(calls[2].env.GOOGLE_API_KEY, undefined);
-  assert.equal(calls[2].env.GEMINI_HOME, undefined);
-  assert.equal(calls[2].env.HTTPS_PROXY, "http://127.0.0.1:9999");
-  assert.equal(calls[2].env.AGY_CLI_DISABLE_AUTO_UPDATE, "true");
-  assert.equal(fs.existsSync(calls[2].cwd), false);
-});
-
-test("Antigravity quota fences older or prompt-like CLI behavior and projects fixed errors", async t => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agy-quota-errors-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const binary = path.join(home, "agy");
-  let version = "1.1.10", result, usageCalls = 0;
-  const options = { homedir: home, platform: "darwin", parentEnv: { PATH: home }, readSystemProxy: async () => ({}),
-    execute: async (command, args) => {
-      if (command === "/usr/bin/codesign") return {};
-      if (args[0] === "--version") return { stdout: version };
-      usageCalls += 1;
-      return result;
-    } };
-  fs.writeFileSync(binary, "old", { mode: 0o700 });
-  const update = { status: "unavailable", reason: "antigravity-cli-update-required" };
-  assert.deepEqual(await readAntigravityCliQuota(options), update);
-  assert.equal(usageCalls, 0);
-  fs.writeFileSync(binary, "current", { mode: 0o700 });
-  version = "1.1.11";
-  result = { stdout: JSON.stringify({ status: "ERROR", error: "fixture" }),
-    stderr: 'AGY_ERROR: {"status":"PERMISSION_DENIED","error_code":403,"message":"private@example.test"}' };
-  assert.deepEqual(await readAntigravityCliQuota(options), { status: "unavailable", reason: "antigravity-cli-permission-denied" });
-  result = { stdout: JSON.stringify({ status: "ERROR", error: "Authentication required. Please visit the URL" }) };
-  assert.deepEqual(await readAntigravityCliQuota(options), { status: "unavailable", reason: "antigravity-cli-sign-in-required" });
-  result = { stdout: JSON.stringify({ status: "SUCCESS", num_turns: 1, conversation_id: "unexpected" }) };
-  assert.deepEqual(await readAntigravityCliQuota(options), update);
-  assert.deepEqual(await readAntigravityCliQuota(options), update);
-  assert.equal(usageCalls, 3);
+test("Antigravity runtime does not expose account quota reading", async () => {
+  assert.equal(RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has("antigravity"), false);
+  assert.equal(AntigravityAcpRuntimeHost.prototype.accountQuotaRead, undefined);
+  assert.equal(fs.existsSync(path.join(__dirname, "../app/agent-service/antigravity-cli-quota.js")), false);
+  const host = {
+    controlInstance: true,
+    terminated: new Promise(() => {}),
+    subscribe: () => () => {},
+  };
+  const adapter = new AntigravityRuntimeAdapter({
+    runtimePool: { get: async () => host, stop: async () => {}, stopAll: async () => {} },
+  });
+  const handle = await adapter.acquire({
+    runtime: "antigravity",
+    runtimeProfileId: "antigravity-quota-check-v1",
+    runtimeAccountId: "native-antigravity-default-v1",
+  });
+  assert.equal(handle.capabilities["account.quota.read"], false);
+  assert.equal(handle.accountQuotaRead, undefined);
 });
 
 test("approval retains a full long command and its execution directory; undisplayable commands never reach approval", async () => {
@@ -530,9 +478,9 @@ function nativeRead({ id = "call_read", args = { absolute_path: "/w/snapshot.txt
     [4, proto([[1, "type.googleapis.com/antigravity.localharness.ToolResponse"], [2, response]])]])]]) };
 }
 function nativeMcp({ tool, args, output, status = 3, server = "shoggoth", id = `native-${tool}` }) {
-  return { type: 38, status, payload: proto([[1, 38], [4, status], [47, proto([[1, server],
-    [2, proto([[1, id], [2, tool], [3, JSON.stringify(args)]])],
-    [3, typeof output === "string" ? output : JSON.stringify(output)]])]]) };
+  const fields = [[1, server], [2, proto([[1, id], [2, tool], [3, JSON.stringify(args)]])]];
+  if (output !== undefined) fields.push([3, typeof output === "string" ? output : JSON.stringify(output)]);
+  return { type: 38, status, payload: proto([[1, 38], [4, status], [47, proto(fields)]]) };
 }
 function nativeStore(ctx, rows, { append = false } = {}) {
   const folder = path.join(ctx.home, ".gemini", "antigravity-acp", "conversations");
@@ -581,6 +529,45 @@ test("pinned ACP generic failures recover exact native reads and MCP results whi
   assert.match(click.tool.output, /COMPUTER_USER_TAKEOVER/u);
   const terminal = ctx.events.findIndex((event) => event.type === "complete");
   assert.ok(ctx.events.every((event, i) => event.type !== "tool_result" || i < terminal));
+});
+
+test("a native MCP result without output leaves later tool results live", async (t) => {
+  const ctx = await startedSession(t);
+  let wrote = false;
+  ctx.host.subscribe((event) => {
+    if (event.type !== "tool_start" || wrote) return;
+    wrote = true;
+    nativeStore(ctx, [nativeRead(),
+      nativeMcp({ tool: "computer_snapshot", args: { sessionId: "computer-one" } }),
+      nativeMcp({ tool: "computer_click", args: { ref: "c3", snapshotRevision: "revision-one", sessionId: "computer-one" },
+        status: 7, output: "Session paused (COMPUTER_USER_TAKEOVER)" }),
+    ]);
+  });
+  const accepted = await ctx.host.turnStart({ sessionId: ctx.session.id, operationId: "missing-native-output",
+    prompt: "DIRECTIVE:BROKEN_TOOL_RESULTS_CANCEL", cwd: ctx.workspace });
+  const click = await until(() => ctx.events.find(e => e.type === "tool_result" && e.toolCallId === "public-click"),
+    "the next tool's native result while the prompt is still active", 2_000);
+  assert.equal(click.tool.success, false);
+  assert.match(click.tool.output, /COMPUTER_USER_TAKEOVER/u);
+  const active = ctx.host.activeTurns.get(ctx.session.id);
+  assert.ok(active.pendingToolResults.has("public-snapshot"));
+  assert.equal(ctx.events.some(e => e.type === "tool_result" && e.toolCallId === "public-snapshot"), false);
+
+  // The original incomplete result has exhausted its retry window.
+  clearTimeout(active.nativeResultTimer);
+  active.nativeResultAttempts = 20;
+  const send = update => ctx.host._onNotification({ method: "session/update", params: { sessionId: ctx.session.id, update } });
+  const args = { query: "later result" };
+  send({ sessionUpdate: "tool_call", toolCallId: "late-search", rawInput: { arguments: args },
+    _meta: { mcp: { server: "shoggoth", tool: "web_search" } } });
+  send({ sessionUpdate: "tool_call_update", toolCallId: "late-search", status: "completed", rawOutput: "ACP summary" });
+  nativeStore(ctx, [nativeMcp({ tool: "web_search", args, output: "LATE NATIVE RESULT" })], { append: true });
+  const search = await until(() => ctx.events.find(e => e.type === "tool_result" && e.toolCallId === "late-search"),
+    "a retry for the next tool whose native row committed after its ACP update", 2_000);
+  assert.equal(search.contextTool.output, "LATE NATIVE RESULT");
+  await ctx.host.turnInterrupt({ sessionId: ctx.session.id, turnId: accepted.turn.id });
+  await until(() => ctx.events.some(e => e.type === "complete" && e.turnId === accepted.turn.id), "complete");
+  assert.equal(ctx.events.filter(e => e.type === "tool_result" && e.toolCallId === "public-click").length, 1);
 });
 
 function nativeMetadata({ id, name, input, sessionId, idx, startedAt, completedAt }) {
@@ -688,6 +675,8 @@ test("native MCP recovery requires uniqueness on both sides and the exact server
   assert.equal(reader.recover(ctx.session.id, -1, [call, { ...call, id: "public-two" }]).size, 0,
     "two ACP calls cannot borrow one native result");
   assert.equal(reader.recover(ctx.session.id, -1, [{ ...call, server: "another-server" }]).size, 0);
+  nativeStore(ctx, [nativeMcp({ tool: "computer_snapshot", args: { sessionId: "computer-one" }, id: "native-missing-output" })], { append: true });
+  assert.equal(reader.recover(ctx.session.id, -1, [call]).size, 0, "an incomplete native response still counts as a duplicate");
 });
 
 test("native recovery reads the live WAL without modifying native data", async (t) => {
@@ -840,6 +829,9 @@ test("session start binds a harness-child MCP ticket and applies mode and model"
   const names = listed.commands.map((command) => command.name);
   assert.ok(names.includes("plan"));
   assert.ok(!names.includes("logout"), "account sign-out stays in Settings");
+  const compact = listed.commands.find((command) => command.name === "compact");
+  assert.equal(compact?.execution, "runtime", "the menu offers /compact; the Service renews the thread for it");
+  assert.equal(compact.source, "Shoggoth");
   assert.deepEqual(await ctx.host.commandExecute({ sessionId: ctx.session.id, text: "/plan ship it" }),
     { kind: "send", text: "/plan ship it", warning: null });
 });
@@ -888,6 +880,19 @@ test("native approval options pass the shared interaction contract and map back 
   assert.equal(request.params.command, undefined, "fetching a URL is not a command");
   const started = ctx.events.find((event) => event.type === "tool_start");
   assert.deepEqual([started.tool.name, started.tool.input], ["read_url_content", { url: "https://example.com" }]);
+});
+
+test("Antigravity projects the last valid context usage for the accepted ACP session", async (t) => {
+  const ctx = await startedSession(t);
+  const { accepted, complete } = await runTurn(ctx, "DIRECTIVE:CONTEXT_USAGE");
+  const observations = ctx.events.filter(event => event.type === "context_usage" && event.turnId === accepted.turn.id);
+  assert.equal(observations.length, 1);
+  assert.deepEqual(observations[0].contextUsage, {
+    runtimeSessionId: ctx.session.id, usedTokens: 85_000, contextWindow: 100_000,
+    quality: "exact", source: "runtime_event", observedAt: observations[0].contextUsage.observedAt,
+  });
+  assert(ctx.events.indexOf(observations[0]) < ctx.events.indexOf(complete));
+  assert.equal(ctx.events.some(event => event.type === "usage"), false);
 });
 
 test("ACP tool calls are named by their tool and use the common argument keys", () => {

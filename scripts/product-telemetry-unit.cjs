@@ -7,7 +7,7 @@ const { randomUUID } = require("node:crypto");
 const test = require("node:test");
 const { createProductTelemetry } = require("../app/core/product-telemetry");
 const { createConfigStore } = require("../app/core/config-store");
-const { validateState } = require("../app/core/product-telemetry-store");
+const { STATE_VERSION, validateState } = require("../app/core/product-telemetry-store");
 const { LIMITS } = require("../app/core/product-telemetry-schema");
 const { BUILD, fakeClock, tempProfile } = require("./helpers/product-telemetry-fixtures.cjs");
 
@@ -393,6 +393,83 @@ function finishChat(c, operationId, epoch) {
     usage: { runtimeType: "codex", providerId: "openai", modelId: "openai/gpt-6.1-sol" } }, epoch);
 }
 
+test("a native chat finalized after restarting counts its outcome and first success exactly once", async () => {
+  const f = fixture();
+  try {
+    const first = f.make();
+    assert.equal(first.recordActivity(), true);
+    const oldEpoch = first.getSettings().detailedEpoch;
+    const { operationId, started } = startChat(first);
+    assert.equal(started, true);
+    const attempt = f.read().detail;
+    assert.equal(attempt.draft.properties.chat_send_attempt_count, 1);
+    assert.deepEqual(attempt.pendingChats, [{ operationId, startedAt: f.clock.now() }]);
+    first.close();
+
+    const reopened = f.make();
+    assert.equal(reopened.recordActivity(), false);
+    assert.equal(startChat(reopened, operationId).started, false);
+    assert.equal(finishChat(reopened, operationId, oldEpoch), false);
+    assert.equal(finishChat(reopened, operationId), true);
+    const settled = f.read();
+    assert.equal(settled.detail.draft.properties.chat_send_success_count, 1);
+    assert.deepEqual(settled.detail.pendingChats, []);
+    assert.equal(settled.outbox.filter(row => row.event.properties.step === "first_chat_succeeded").length, 1);
+    assert.equal(finishChat(reopened, operationId), false);
+    reopened.close();
+
+    const again = f.make();
+    assert.equal(finishChat(again, operationId), false);
+    f.clock.advance(86_400_000);
+    for (let batch = 0; batch < 3; batch++) await again.flush();
+    const sent = f.sent.flat();
+    const daily = sent.find(event => event.event === "shoggoth_daily_feature_usage");
+    assert.equal(daily.properties.chat_send_attempt_count, 1);
+    assert.equal(daily.properties.chat_send_success_count, 1);
+    assert.equal(Object.keys(daily.properties).some(key => key.startsWith("chat_send_duration_")), false,
+      "recovery time cannot measure the duration of a completed turn");
+    assert.equal(sent.filter(event => event.properties.step === "first_chat_succeeded").length, 1);
+    assert.equal(JSON.stringify(sent).includes(operationId), false);
+  } finally { f.cleanup(); }
+});
+
+test("a restored chat result uses the observed UTC day and an expired attempt stays unmatched", async () => {
+  const f = fixture();
+  try {
+    const first = f.make();
+    first.recordActivity();
+    const failed = startChat(first).operationId;
+    const canceled = startChat(first).operationId;
+    const stale = startChat(first).operationId;
+    first.close();
+    f.clock.advance(86_400_000);
+
+    const reopened = f.make();
+    assert.equal(detail(reopened, "feature_end", {
+      operationId: failed, outcome: "error", errorKind: "timeout", usage: null,
+    }), true);
+    assert.equal(detail(reopened, "feature_end", {
+      operationId: canceled, outcome: "canceled", errorKind: null, usage: null,
+    }), true);
+    const saved = f.read();
+    const started = saved.outbox.find(row => row.event.event === "shoggoth_daily_feature_usage").event.properties;
+    const finished = saved.detail.draft.properties;
+    assert.equal(started.chat_send_attempt_count, 3);
+    assert.notEqual(finished.report_day, started.report_day);
+    assert.equal(finished.chat_send_attempt_count, undefined);
+    assert.equal(finished.chat_send_error_count, 1);
+    assert.equal(finished.chat_send_error_timeout_count, 1);
+    assert.equal(finished.chat_send_canceled_count, 1);
+    assert.equal(saved.detail.steps.includes("first_chat_succeeded"), false);
+    reopened.close();
+    f.clock.advance(LIMITS.ttlMs - 86_400_000);
+    const expired = f.make();
+    assert.equal(finishChat(expired, stale), false);
+    await expired.flush();
+    assert.deepEqual(f.read().detail.pendingChats, []);
+  } finally { f.cleanup(); }
+});
+
 test("matched actions, observed configuration, and steps seal by UTC day with separate batches", async () => {
   const f = fixture();
   try {
@@ -469,6 +546,7 @@ test("detailed opt-out preserves a basic flight; late ends and old epochs stay d
     await flight;
     assert.equal(f.read().outbox.length, 0);
     assert.equal(f.read().detail.draft, null);
+    assert.deepEqual(f.read().detail.pendingChats, []);
     const resumed = c.setPreference("detailedEnabled", true);
     assert.notEqual(resumed.settings.detailedEpoch, first.detailedEpoch);
     assert.equal(finishChat(c, operationId, first.detailedEpoch), false);
@@ -573,7 +651,7 @@ test("legacy basic state keeps the exact queued event and installation ID when m
     assert.equal(restarted.recordActivity(), false);
     await restarted.flush();
     assert.deepEqual(f.sent, [[legacy.outbox[0].event]]);
-    assert.equal(f.read().version, 2);
+    assert.equal(f.read().version, STATE_VERSION);
     assert.equal(f.read().distinctId, legacy.distinctId);
   } finally { f.cleanup(); }
 });
@@ -640,6 +718,8 @@ test("upgrade preserves v2 queued events and only writes v3 fields to a new day'
   try {
     const old = f.make(); old.recordActivity(); detail(old, "page_used", { page: "chat" }); old.close();
     const state = f.read();
+    state.version = 2;
+    delete state.detail.pendingChats;
     for (const event of [state.outbox[0].event, state.detail.draft]) {
       Object.assign(event.properties, { schema_version: 2, policy_version: 2 });
     }

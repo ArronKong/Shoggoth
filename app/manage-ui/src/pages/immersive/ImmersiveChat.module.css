@@ -500,8 +500,7 @@
   gap: 8px;
   flex: none;
 }
-.pill,
-.pillStatic {
+.pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -513,8 +512,6 @@
   color: #fff;
   font-size: 13px;
   white-space: nowrap;
-}
-.pill {
   cursor: pointer;
 }
 .pill:disabled {
@@ -1005,6 +1002,21 @@
 .errRetry:hover {
   background: rgba(255, 255, 255, 0.2);
 }
+.errCompact {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.errCompact:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
 
 /* ── 本地 slash 结果卡：中性淡化 ── */
 .localCard {
@@ -1203,12 +1215,6 @@
   font-size: 11px;
   line-height: 1;
   padding: 0;
-}
-
-/* ctx 用量 pill */
-.pillCtx {
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 12px;
 }
 
 /* ── slash 命令菜单（ChatPage 传入的同一份 JSX；亮色皮肤类在沉浸内覆成暗玻璃）──

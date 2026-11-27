@@ -9,7 +9,7 @@ const OPENCODE_CAPABILITIES = runtimeCapabilities({
   "session.rename": true, "session.archive": true, "session.unarchive": true,
   "session.delete": true, "turn.start": true, "turn.interrupt": true,
   "models.list": true, "commands.list": true, "commands.execute": true, events: true, serverRequests: true,
-  "context.compact.native": true, "context.compact.auto": true,
+  "context.usage.estimated": true, "context.compact.native": true, "context.compact.auto": true,
   "model.generate.toolFree": true,
   "model.generate.settings": true,
 });

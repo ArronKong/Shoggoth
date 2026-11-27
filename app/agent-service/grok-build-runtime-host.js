@@ -16,6 +16,7 @@ const { GrokBuildAcpJsonlClient } = require("./grok-build-acp-jsonl");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { GrokBuildRuntimeLedger } = require("./grok-build-runtime-ledger");
 const { readGrokUsage } = require("./grok-build-usage");
+const { readGrokSessionContext } = require("./grok-build-session-context");
 const { quotaScopeDigest, quotaSnapshot } = require("../core/oauth-account-quota");
 const {
   GROK_BUILD_RUNTIME,
@@ -711,7 +712,10 @@ class GrokBuildRuntimeHost {
     this.modelSecretScope = null;
     this.modelSecretRoutes = [];
     this.fs = options.fs || fs;
-    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
+    // Hosts are created per WorkRun: the shared store keeps what each native
+    // session already holds across Runs and restarts.
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)({
+      store: options.promptLedgerStore ?? null, scope: "grok-build" });
     if (options.resolveProxy !== undefined && typeof options.resolveProxy !== "function") {
       throw hostError("GROK_BUILD_PROXY_RESOLVER_INVALID", "Grok Build proxy resolver is invalid");
     }
@@ -1912,6 +1916,7 @@ class GrokBuildRuntimeHost {
       promptCommit: promptParts.commit,
       createdAt,
       cwd: session.cwd,
+      model,
       turnId,
       operationId: input.operationId,
       promptText: prompt,
@@ -1976,6 +1981,7 @@ class GrokBuildRuntimeHost {
         ? `SHOGGOTH DEVELOPER INSTRUCTIONS\n${config.developerInstructions}` : "",
       rules: turn.rules,
       context: typeof input.context === "string" ? input.context : "",
+      contextIndex: input.contextIndex ?? null,
       run: turn.run,
     });
     blocks.push(`CURRENT USER REQUEST\n${input.prompt}`);
@@ -2252,10 +2258,11 @@ class GrokBuildRuntimeHost {
       this._publish({ ...common, type: "status", status: "running" });
     }
     if (update.sessionUpdate === "usage_update") {
-      this._publish({ ...common, type: "context_usage", contextUsage: {
+      active.contextUsage = {
         runtimeSessionId: sessionId, usedTokens: update.used, contextWindow: update.size > 0 ? update.size : null,
         quality: "exact", source: "runtime_event", observedAt: this.now(),
-      } });
+      };
+      this._publish({ ...common, type: "context_usage", contextUsage: active.contextUsage });
       return;
     }
     if (update.sessionUpdate === "agent_message_chunk") {
@@ -2519,6 +2526,28 @@ class GrokBuildRuntimeHost {
     this.rpc?.notify("session/cancel", { sessionId: active.sessionId }).catch(() => {});
   }
 
+  async _readSessionContext(sessionId) {
+    try {
+      const response = await this.rpc.request("_x.ai/session/info", { sessionId }, { timeoutMs: Math.min(this.requestTimeoutMs, 1000) });
+      const info = response?.result;
+      if (response?.error || info?.sessionId !== sessionId) return null;
+      const context = info.context ?? info.data?.context;
+      if (!Number.isSafeInteger(context?.used) || context.used < 0
+        || !Number.isSafeInteger(context.total) || context.total <= 0) return null;
+      return { runtimeSessionId: sessionId, usedTokens: context.used, contextWindow: context.total,
+        quality: "estimated", source: "session_stats", observedAt: this.now() };
+    } catch { return null; }
+  }
+
+  async _refreshTurnContext(active, pendingContext) {
+    const { sessionId, turnId } = active;
+    const contextUsage = await pendingContext;
+    if (!contextUsage || this.state !== "ready" || this.activeTurns.has(sessionId)) return;
+    const session = sessionById(this.ledger.snapshot(), sessionId);
+    if (!session || session.archived || session.turns.at(-1)?.id !== turnId) return;
+    this._publish({ known: true, method: "_x.ai/session/info", type: "context_usage", sessionId, turnId, contextUsage });
+  }
+
   async _finishPrompt(active, response) {
     if (this.activeTurns.get(active.sessionId) !== active) return;
     if (!plain(response) || !STOP_REASONS.has(response.stopReason)) {
@@ -2528,6 +2557,12 @@ class GrokBuildRuntimeHost {
     const status = response.stopReason === "end_turn" ? "completed"
       : response.stopReason === "cancelled" ? "canceled" : "failed";
     const timestamp = this.now();
+    const compacted = status === "completed" && /^\/compact(?:\s|$)/u.test(active.promptText);
+    // Run-scoped hosts can retire as soon as complete is emitted. Start the
+    // optional observation while the completed session is still attached.
+    let reportedContext = null;
+    const pendingContext = !active.timedOut && status === "completed" && (compacted || !active.contextUsage?.contextWindow)
+      ? this._readSessionContext(active.sessionId).then(value => (reportedContext = value)) : null;
     let usage = [];
     try {
       usage = await (this.options.readUsage || readGrokUsage)({ binaryPath: this.binaryPath,
@@ -2565,16 +2600,26 @@ class GrokBuildRuntimeHost {
         this._publish({ ...common, type: "text", itemId: message.id, text: message.text, phase: "final_answer" });
       }
     }
-    // The built-in /compact command was sent bare (see _promptText); ending the
-    // turn normally is Grok's only completion fact for it over ACP.
-    if (status === "completed" && /^\/compact(?:\s|$)/u.test(active.promptText)) {
-      this._publish({ ...common, type: "context_compacted",
-        contextUsage: unknownRuntimeContextUsage(active.sessionId, { observedAt: timestamp, source: "runtime_event" }) });
+    const refreshContext = pendingContext !== null && (compacted || !active.contextUsage?.contextWindow);
+    const measured = refreshContext ? reportedContext ?? readGrokSessionContext({
+      home: this.usageEnv.GROK_HOME, cwd: active.cwd, sessionId: active.sessionId, model: active.model,
+      sinceMs: active.createdAt, untilMs: this.now(),
+    }) : null;
+    if (compacted) {
+      this._publish({ ...common, type: "context_compacted", contextUsage: unknownRuntimeContextUsage(
+        active.sessionId, { observedAt: measured?.observedAt ?? this.now() }) });
+    }
+    if (measured || (refreshContext && !compacted && !active.contextUsage)) {
+      this._publish({ ...common, type: "context_usage",
+        contextUsage: measured || unknownRuntimeContextUsage(active.sessionId, { observedAt: this.now() }) });
     }
     this._publish({ ...common, method: "session/prompt", type: "complete", status,
       ...(status === "failed" ? { errorCode: active.failureCode || "GROK_BUILD_TURN_FAILED",
         ...(active.failure ? { failure: active.failure } : {}) } : {}) });
     active.terminal.resolve({ status });
+    // The contextual read is optional. A slow or unsupported extension must
+    // leave the reply and its terminal receipt available immediately.
+    if (refreshContext && !measured) void this._refreshTurnContext(active, pendingContext).catch(() => {});
   }
 
   _failPrompt(active, error) {

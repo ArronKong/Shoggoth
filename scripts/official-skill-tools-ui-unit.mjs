@@ -87,7 +87,7 @@ for (const definition of catalog) {
     installedVersion: definition.version, skillCount: 1, serverId: server.id, canRemove: true, errorCode: null }] },
     busy: false, loading: false, error: null, refresh: async () => {}, change: async () => {} };
   let rendered;
-  const checkLabel = ["fliggy", "baidu-maps"].includes(definition.id) ? "officialConnectors.checkService" : "officialConnectors.check";
+  const checkLabel = ["fliggy", "baidu-maps", "obsidian"].includes(definition.id) ? "officialConnectors.checkService" : "officialConnectors.check";
   const button = key => rendered.root.findAllByType("button").find(node => node.props.children === key);
   const click = async key => Renderer.act(async () => { const target = button(key); assert.ok(target, key); target.props.onClick(); await flush(); });
   try {
@@ -134,7 +134,7 @@ for (const definition of catalog) {
     await Renderer.act(async () => { rendered.root.findByType(McpDialog).props.onClose(); await flush(); });
     const text = JSON.stringify(rendered.toJSON());
     assert.equal(text.includes(accountName), false, "the old checked account must not survive a nested connection change");
-    assert.ok(text.includes(["fliggy", "baidu-maps"].includes(definition.id) ? "officialConnectors.serviceUnknown" : "officialConnectors.accountStates.unknown"));
+    assert.ok(text.includes(["fliggy", "baidu-maps", "obsidian"].includes(definition.id) ? "officialConnectors.serviceUnknown" : "officialConnectors.accountStates.unknown"));
     assert.equal(model.data.items[0].revision, 5);
     assert.ok(changed >= 2);
     receipts.push({ id: definition.id, actualNestedComponents: true, noCredentialEntry: true, accessChange: true, staleAccountCleared: true, actualToolDetails: true, lazyReadOnlyToolList: true, lateAccountResponseFenced: true });

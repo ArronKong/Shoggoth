@@ -980,6 +980,22 @@ test("入队写入结果未知时不能生成可重发的拒绝回执", async ()
   await value.coordinator.close();
 });
 
+test("加密入队失败只在能证明无接收回执时标记未接收", async () => {
+  const value = await openFixture();
+  const enqueue = value.inbox.enqueue.bind(value.inbox);
+  const input = { operationId: "crypto-commit-rejected", sessionKey: SESSION_KEY, prompt: "hello" };
+  try {
+    value.inbox.enqueue = () => { throw codedError("pending_commands_locked"); };
+    await assert.rejects(value.coordinator.send(input), { code: "pending_commands_locked", admissionAccepted: false });
+    assert.equal(value.inbox.get(input.operationId), null);
+    value.inbox.enqueue = command => { enqueue(command); throw codedError("pending_commands_locked"); };
+    await assert.rejects(value.coordinator.send(input), error => error.code === "pending_commands_locked"
+      && error.admissionAccepted === undefined);
+    assert.ok(value.inbox.get(input.operationId));
+    assert.equal(value.host.turnStartCalls, 0);
+  } finally { await value.coordinator.close(); }
+});
+
 test("发送准备等待记忆保存时关闭 Service，不能再写入或启动用户回合", async () => {
   const value = await openFixture(), entered = deferred(), release = deferred();
   value.coordinator.beforeSessionSend = async () => { entered.resolve(); await release.promise; };

@@ -2,6 +2,7 @@
 const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 const { McpCryptoBroker } = require("../app/agent-service/mcp-crypto-broker");
 const { SendLatencyDiagnostics } = require("../app/agent-service/send-latency-diagnostics");
 const { NativeChatPreparation } = require("../app/agent-service/native-chat-preparation");
@@ -32,6 +33,36 @@ test("persistent encryption reuses one real isolated process, remains FIFO and r
     await assert.rejects(f.broker.encrypt(Buffer.from("old"), { generation: 2 }));
   } finally { await f.close(); }
   assert.ok(f.children.every(child => child.exitCode !== null || child.signalCode !== null));
+});
+test("an exited crypto worker can be replaced after a transient macOS EPERM during cleanup", async () => {
+  const f = fixture();
+  try {
+    await f.broker.encrypt(Buffer.from("first"));
+    const original = f.children[0];
+    const signalProcess = f.broker.signalProcess;
+    let raced = false;
+    f.broker.signalProcess = (pid, signal) => {
+      if (pid === -original.pid && signal === "SIGTERM" && !raced) {
+        raced = true;
+        throw Object.assign(new Error("worker group exiting"), { code: "EPERM" });
+      }
+      return signalProcess(pid, signal);
+    };
+    const exited = once(original, "exit");
+    original.stdin.end();
+    const [exitCode] = await exited;
+    assert.equal(exitCode, 0);
+
+    const message = Buffer.alloc(230 * 1024, "x");
+    const encrypted = await f.broker.encrypt(message);
+    assert.deepEqual(await f.broker.decrypt(encrypted), message);
+    assert.ok(raced);
+    assert.equal(f.children.length, 2);
+    assert.equal(f.broker.residualGroups.size, 0);
+  } finally {
+    try { await f.broker.close(); }
+    finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
 });
 for (const mode of ["nonce", "hang"]) test(`persistent worker ${mode} failure blocks queued requests and physically terminates`, async () => {
   const f = fixture(mode);

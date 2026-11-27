@@ -205,7 +205,8 @@ function transcriptHistoryItem(event, runSource) {
   } else if (event.kind === "error") {
     // A dependent summary has its own durable terminal, but the waiting turn
     // publishes the failure. The saved exclusion still works after run eviction.
-    if (transcriptType === "terminal" && ((event.contextExcluded && /^compaction-[0-9a-f]{64}$/u.test(event.runId))
+    if (transcriptType === "terminal" && ((event.contextExcluded
+      && /^(?:native-compaction-(?:advisory-)?|compaction-)[0-9a-f]{64}$/u.test(event.runId))
       || (runSource === "compaction" && event.content.errorCode === "CHECKPOINT_STALE"))) return null;
     const text = transcriptMessageText(event);
     if (!text) return null;
@@ -214,7 +215,11 @@ function transcriptHistoryItem(event, runSource) {
     message = transcriptMessage(event, role, [{ type: "text", text }]);
     if (transcriptType === "terminal") {
       const failure = runtimeFailureDetail(event.content.failure);
-      if (failure) { message.failure = failure; message.errorCode = event.content.errorCode; }
+      if (failure) message.failure = failure;
+      // The code drives remedies on reload (the error area's Compact context),
+      // so it is kept whether or not the Runtime attached a failure detail.
+      const errorCode = event.content.errorCode;
+      if (typeof errorCode === "string" && /^[A-Z][A-Z0-9_]{0,127}$/u.test(errorCode)) message.errorCode = errorCode;
     }
     if (transcriptType === "terminal" && isRestartInterruption(event.content)) {
       message.notice = "runInterrupted";
@@ -230,6 +235,14 @@ function transcriptHistoryItem(event, runSource) {
     message = transcriptMessage(event, role, [{ type: "text", text: "Context compacted",
       semanticType: "contextCompaction" }]);
     message.notice = "contextCompacted";
+  } else if (event.kind === "status" && transcriptType === "context.renewed" && event.contextExcluded === true
+    && typeof event.content.runtimeSessionId === "string" && event.content.runtimeSessionId.length > 0) {
+    // Written after a full context continued on a fresh thread of the same
+    // Binding (manual /compact or the automatic path). Display only.
+    role = "assistant";
+    type = "status";
+    message = transcriptMessage(event, role, [{ type: "text", text: "Context renewed" }]);
+    message.notice = "contextRenewed";
   } else if (transcriptType === "reasoning") {
     const text = transcriptStructuredText(event.content?.reasoning);
     if (!text) return null;

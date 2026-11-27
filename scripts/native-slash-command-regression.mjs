@@ -117,6 +117,15 @@ for (const [index, catalog] of nativePools.entries()) {
 const merged = mergeNativeCommands("codex", [command("live", { aliases: ["model"], argumentHint: "<target>" })]);
 assert.equal(merged.some((entry) => entry.name === "model"), false, "live aliases outrank reference names");
 assert.equal(merged[0].args, "<target>");
+// Grok Build 1.0.94 advertises one command per installed skill (227 on a real
+// machine). Reference rows only fill the remaining room up to the limit, so the
+// live catalog, /compact first, is never voided by the fallback.
+const largeLive = [command("compact"), ...Array.from({ length: 226 }, (_, index) => command(`skill-${index}`))];
+const largeMerged = mergeNativeCommands("grok-build", largeLive);
+assert.equal(largeMerged.length, 256);
+assert.equal(largeMerged[0].name, "compact");
+assert.equal(requireRuntimeCommand("/compact", largeMerged, "grok-build").command.execution, "runtime");
+assert.equal(mergeNativeCommands("grok-build", Array.from({ length: 256 }, (_, index) => command(`skill-${index}`))).length, 256);
 const uiPool = policy.mergeNativeSlashCommands(merged);
 assert.equal(policy.parseSlashInput("/model item", uiPool).command.name, "live");
 assert.equal(policy.parseSlashInput("/shoggoth:model item", uiPool).command.source, "Shoggoth");

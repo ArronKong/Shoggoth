@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "serviceProtocolVersion": 38,
+  "serviceProtocolVersion": 39,
   "sharedSkillTools": [
     {
       "name": "shoggoth_capability_search",

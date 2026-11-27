@@ -21,7 +21,7 @@ const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(setImm
 const initial = id => ({ id, revision: 0, state: 'notInstalled', stage: null, version: '1.0.0', installedVersion: null, skillCount: 0, serverId: null, canRemove: false, errorCode: null });
 let assertions = 0;
 for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
- const serviceOnly = ['fliggy', 'baidu-maps'].includes(definition.id);
+ const serviceOnly = ['fliggy', 'baidu-maps', 'obsidian'].includes(definition.id);
  const alipay = definition.id === 'alipay';
  const opensAuthorizationPage = alipay;
  const translator = i18next.createInstance(); await translator.init({ lng: language, resources: { [language]: { translation: { officialConnectors: resources[language], mcpConnectors: mcpResources[language] } } } });
@@ -96,6 +96,14 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
    assert.equal(definition.version, '1.0.18'); assert.equal(definition.fields.length, 0);
    assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]));
   }
+  if (definition.id === 'obsidian') {
+   assert.equal(definition.version, '1.2.3'); assert.equal(definition.fields.length, 0);
+   assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]));
+   assert.equal(rendered.root.findAllByType('input').length, 0, 'Obsidian needs no API key');
+   assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_OBSIDIAN_CLI_UNAVAILABLE' }), 'obsidianCliUnavailable');
+   assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_OBSIDIAN_NOT_RUNNING' }), 'obsidianNotRunning');
+   assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_OBSIDIAN_FAILED' }), 'obsidianFailed');
+  }
   if (definition.id === 'doordash') {
    assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]), 'approval and platform limits visible before installation');
    assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === definition.accessUrl), 'official waitlist remains available before installation');
@@ -124,6 +132,7 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   if (definition.id === 'shop') assert.ok(button('login'), 'Shop offers optional personal account authorization');
   if (definition.id === 'rollinggo-hotel') assert.ok(button('login'), 'RollingGo offers official web authorization without a key');
   if (definition.id === 'baidu-maps') { assert.equal(button('login'), undefined); assert.equal(rendered.root.findByType('input').props.type, 'password'); assert.equal(rendered.root.findByType('input').props.value, ''); }
+  if (definition.id === 'obsidian') { assert.equal(button('login'), undefined); assert.equal(rendered.root.findAllByType('input').length, 0); }
   if (definition.fields.length) {
    const inputs = rendered.root.findAll(node => node.type === 'input' || node.type === 'textarea'); assert.equal(inputs.length, definition.fields.length);
    const entered = inputs.map((input, index) => input.type === 'textarea' ? ' \r\nPRIVATE-KEY\nsecret-canary-' + index + '\nEND-KEY\r\n ' : ' secret-canary-' + index + ' ');
@@ -170,15 +179,25 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
    await Renderer.act(async () => rendered.unmount());
    await Renderer.act(async () => { rendered = Renderer.create(React.createElement(Harness)); await flush(); });
    assert.equal(accountCalls.length, checksBeforeReopen, 'reopening reads credential metadata without repeating a provider request');
-   assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.credentialSavedHint')), 'reopening acknowledges the saved token');
-   assert.equal(rendered.root.findByType('input').props.value, '', 'stored credentials are never copied into the input');
-   assert.equal(rendered.root.findByType('input').props.placeholder, t('officialConnectors.credentialSavedPlaceholder'));
+   if (definition.fields.length) {
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.credentialSavedHint')), 'reopening acknowledges the saved token');
+    assert.equal(rendered.root.findByType('input').props.value, '', 'stored credentials are never copied into the input');
+    assert.equal(rendered.root.findByType('input').props.placeholder, t('officialConnectors.credentialSavedPlaceholder'));
+   }
    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceUnknown')), 'reopening clearly requests a fresh service check');
    assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceReady')), 'MCP readiness alone never claims provider availability');
-   account = { ...account, state: 'signedOut' };
-   await click(button('check'));
-   assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceNeedsCredentials')), 'an actual missing-token result has a specific next step');
-   account = { ...account, state: 'ready' };
+   if (definition.fields.length) {
+    account = { ...account, state: 'signedOut' };
+    await click(button('check'));
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceNeedsCredentials')), 'an actual missing-token result has a specific next step');
+    account = { ...account, state: 'ready' };
+   } else if (definition.id === 'obsidian') {
+    account = { ...account, state: 'unknown', errorCode: 'OFFICIAL_SKILL_OBSIDIAN_NOT_RUNNING' };
+    await click(button('check'));
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceCheckFailed')));
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.obsidianNotRunning')));
+    account = { ...account, state: 'ready', errorCode: null };
+   }
   }
   account = { ...account, state: 'unknown', errorCode: 'OFFICIAL_SKILL_OPERATION_UNCERTAIN' };
   await click(button('check')); assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.uncertain')), 'uncertain effects preserve the do-not-resubmit message');

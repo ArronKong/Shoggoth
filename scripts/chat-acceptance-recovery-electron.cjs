@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// Usage: node scripts/chat-acceptance-recovery-electron.cjs /absolute/path/to/fresh/manage-dist [--group-continuation|--model-selection|--account-model-switch]
+// Usage: node scripts/chat-acceptance-recovery-electron.cjs /absolute/path/to/fresh/manage-dist [--receipt-observation [--runtime=opencode|antigravity|grok-build]|--group-continuation|--model-selection|--account-model-switch|--telemetry-recovery]
 // Real production React and Electron, broker, proxy, Backend and Service.
 // The Runtime and the transport fault are controlled inside a temporary profile.
 const assert = require("node:assert/strict");
@@ -26,7 +26,7 @@ if (!process.versions.electron) {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 } else {
-  const { app, BrowserWindow, ipcMain } = require("electron");
+  const { app, BrowserWindow, ipcMain, powerMonitor } = require("electron");
   const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
   const { requestService } = require("../app/agent-service/client");
   const { ShoggothBackend } = require("../app/core/shoggoth-backend");
@@ -85,6 +85,9 @@ if (!process.versions.electron) {
   async function run() {
     const verifyModelSelection = flags.includes("--model-selection");
     const verifyAccountModelSwitch = flags.includes("--account-model-switch");
+    const verifyTelemetryRecovery = flags.includes("--telemetry-recovery");
+    const receiptRuntime = flags.includes("--receipt-observation") ? flags.find(flag => flag.startsWith("--runtime="))?.slice(10) ?? "opencode" : null;
+    if (receiptRuntime) assert.ok(["opencode", "antigravity", "grok-build"].includes(receiptRuntime));
     const nextModel = "fixture-model-next";
     const f = await openHandoffFixture({ serviceOptions: { memoryCore: false, durableChatAcceptance: true,
       ...(verifyAccountModelSwitch ? { runtimeSupportDiscover: undefined } : {}) },
@@ -95,14 +98,21 @@ if (!process.versions.electron) {
     const registry = new BackendRegistry();
     const gates = new Map(), preparing = new Set(), attempts = [], lookups = [], receipts = new Map(), stops = [];
     let blockedLookup, reorder, heldStopOperation, holdStopProjection = true;
-    let proxy, server, win;
+    let proxy, server, win, closeTelemetry;
     const waitForGate = prompt => new Promise(resolve => gates.set(prompt, resolve));
     const nativeTurns = () => [...f.transport.handles.values()].reduce((total, handle) => total + handle.host.turnStartCalls, 0);
     try {
       if (verifyModelSelection) {
         service.productStore.putAgentProfile({ ...service.productStore.getAgentProfile(f.profile.id), defaultModel: null });
       }
-      const session = f.createSession();
+      if (receiptRuntime && !f.binding(receiptRuntime)) {
+        const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
+        service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime: receiptRuntime,
+          runtimeAccountId: DEFAULT_RUNTIME_ACCOUNTS.find(account => account.runtime === receiptRuntime).id },
+        { operationId: `fixture-add-${receiptRuntime}` });
+      }
+      const session = receiptRuntime ? service.chatSessionStore.createSession({ operationId: "receipt-session",
+        profileId: f.profile.id, workspace: f.workspace, createdAt: Date.now(), defaultBindingId: f.binding(receiptRuntime).id }) : f.createSession();
       const key = `agent:${f.profile.agentId}:${session.sessionKey}`;
       const otherSession = f.createSession();
       const otherKey = `agent:${f.profile.agentId}:${otherSession.sessionKey}`;
@@ -137,6 +147,10 @@ if (!process.versions.electron) {
       };
 
       const backend = new ShoggothBackend({ paths: f.paths, serviceEventPollMs: 30,
+        ...(receiptRuntime ? { runtimeCliAuth: [{ runtime: receiptRuntime, name: receiptRuntime,
+          runtimeAccountId: f.binding(receiptRuntime).runtimeAccountId, accountKind: "native-user",
+          binaryPath: process.execPath, accountHome: root, processHome: root, homeEnv: null,
+          credentialProbe: "runtime", credentialFile: null, loginArgs: [], logoutArgs: [], docsUrl: "https://example.test/" }] } : {}),
         getLocale: () => "en", requestService: async (paths, request, options) => {
           // Prewarming also reads 64 models. Keep that background read out of the selection probe.
           if (verifyAccountModelSwitch && request.method === "chat.session.prewarm") {
@@ -174,7 +188,7 @@ if (!process.versions.electron) {
         authResolver: { resolveConnectAuth: () => ({ ...identity, token: "isolated-chat-acceptance", scopes: DEFAULT_OPERATOR_SCOPES }), storeDeviceToken() {} } });
       ipcMain.on("openclaw:get-config", event => { event.returnValue = config; });
       ipcMain.handle("shoggoth:app-update:get-state", () => null);
-      ipcMain.handle("shoggoth:telemetry:get-settings", () => ({ enabled: false, detailed: false }));
+      if (!verifyTelemetryRecovery) ipcMain.handle("shoggoth:telemetry:get-settings", () => ({ enabled: false, detailed: false }));
       ipcMain.handle("openclaw:notify", () => false);
       win = new BrowserWindow({ show: false, width: 1120, height: 900,
         webPreferences: { preload: path.join(project, "app/preload.js"), sandbox: true, contextIsolation: true,
@@ -245,6 +259,165 @@ if (!process.versions.electron) {
         await until(async () => !(await stateFor(idem)), "terminal receipt settles pending send");
         assert.equal(countEvents(receipt.operationId), 1);
         assert.equal(attempts.filter(attempt => attempt.prompt === prompt).length, 1);
+      }
+
+      if (receiptRuntime) {
+        const getOperation = backend.getChatOperation.bind(backend);
+        const watchSession = backend.watchSession.bind(backend);
+        const sendMessage = backend.sendMessage.bind(backend);
+        let unavailable = false, failWatch = false, failedWatches = 0;
+        const receiptReads = [];
+        backend.getChatOperation = async (sessionKey, idem) => {
+          receiptReads.push({ sessionKey, idem });
+          if (unavailable) throw Object.assign(new Error("Fixture receipt temporarily unavailable"), { code: "SERVICE_UNAVAILABLE" });
+          return getOperation(sessionKey, idem);
+        };
+        // A history watcher has no client operation ID. Its failure can arrive
+        // after the renderer has already received the original durable result.
+        backend.watchSession = async (sessionKey, hooks, options) => {
+          if (!failWatch || sessionKey !== key) return watchSession(sessionKey, hooks, options);
+          failedWatches++;
+          throw new Error("Fixture history observer unavailable");
+        };
+        backend.sendMessage = (sessionKey, message, runId, hooks, options) => {
+          if (message === reorderedPrompt) {
+            const observationLost = () => hooks.status({ kind: "needs_verification", text: "needs_verification" });
+            const original = hooks;
+            hooks = { ...original, final: (text, errored, meta) => {
+              original.interim(text, meta);
+              observationLost();
+            }, nativeContent: (mode, parts, meta) => {
+              original.nativeContent(mode === "final" ? "interim" : mode, parts, meta);
+              if (mode === "final") observationLost();
+            } };
+          }
+          return sendMessage(sessionKey, message, runId, hooks, options);
+        };
+        for (const [mode, prompt] of [["normal", normalPrompt], ["immersive", reorderedPrompt]]) {
+          failWatch = false;
+          await open(mode);
+          unavailable = true;
+          const priorReads = receiptReads.length;
+          const idem = await send(mode, prompt);
+          await until(() => gates.has(prompt), "original input reached the Service");
+          failWatch = true;
+          const receipt = receipts.get(prompt);
+          gates.get(prompt)();
+          const run = await until(() => {
+            const current = service.workRunCoordinator.getRun(receipt.runId);
+            return current?.status === "running" && current;
+          }, "original Runtime turn");
+          assert.equal(run.runtimeSessionRef.runtime, receiptRuntime);
+          const answer = `Reply persisted for ${mode}`;
+          await f.complete(run, answer);
+          await until(async () => (await threadText()).includes(answer) && await notice(), "reply visible with unavailable receipt");
+          // Hold the exact lookup past the final event's existing short retries.
+          await new Promise(resolve => setTimeout(resolve, 3200));
+          assert.equal((await stateFor(idem)).idem, idem);
+          const previousWatches = failedWatches;
+          unavailable = false;
+          await until(async () => !(await stateFor(idem)) && !(await notice()), "original receipt automatically settles");
+          await until(() => failedWatches > previousWatches, "a late unscoped history observer failure");
+          await new Promise(resolve => setTimeout(resolve, 120));
+          assert.equal(await notice(), false, "the observer cannot reopen a completed send");
+          assert((await threadText()).includes(answer));
+          assert.equal(attempts.filter(attempt => attempt.prompt === prompt).length, 1);
+          assert.equal(countEvents(receipt.operationId), 1);
+          const reads = receiptReads.slice(priorReads);
+          assert.ok(reads.length && reads.every(read => read.sessionKey === key && read.idem === idem));
+          const next = `Continue in ${mode} without a manual check`;
+          const nextId = await send(mode, next);
+          assert.notEqual(nextId, idem);
+          const nextRun = await until(() => {
+            const candidate = receipts.has(next) && service.workRunCoordinator.getRun(receipts.get(next).runId);
+            return candidate?.status === "running" && candidate;
+          }, "follow-up starts in the same open chat");
+          assert.equal(nextRun.runtimeSessionRef.runtime, receiptRuntime);
+          await f.complete(nextRun, `Follow-up received in ${mode}`);
+          await until(async () => !(await stateFor(nextId)) && (await threadText()).includes(`Follow-up received in ${mode}`),
+            "follow-up replied with a settled receipt");
+          assert.equal(attempts.filter(attempt => attempt.prompt === next).length, 1);
+          assert.equal(countEvents(receipts.get(next).operationId), 1);
+        }
+        assert.equal(nativeTurns(), 4);
+        // Restore an older Stop recorded by native Run ID after the original
+        // send fence is gone. Recovery must only read that Run, never abort it.
+        const stopKey = "shoggoth.chat.pending-native-stops.v1";
+        const lastRunId = receipts.get("Continue in immersive without a manual check").runId;
+        await js(`localStorage.setItem(${JSON.stringify(stopKey)}, ${JSON.stringify(JSON.stringify([{ key, backendId: "shoggoth", runId: lastRunId }]))})`);
+        await open("immersive");
+        await until(() => js(`JSON.parse(localStorage.getItem(${JSON.stringify(stopKey)})).length === 0
+          && !document.querySelector(${JSON.stringify(stopNotice)})`), "restored stop settles by its own native Run ID");
+        assert.equal(stops.length, 0, "receipt recovery sent no cancellations");
+        console.log(`PASS ${receiptRuntime}: both composers settle the replied turn, accept a follow-up, ignore late observer failure and recover a saved Stop by Run ID`);
+        return;
+      }
+
+      if (verifyTelemetryRecovery) {
+        const { createConfigStore } = require("../app/core/config-store");
+        const { createProductTelemetry } = require("../app/core/product-telemetry");
+        const { registerDesktopTelemetryIpc } = require("../app/desktop-telemetry-ipc");
+        const { BUILD, fakeClock } = require("./helpers/product-telemetry-fixtures.cjs");
+        const configStore = createConfigStore(path.join(root, "telemetry-config.json"));
+        const statePath = path.join(root, "product-telemetry", "state.json");
+        const clock = fakeClock(new Date().toISOString());
+        const readTelemetry = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
+        configStore.ensure();
+        const startTelemetry = () => {
+          const telemetry = createProductTelemetry({ statePath, configStore, clock, buildConfig: BUILD,
+            transport: { sendBatch: async () => ({ kind: "ok" }) } });
+          const ipc = registerDesktopTelemetryIpc({ ipcMain, getMainWindow: () => win, getUiOrigin: () => server.url,
+            powerMonitor, telemetry, now: clock.now });
+          ipc.observeWindow(win);
+          return () => { ipc.dispose(); telemetry.close(); };
+        };
+        closeTelemetry = startTelemetry();
+        if (process.platform === "darwin") app.setActivationPolicy("regular");
+        win.show();
+        app.focus({ steal: true });
+        win.focus();
+        await open("normal");
+        await until(() => js("document.hasFocus() && document.visibilityState === 'visible'"), "active telemetry window");
+        // Prime real input and the asynchronous consent read before sending.
+        await until(() => js("openclawDesktop.productTelemetry.getSettings().then(settings => !!settings?.detailedEpoch)"),
+          "detailed collection enabled");
+        win.webContents.sendInputEvent({ type: "keyDown", keyCode: "End" });
+        const idem = await send("normal", lostPrompt);
+        await until(notice, "the first send awaits exact verification");
+        await until(() => readTelemetry().detail.pendingChats.length === 1, "persisted statistics before restarting");
+        const begun = readTelemetry();
+        assert.equal(begun.detail.draft.properties.chat_send_attempt_count, 1);
+        assert.equal(begun.detail.draft.properties.chat_send_success_count, undefined);
+        assert.equal(JSON.stringify(begun).includes(idem), false, "the statistics store keeps independent random identifiers");
+
+        // Discard the renderer and controller before the Service completes the
+        // turn. The new renderer has only the existing durable send recovery.
+        await win.loadURL("about:blank");
+        closeTelemetry();
+        closeTelemetry = startTelemetry();
+        await until(() => gates.has(lostPrompt), "the original accepted send is preparing");
+        gates.get(lostPrompt)();
+        const receipt = receipts.get(lostPrompt);
+        const run = await until(() => {
+          const candidate = service.workRunCoordinator.getRun(receipt.runId);
+          return candidate?.status === "running" && candidate;
+        }, "the original accepted send is running");
+        await f.complete(run, "Reply finished while the desktop was closed");
+        blockedLookup = undefined;
+        await win.loadURL(`${server.url}/${chatHash}`);
+        await until(() => readTelemetry().detail.draft.properties.chat_send_success_count === 1,
+          "the authoritative lookup records the original first chat success");
+        await until(async () => !(await stateFor(idem)), "the original send fence is settled");
+        await open("normal");
+        const settled = readTelemetry();
+        assert.equal(settled.detail.draft.properties.chat_send_attempt_count, 1);
+        assert.equal(settled.detail.draft.properties.chat_send_success_count, 1);
+        assert.deepEqual(settled.detail.pendingChats, []);
+        assert.equal(settled.outbox.filter(row => row.event.properties.step === "first_chat_succeeded").length, 1);
+        assert.equal(attempts.length, 1, "recovery never resends a chat message");
+        assert.equal(countEvents(receipt.operationId), 1);
+        console.log("PASS production React/Electron: the original first chat is counted once after renderer and statistics restart");
+        return;
       }
 
       if (verifyAccountModelSwitch) {
@@ -686,6 +859,7 @@ if (!process.versions.electron) {
       reorder?.release();
       holdStopProjection = false;
       for (const release of gates.values()) release();
+      closeTelemetry?.();
       if (win && !win.isDestroyed()) win.destroy();
       await server?.close();
       await proxy?.close();

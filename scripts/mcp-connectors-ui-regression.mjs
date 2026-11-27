@@ -112,6 +112,9 @@ for (const definition of officialSkills) {
 check.equal(catalog.mcpOfficialSkillBrand(undefined), undefined);
 check.equal(catalog.mcpRecommendationVisibleInLocale("agently-mail", "zh-CN"), true);
 check.equal(catalog.mcpRecommendationVisibleInLocale("agently-mail", "en"), false);
+check.equal(catalog.mcpRecommendationVisibleInLocale("obsidian", "zh-CN"), true);
+check.equal(catalog.mcpRecommendationVisibleInLocale("obsidian", "en"), true);
+check.equal(catalog.mcpConnectorDeveloper("obsidian"), "Obsidian");
 check.equal(catalog.mcpOfficialSkillBrand({ id: "official-unknown-a0b0c0d0", source: { kind: "custom" }, transport: { kind: "stdio-command" } }), undefined);
 const ids = [...featured.map(catalog.mcpBrandId), ...presets.filter(value => !value.registryName).map(value => value.id), "lark-cli", ...officialSkills.map(value => value.id)];
 check.equal(new Set(ids).size, ids.length, "recommendations have unique brand identities");

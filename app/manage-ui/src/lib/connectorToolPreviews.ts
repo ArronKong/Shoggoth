@@ -411,6 +411,16 @@ const previews: Record<string, readonly Row[]> = {
     ["preview_mail_change", "preview_mail_change", "Preview a send, reply, forward or move to Trash.", "预览发信、回复、转发或移到已删除的操作。"],
     ["confirm_mail_change", "confirm_mail_change", "Apply the previewed action after confirmation.", "确认后执行预览中的操作。"],
   ],
+  obsidian: [
+    ["list_vaults", "list_vaults", "List vaults configured in the running Obsidian desktop app.", "列出当前 Obsidian 桌面端配置的笔记库。"],
+    ["search_notes", "search_notes", "Search notes across a local Obsidian vault.", "在本地 Obsidian 笔记库中全文搜索笔记。"],
+    ["read_note", "read_note", "Read a note by exact vault path or wikilink name.", "按精确路径或双链名称读取笔记内容。"],
+    ["query_base", "query_base", "Query an Obsidian Base file and view.", "查询 Obsidian Base 数据库视图。"],
+    ["create_note", "create_note", "Create a note in the vault after approval.", "审批后在笔记库中创建新笔记。"],
+    ["append_note", "append_note", "Append content to a note after approval.", "审批后向笔记追加内容。"],
+    ["set_property", "set_property", "Set a frontmatter property on a note after approval.", "审批后设置笔记的 frontmatter 属性。"],
+    ["move_note", "move_note", "Move a note and update internal wikilinks after approval.", "审批后移动笔记并由 Obsidian 自动更新双链。"],
+  ],
   doordash: [
     ["search_stores", "search_stores", "Find restaurants for a delivery address.", "查找配送地址附近的餐厅。"],
     ["get_menu", "get_menu", "Read a restaurant's menu.", "读取餐厅菜单。"],

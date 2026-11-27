@@ -17,6 +17,7 @@ const RELEASES = Object.freeze({
   shop: { mcp: true },
   "quark-drive": { quark: true },
   "baidu-maps": { baidu: true },
+  obsidian: { obsidian: true },
   "agently-mail": { platformArchives: require("./data/agently-mail-cli-release.json") },
   "rollinggo-hotel": { repo: "RollingGo-AI/rollinggo-hotel-skill-cn", ref: "98c500b26777e3ba1d1d5f5da74eddea6b15a5a7", sha256: "eae6923f2daee5a5a84ea63795a68d8cd1effa92a489165192db34faa992627e", docs: ["skills/rollinggo-hotel-booking/", "LICENSE"],
     runtime: { url: "https://registry.npmjs.org/@rollinggo/hotel/-/hotel-1.2.25.tgz", sha256: "0befee700d8ef424bc957005888d8057668ffd6329b49a8a82ceca53cb9b6491", kind: "tar" } },
@@ -161,6 +162,7 @@ async function prepareOfficialSkill({ providerId, root, homeDir, signal, onStage
   if (providerId === "alipay" && platform !== "darwin") fail("OFFICIAL_SKILL_RUNTIME_MISSING");
   const fetch = fetchImpl || createMcpFetch({ env }), options = { fetch, signal }, files = [];
   if (release.baidu) return require("./baidu-map-skill-installer").prepareBaiduMapSkill({ provider, root, homeDir, serverId, signal, onStage, writePayload, adapterInstructions, adaptedDocumentation });
+  if (release.obsidian) return require("./obsidian-skill-installer").prepareObsidianSkill({ provider, root, homeDir, serverId, signal, fetch, onStage, downloadPinned, readZip, writePayload, adaptedDocumentation });
   if (release.quark) return require("./quark-skill-installer").prepareQuarkSkill({ provider, root, homeDir, serverId, signal, fetch, onStage, downloadPinned, readZip, writePayload, adapterInstructions });
   if (release.native) return require("./doordash-skill-installer").prepareDoorDashSkill({ provider, root, homeDir, serverId, signal, fetch, onStage, platform, arch, downloadPinned, readTar, writePayload, adapterInstructions, adaptedDocumentation });
   if (release.mcp) return require("./shop-skill-installer").prepareShopSkill({ provider, root, homeDir, serverId, signal, fetch, onStage, writePayload, adapterInstructions, adaptedDocumentation });

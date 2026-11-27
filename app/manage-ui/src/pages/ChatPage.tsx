@@ -1,4 +1,4 @@
-import { backendTelemetryType, measureTelemetry, retainTelemetryOperation, runtimeTelemetryType, startTelemetryOperation,
+import { backendTelemetryType, measureTelemetry, restoreChatTelemetryOperation, retainTelemetryOperation, runtimeTelemetryType, startTelemetryOperation,
   telemetryCount, telemetryList, telemetryModel, useTelemetryOperations, useTelemetrySnapshot, type TelemetryOperation } from "../lib/productTelemetry";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -11,6 +11,8 @@ import { codexDesktopWriterHintKey, type CodexDesktopWriterState } from "../lib/
 import { ChatRunWait, updateChatRunWait, type ChatRunWaitState } from "../components/ChatRunWait";
 import { chatRunWaitActivity, withStartupWait } from "../lib/chatRunWait";
 import ChatContextUsage from "../components/ChatContextUsage";
+import ChatContextMeter from "../components/ChatContextMeter";
+import { fmtTokens, latestContextReply, sessionContextMeter } from "../lib/chatContextMeter";
 import ChatServiceRecoveryNotice from "../components/ChatServiceRecoveryNotice";
 import ChatStatusNotice from "../components/ChatStatusNotice";
 import { useSessionRuntimeModels } from "../lib/useSessionRuntimeModels";
@@ -260,8 +262,13 @@ export const createChatSendController = createSendController;
 
 // 暂时隐藏普通/沉浸聊天共用菜单的分叉入口，保留底层能力。
 const SHOW_SESSION_FORK = false;
-// 隐藏上下文状态和手动压缩入口，自动压缩继续由 Service 管理。
+// The optional header control generates a product summary. The composer meter uses /compact.
 const SHOW_CHAT_CONTEXT_USAGE = false;
+// 报错区的「压缩上下文」发送 /compact：Service 原生压缩线程，压不了就换线程。
+// 顶部入口（受 SHOW_CHAT_CONTEXT_USAGE 隐藏）是「生成产品摘要」，两者分工不同。
+const COMPACT_CONTEXT_ERROR = /^(?:CONTEXT_COMPACTION_REQUIRED|CONTEXT_HANDOFF_FAILED|RUNTIME_COMPACTION_(?:FAILED|TIMEOUT|ACCEPTANCE_UNKNOWN)|PRODUCT_COMPACTION_[A-Z_]+)$/u;
+const offersCompactContext = (m: { errorCode?: string; automation?: string }) =>
+  m.automation !== "cron" && !!m.errorCode && COMPACT_CONTEXT_ERROR.test(m.errorCode);
 
 // Native React chat over the loopback /__chatws broker. The broker auto-performs
 // the device-auth handshake against the federating proxy, so here we just speak
@@ -692,7 +699,7 @@ interface ChatMsg {
   // Backend timeline row (not a turn): renders as a quiet one-line divider like
   // `divider`, NOT as the red system/error bubble. For model switches, `model`
   // carries the new model; `parts` keep the backend's raw text for the hover title.
-  notice?: "modelSwitch" | "runInterrupted" | "contextCompacted" | "processComplete";
+  notice?: "modelSwitch" | "runInterrupted" | "contextCompacted" | "contextRenewed" | "processComplete";
 }
 
 type ChatTurnActivity = { steps: TurnStep[]; live?: boolean; runId?: string; timing?: TurnTiming; recoveredSteps?: TurnStep[] };
@@ -751,9 +758,10 @@ const CHAT_SEND_IDEMPOTENCY_SAMPLE = "00000000-0000-4000-8000-000000000000";
 // 减少刚补发的 user 气泡被旧历史覆盖的闪烁（session.message 的 300ms 合并重拉会兜底恢复）。
 const QUEUE_FLUSH_DELAY_MS = 400;
 // 待发队列条目（R357）：生成中回车的消息排队，回合终结后按 FIFO 链式补发。
+type SlashSend = boolean | "button";
 type QueuedMsg = { id: string; text: string; atts: ChatAttachment[];
   expectedModel?: ComposerModelSelection;
-  recovery?: { backendId: string; isSlash: boolean; displayText: string } };
+  recovery?: { backendId: string; isSlash: SlashSend; displayText: string } };
 // First text part of a normalized message (user/system/assistant-text live there).
 function msgText(m: ChatMsg): string {
   return m.parts.find((p) => typeof p.text === "string")?.text?.trim() ?? "";
@@ -1045,12 +1053,6 @@ function friendlySessionLabel(s: SessionRow, t: TFn): string {
 // 后台会话分类与列表可见性统一在 lib/sessionKind.ts。
 // 子代理归入父会话的实时动态；控制命令保留完整记录，未读按可打开的会话计算。
 
-function fmtTokens(n?: number): string {
-  if (!n || n <= 0) return "0";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
-  return String(n);
-}
 // 思考强度等级名固定用英文标准名（不随界面语言切换）——模型技术参数统一英文，
 // 与 gateway 的 /think <off|low|medium|high|xhigh> 协议词一致。
 const THINK_LEVEL_LABELS: Record<string, string> = {
@@ -1344,7 +1346,7 @@ function normalize(raw: any): ChatMsg {
     toolName: raw?.toolName,
     isError: raw?.isError === true,
     provenance: raw?.provenance && typeof raw.provenance === "object" ? raw.provenance : undefined,
-    notice: ["modelSwitch", "runInterrupted", "contextCompacted", "processComplete"].includes(raw?.notice) ? raw.notice : undefined,
+    notice: ["modelSwitch", "runInterrupted", "contextCompacted", "contextRenewed", "processComplete"].includes(raw?.notice) ? raw.notice : undefined,
   };
   if (raw?.role === "custom" && (raw.display === false || raw.content === "")) return base;
   const media = normalizeOpenClawMediaFacts(raw?.__openclaw?.media);
@@ -2569,6 +2571,7 @@ interface ChatThreadViewProps {
   openTaskDetails?: (taskId: string) => void;
   sending?: boolean;
   retryErrorGroup?: (group: Group) => void;
+  compactContext?: () => void;
   copyText?: (text: string, media: MessageAttachment[]) => void;
   quoteGroup?: (group: Group, msgIndex?: number, partIndex?: number) => void;
   pinnedIds?: Set<string>;
@@ -2582,7 +2585,7 @@ function ChatThreadView({
   activeBackend = "shoggoth", activeKey, activeBackendDescriptor, activeLegacyHtmlPolicy, immersive, latestNativeUiSourceEventId,
   send, sendCanvasWidgetPrompt, canPinActiveCanvas, pinnedSessionBoardWidgets, sessionBoardMutating, pinCanvasWidget,
   jumpToQuoted, latestUserMessageKey, latestAssistantMessageKeys, imageContext, renderGroupContinuation,
-  renderBackgroundTasks, openTaskDetails, sending, retryErrorGroup, copyText, quoteGroup, pinnedIds, pinGroup, deleteGroup,
+  renderBackgroundTasks, openTaskDetails, sending, retryErrorGroup, compactContext, copyText, quoteGroup, pinnedIds, pinGroup, deleteGroup,
 }: ChatThreadViewProps) {
   const livePending = liveTurn?.pending;
   return keyedThreadGroups.map(({ item: g, key: groupRenderKey, messages: keyedMessages }) => {
@@ -2607,6 +2610,7 @@ function ChatThreadView({
         <div key={groupRenderKey} className="chat-reset-divider">
           <span className="chat-reset-divider__label" title={n.parts.find((p) => p.text)?.text || undefined}>
             {t(n.notice === "contextCompacted" ? "chat.compactedCtx"
+              : n.notice === "contextRenewed" ? "chat.renewedCtx"
               : n.notice === "runInterrupted" ? "chat.runInterruptedNotice"
               : n.notice === "processComplete" ? "chat.processCompleteNotice" : "chat.modelSwitchedNotice")}
             {n.notice === "modelSwitch" && n.model ? ` · ${n.model}` : ""}
@@ -2979,6 +2983,11 @@ function ChatThreadView({
                 onClick={() => retryErrorGroup(g)}
               >
                 <IconRetry />
+              </button>
+            )}
+            {!last.pending && isErrorTurn(last) && offersCompactContext(last) && compactContext && (
+              <button type="button" className="chat-compactbtn" disabled={sending} onClick={compactContext}>
+                {t("chat.compactContext")}
               </button>
             )}
             {(!last.proactiveNoticeId && !last.backgroundReport && footerActivity && !footerActivity.live) && (
@@ -3679,7 +3688,7 @@ function ChatPageApp() {
   // Only an authoritative non-admission can release this in-memory payload for
   // another send. Historical operation records never persist a replay payload.
   const pendingSendDraftRef = useRef<Map<string, { key: string; text: string; atts: ChatAttachment[];
-    isSlash: boolean; displayText: string; recoveryRetry: boolean }>>(new Map());
+    isSlash: SlashSend; displayText: string; recoveryRetry: boolean }>>(new Map());
   const acceptTrackedSend = (key: string, idem: string) => {
     const entry = readPendingTrackedSends().find(item => item.key === key && item.idem === idem);
     if (!entry) return false;
@@ -3687,7 +3696,8 @@ function ChatPageApp() {
     pendingChatSendStore.accepted(key, idem);
     return true;
   };
-  const restoreSendDraft = (key: string, text: string, atts: ChatAttachment[]) => {
+  const restoreSendDraft = (key: string, text: string, atts: ChatAttachment[], isSlash: SlashSend = false) => {
+    if (isSlash === "button") return;
     if (activeKeyRef.current === key) {
       if (text) setInput(current => current.trim() ? `${text}\n${current}` : text);
       if (atts.length) setComposerAttachments(current => [...atts, ...current]);
@@ -3704,7 +3714,7 @@ function ChatPageApp() {
     const pendingSend = pendingSendDraftRef.current.get(`${key}\0${runId}`);
     if (!pendingSend) return false;
     pendingSendDraftRef.current.delete(`${key}\0${runId}`);
-    restoreSendDraft(key, pendingSend.text, pendingSend.atts);
+    restoreSendDraft(key, pendingSend.text, pendingSend.atts, pendingSend.isSlash);
     updateSessionMessages(key, current => current.filter(message => message.localSendId !== runId));
     return true;
   };
@@ -3721,6 +3731,7 @@ function ChatPageApp() {
   const steerBySessionRef = useRef(new Map<string, { runId: string; steer: boolean }>());
   const observedRunBySessionRef = useRef<Map<string, string>>(new Map());
   const sendObservationEpochRef = useRef<Map<string, number>>(new Map());
+  const pendingReceiptReadsRef = useRef(new Map<string, number>());
   const terminalObservedSendRef = useRef<Map<string, { operationId: string; backendId: string; agentId: string;
     attempts: number; timer: ReturnType<typeof setTimeout> | null }>>(new Map(
       readPendingTrackedSends().filter(entry => entry.terminalObserved && entry.backendId).map(entry =>
@@ -3982,6 +3993,7 @@ function ChatPageApp() {
   // Watchdog timers, per session, for a slash command sent as a chat message: if the
   // backend streams no reply within the window, clear the stuck pending/sending state.
   const slashWatchdogRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const gatewayCompactions = useRef(new Set<string>());
   // Sessions whose history should be re-fetched once their current turn finalizes —
   // used by /new and /reset, which reset the session IN PLACE (same key, server
   // history wiped), so the UI must resync instead of keeping the pre-reset messages.
@@ -4516,10 +4528,13 @@ function ChatPageApp() {
   }, []);
 
 
-  const verifyPendingTrackedSends = useCallback(async (onlyKey?: string, userRequestedCheck = false): Promise<void> => {
-    const entries = readPendingTrackedSends().filter((entry) => !onlyKey || entry.key === onlyKey);
-    if (onlyKey && entries.length === 0) {
+  const verifyPendingTrackedSends = useCallback(async (onlyKey?: string,
+    { userRequestedCheck = false, pollOperationId }: { userRequestedCheck?: boolean; pollOperationId?: string } = {}): Promise<void> => {
+    const entries = readPendingTrackedSends().filter(entry => (!onlyKey || entry.key === onlyKey)
+      && (!pollOperationId || entry.idem === pollOperationId));
+    if (onlyKey && entries.length === 0 && !pollOperationId) {
       await loadHistory(onlyKey, { refresh: true });
+      if (hasPendingTrackedSend(onlyKey)) return;
       setVerificationKeys((previous) => {
         if (!previous.has(onlyKey)) return previous;
         const next = new Set(previous); next.delete(onlyKey); return next;
@@ -4527,8 +4542,13 @@ function ChatPageApp() {
       return;
     }
     await Promise.all(entries.map(async (entry) => {
+      // A timer only reads the original native operation. Give an event or a
+      // manual check already in progress precedence, including reconciliation.
+      if (pollOperationId && (pendingReceiptReadsRef.current.has(entry.key)
+        || backendOfSession(entry.key) !== "shoggoth" || (entry.backendId && entry.backendId !== "shoggoth"))) return;
       const epoch = (sendObservationEpochRef.current.get(entry.key) ?? 0) + 1;
       sendObservationEpochRef.current.set(entry.key, epoch);
+      pendingReceiptReadsRef.current.set(entry.key, epoch);
       try {
         if (entry.backendId && entry.backendId !== backendOfSession(entry.key)) throw new Error("original operation owner changed");
         let response = await send("chat.operation.get", {
@@ -4540,7 +4560,9 @@ function ChatPageApp() {
         const beforeRecovery = readPendingTrackedSends().find(item => item.key === entry.key && item.idem === entry.idem);
         if (!beforeRecovery) return;
         if (entry.backendId && entry.backendId !== backendOfSession(entry.key)) throw new Error("original operation owner changed");
-        if (response?.payload?.status === "unresolved" && response.payload.canReconcile === true && !beforeRecovery.accepted) {
+        if (pollOperationId && (backendOfSession(entry.key) !== "shoggoth"
+          || response?.payload?.stateAuthority !== "native-service" || response.payload.status !== "found")) return;
+        if (!pollOperationId && response?.payload?.status === "unresolved" && response.payload.canReconcile === true && !beforeRecovery.accepted) {
           // The owner must persist a fence before proving non-admission. A
           // missing lookup or an already accepted operation never unlocks it.
           response = await send("chat.operation.reconcile", {
@@ -4560,23 +4582,37 @@ function ChatPageApp() {
           && terminal.agentId === agentOf(entry.key));
         const observation = classifyChatSendObservation(response?.payload, currentEntry.accepted === true,
           terminalObserved, reconciled, entry.backendId === "shoggoth" && response?.payload?.stateAuthority === "native-service");
-        if (observation.accepted) acceptTrackedSend(entry.key, entry.idem);
+        if (observation.accepted && !currentEntry.accepted) acceptTrackedSend(entry.key, entry.idem);
+        // A healthy stream owns the live controls and history. Background
+        // reads only settle a terminal or restore a previously uncertain run.
+        if (pollOperationId && observation.state !== "terminal"
+          && (observation.state !== "active" || (!terminalObserved && runStatusBySessionRef.current.get(entry.key) !== "needs_verification"))) return;
         if (observation.state === "verification") throw new Error("operation unresolved");
-        if (observation.state === "terminal" && !forgetPendingTrackedSend(entry.key, entry.idem)) {
-          throw new Error("operation tracking unavailable");
+        const statsKey = `${entry.key}\0${entry.idem}`;
+        const telemetry = observation.state === "terminal" ? telemetrySends.get(statsKey)
+          ?? restoreChatTelemetryOperation(pendingChatSendStore.telemetryId(entry.idem)) : undefined;
+        if (observation.state === "terminal") {
+          const run = response.payload.run;
+          if (telemetry && response.payload.stateAuthority === "native-service") {
+            if (run?.status === "completed") telemetry.finish("success", undefined, {
+              runtimeType: runtimeTelemetryType(run.runtimeTurnRef?.runtime ?? run.runtimeSessionRef?.runtime),
+              providerId: "unknown", modelId: "unknown",
+            });
+            else if (run?.status === "failed" || run?.status === "interrupted") telemetry.finish("error", run.errorCode);
+            else if (["canceled", "aborted", "cancelled"].includes(run?.status)) telemetry.finish("canceled");
+          }
+          if (!forgetPendingTrackedSend(entry.key, entry.idem)) throw new Error("operation tracking unavailable");
         }
         const pendingStop = nativeStopsRef.current.get(entry.key);
         const stoppingOriginal = pendingStop?.idempotencyKey === entry.idem && pendingStop.backendId === backendOfSession(entry.key);
         if (observation.state === "terminal" && stoppingOriginal) clearNativeStop(pendingStop);
         if (response?.payload?.status === "not_admitted" && !observation.accepted) {
-          const draftId = `${entry.key}\0${entry.idem}`;
-          const draft = pendingSendDraftRef.current.get(draftId);
-          const telemetry = telemetrySends.get(draftId);
-          telemetrySends.delete(draftId);
+          const draft = pendingSendDraftRef.current.get(statsKey);
+          telemetrySends.delete(statsKey);
           const resend = !stoppingOriginal && draft && (!draft.recoveryRetry || userRequestedCheck);
           let restored = false;
           if (resend) {
-            pendingSendDraftRef.current.delete(draftId);
+            pendingSendDraftRef.current.delete(statsKey);
             optimisticHistoryRef.current.forget(entry.key, entry.idem);
             // A fresh key is required: reconciliation permanently fenced the
             // original operation. Put its exact input ahead of newer queued work.
@@ -4609,18 +4645,7 @@ function ChatPageApp() {
           terminalObservedSendRef.current.delete(entry.key);
         }
         if (observation.state === "terminal") {
-          const statsKey = `${entry.key}\0${entry.idem}`;
-          const telemetry = telemetrySends.get(statsKey);
-          const run = response.payload.run;
-          if (telemetry && response.payload.stateAuthority === "native-service") {
-            telemetrySends.delete(statsKey);
-            if (run?.status === "completed") telemetry.finish("success", undefined, {
-              runtimeType: runtimeTelemetryType(run.runtimeTurnRef?.runtime ?? run.runtimeSessionRef?.runtime),
-              providerId: "unknown", modelId: "unknown",
-            });
-            else if (run?.status === "failed" || run?.status === "interrupted") telemetry.finish("error", run.errorCode);
-            else if (["canceled", "aborted", "cancelled"].includes(run?.status)) telemetry.finish("canceled");
-          }
+          if (response.payload.stateAuthority === "native-service") telemetrySends.delete(statsKey);
           const timeline = liveTimelinesRef.current.get(entry.key);
           if (timeline && !["done", "error"].includes(timeline.status)) {
             const status = response.payload.run?.status;
@@ -4650,7 +4675,8 @@ function ChatPageApp() {
         }
       } catch {
         // not_found, unknown status and failed observation never authorize replay.
-        if (sendObservationEpochRef.current.get(entry.key) !== epoch || !hasPendingTrackedSend(entry.key)) return;
+        if (pollOperationId || sendObservationEpochRef.current.get(entry.key) !== epoch
+          || !readPendingTrackedSends().some(current => current.key === entry.key && current.idem === entry.idem)) return;
         runStatusBySessionRef.current.set(entry.key, "needs_verification");
         const terminal = terminalObservedSendRef.current.get(entry.key);
         const sameTerminal = terminal?.operationId === entry.idem && terminal.backendId === entry.backendId
@@ -4674,6 +4700,8 @@ function ChatPageApp() {
           // history on an unresolved lookup would feed that observer forever;
           // only a resolved observation or a separate history event refreshes.
         }
+      } finally {
+        if (pendingReceiptReadsRef.current.get(entry.key) === epoch) pendingReceiptReadsRef.current.delete(entry.key);
       }
     }));
   }, [send, markInFlight, loadHistory, backendOfSession, t, timelineFeed, updateSessionMessages, replacePendingPrompts, clearNativeStop]);
@@ -4690,7 +4718,7 @@ function ChatPageApp() {
       if (backendOfSession(key) !== backendId || !sessionSupportsDurableStop(key) || nativeStopsRef.current.get(key) !== target
         || !nativeChatStopIsTerminal(payload, target)) return;
       const tracked = readPendingTrackedSends().find(entry => entry.key === key);
-      if (tracked?.idem === target.idempotencyKey) {
+      if (tracked && tracked.idem === target.idempotencyKey) {
         void verifyPendingTrackedSends(key);
         return;
       }
@@ -5414,6 +5442,13 @@ function ChatPageApp() {
       if (f.type === "event" && f.event === "chat") {
         const p = f.payload || {};
         const sk: string | undefined = p.sessionKey;
+        if (sk && p.state === "status" && p.statusKind === "needs_verification" && backendOfSession(sk) === "shoggoth") {
+          const original = readPendingTrackedSends().find(entry => entry.key === sk);
+          // History observers can fail after a send has settled. An observation
+          // failure cannot start a new turn or transfer uncertainty to a later send.
+          if ((!original && !inFlightRef.current.has(sk))
+            || (original && p.runId && p.runId !== original.idem)) return;
+        }
         const nativeRunId = p.message?.shoggoth?.nativeUiVersion === 1
           && typeof p.message.shoggoth.runId === "string" ? p.message.shoggoth.runId
           : sk && p.state === "status" && typeof p.nativeRunId === "string"
@@ -5450,16 +5485,18 @@ function ChatPageApp() {
           && (p.backendId === undefined || p.backendId === backendOfSession(sk))
           && (p.agentId === undefined || p.agentId === agentOf(sk))) {
           const statsKey = `${sk}\0${p.runId}`;
-          const telemetry = telemetrySends.get(statsKey);
           // Native successful runs expose their execution runtime in the exact
           // operation lookup already performed by the existing send observer.
-          if (telemetry && !(p.state === "final" && trackedEvent
-            && chatBackendDescriptors.get(backendOfSession(sk))?.surfaces.agentHarness)) {
-            telemetrySends.delete(statsKey);
-            if (p.state === "final") telemetry.finish("success", undefined, {
-              runtimeType: "unknown", ...telemetryModel(p.message?.provider ?? p.message?.modelProvider, p.message?.model),
-            });
-            else telemetry.finish(p.state === "aborted" ? "canceled" : "error", p.errorCode);
+          if (!(p.state === "final" && trackedEvent && chatBackendDescriptors.get(backendOfSession(sk))?.surfaces.agentHarness)) {
+            const telemetry = telemetrySends.get(statsKey) ?? restoreChatTelemetryOperation(
+              trackedEvent && pendingChatSendStore.telemetryId(trackedEvent.idem));
+            if (telemetry) {
+              telemetrySends.delete(statsKey);
+              if (p.state === "final") telemetry.finish("success", undefined, {
+                runtimeType: "unknown", ...telemetryModel(p.message?.provider ?? p.message?.modelProvider, p.message?.model),
+              });
+              else telemetry.finish(p.state === "aborted" ? "canceled" : "error", p.errorCode);
+            }
           }
         }
         if (sk && backendOfSession(sk) === "openclaw" && ["final", "error", "aborted"].includes(p.state)) {
@@ -5476,7 +5513,8 @@ function ChatPageApp() {
             const next = new Set(previous); next.delete(sk); return next;
           });
         }
-        if (sk && ["final", "error", "aborted"].includes(p.state) && hasPendingTrackedSend(sk)) {
+        if (sk && ["final", "error", "aborted"].includes(p.state)
+          && (hasPendingTrackedSend(sk) || (backendOfSession(sk) === "shoggoth" && p.receiptUncertain !== true))) {
           const tracked = readPendingTrackedSends().find(entry => entry.key === sk && entry.idem === p.runId);
           const rejected = p.state === "error" && isExplicitChatSendRejection({
             code: p.errorCode, admissionAccepted: p.admissionAccepted, receiptUncertain: p.receiptUncertain,
@@ -5517,7 +5555,11 @@ function ChatPageApp() {
             if (!["compacting", "compacted", "recalling", "recalled"].includes(p.statusKind))
               runStatusBySessionRef.current.set(sk, p.statusKind);
             if (p.statusKind === "needs_verification") {
-              sendObservationEpochRef.current.set(sk, (sendObservationEpochRef.current.get(sk) ?? 0) + 1);
+              // A session watcher has no operation identity. Its failure does
+              // not supersede an exact native lookup already on its way back.
+              if (p.runId || backendOfSession(sk) !== "shoggoth") {
+                sendObservationEpochRef.current.set(sk, (sendObservationEpochRef.current.get(sk) ?? 0) + 1);
+              }
               setVerificationKeys((previous) => new Set(previous).add(sk));
             } else if (p.statusKind !== "reconnecting" && !hasPendingTrackedSend(sk)) {
               setVerificationKeys((previous) => {
@@ -5749,7 +5791,7 @@ function ChatPageApp() {
               setPreviewTimes((prev) => ({ ...prev, [sk]: finishedAt }));
               if (finalText) setPreviews((prev) => ({ ...prev, [sk]: finalText }));
             }
-            // Hermes final 带上下文占用三元组 → 就地点亮该行的底部计量条与模型，
+            // Hermes final 带上下文占用三元组 → 就地更新输入框里的用量与模型，
             // 不等下一次全量列表刷新（OpenClaw final 无 usage，等价 no-op）。
             const fu = (p.message?.usage ?? {}) as Usage;
             timelineFeed(sk, {
@@ -6944,7 +6986,7 @@ function ChatPageApp() {
   const sendChatMessage = async (
     text: string,
     atts: ChatAttachment[],
-    isSlash = false,
+    isSlash: SlashSend = false,
     displayText = text,
     recoveryRetry = false,
     telemetrySource: "new" | TelemetryOperation | null = "new",
@@ -6966,7 +7008,7 @@ function ChatPageApp() {
     const originalBackend = backendOfSession(key);
     const expectedModel = queued && !queued.recovery ? queued.expectedModel : composerChoice.expectedModel;
     if (!requireComposerModel(expectedModel)) {
-      if (!queued) restoreSendDraft(key, text, atts);
+      if (!queued) restoreSendDraft(key, text, atts, isSlash);
       return;
     }
     const modelKey = JSON.stringify(expectedModel);
@@ -7000,7 +7042,7 @@ function ChatPageApp() {
       }
       recent.at = nowTs;
       if (trackedSend && !rememberPendingTrackedSend(key, recent.idem, undefined, originalBackend)) {
-        if (!queued) restoreSendDraft(key, text, atts);
+        if (!queued) restoreSendDraft(key, text, atts, isSlash);
         setError(t("chat.sendTrackingUnavailable"));
         return;
       }
@@ -7033,15 +7075,15 @@ function ChatPageApp() {
       if (activeKeyRef.current !== key || !sendControllerRef.current.canSend(key)
         || wsRef.current?.readyState !== WebSocket.OPEN || backendOfSession(key) !== originalBackend
         || inFlightRef.current.has(key) || hasPendingTrackedSend(key)) {
-        if (!queued) { telemetry?.finish("canceled"); restoreSendDraft(key, text, atts); }
+        if (!queued) { telemetry?.finish("canceled"); restoreSendDraft(key, text, atts, isSlash); }
         return;
       }
-      draftsRef.current.delete(key);
+      if (isSlash !== "button") draftsRef.current.delete(key);
     } catch (error) {
       if (!ownsInput()) return;
       takeInput();
       telemetry?.finish("error", error);
-      restoreSendDraft(key, text, atts);
+      restoreSendDraft(key, text, atts, isSlash);
       if (activeKeyRef.current === key) {
         setError(error instanceof Error ? error.message : "这条消息暂时无法安全发送，请稍后重试。内容已为你保留");
       }
@@ -7062,14 +7104,14 @@ function ChatPageApp() {
     );
     if (!payloadBudget.allowed) {
       takeInput();
-      restoreSendDraft(key, text, atts);
+      restoreSendDraft(key, text, atts, isSlash);
       telemetry?.finish("error", "VALIDATION_ERROR");
       showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
       return;
     }
-    if (trackedSend && !rememberPendingTrackedSend(key, idem, undefined, originalBackend)) {
+    if (trackedSend && !rememberPendingTrackedSend(key, idem, undefined, originalBackend, telemetry?.recoveryId)) {
       takeInput();
-      restoreSendDraft(key, text, atts);
+      restoreSendDraft(key, text, atts, isSlash);
       telemetry?.finish("error");
       setError(t("chat.sendTrackingUnavailable"));
       return;
@@ -7183,6 +7225,9 @@ function ChatPageApp() {
     try {
       await send("chat.send", params);
     } catch (e) {
+      // A terminal lookup or rejection may already have settled this exact
+      // send while the socket was still waiting for its original RPC reply.
+      if (trackedSend && !readPendingTrackedSends().some(entry => entry.key === key && entry.idem === idem)) return;
       const uncertain = isUncertainChatSendReceipt(e);
       const observedSend = trackedSend || (uncertain && ["shoggoth", "openclaw", "hermes"].includes(originalBackend));
       if (observedSend && uncertain) {
@@ -7374,6 +7419,32 @@ function ChatPageApp() {
     return () => clearTimeout(timer);
   }, [activeKey, connected, connectedBackends, readyAgentIds]);
 
+  const compactGatewaySession = async (key: string, args: string, raw: string) => {
+    if (gatewayCompactions.current.has(key)) return;
+    gatewayCompactions.current.add(key);
+    const pending = { text: t("chat.compacting"), kind: "pending" as const };
+    setToast(pending);
+    updateSessionMessages(key, prev => [...prev, { role: "user", parts: [{ type: "text", text: raw }], ts: Date.now() }]);
+    const resultMessage = (text: string) => updateSessionMessages(key, prev =>
+      [...prev, { role: "system", local: true, parts: [{ type: "text", text }], ts: Date.now() }]);
+    try {
+      const res = await send("sessions.compact", buildCompactParams(key, args));
+      const r = res?.payload?.result || {};
+      const detail = typeof r.tokensBefore === "number" && typeof r.tokensAfter === "number"
+        ? t("chat.compactDetail", { before: fmtTokens(r.tokensBefore), after: fmtTokens(r.tokensAfter) })
+        : r.tokenLine || r.headline ? `（${r.tokenLine || r.headline}）` : "";
+      resultMessage(t("chat.compacted", { detail }));
+      if (activeKeyRef.current === key) void loadHistory(key, { refresh: true });
+      else historyControllerRef.current?.markNeedsRevalidate(key);
+      void refreshSessions().catch(() => {});
+    } catch (error) {
+      resultMessage(t("chat.compactFailed", { msg: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      gatewayCompactions.current.delete(key);
+      setToast(current => current === pending ? null : current);
+    }
+  };
+
   // Run a recognized slash command. OpenClaw agents → handle client-side (RPC /
   // local render), mirroring OpenClaw's own Control UI (its gateway does NOT execute
   // commands arriving via chat.send — verified: they get stored with no reply).
@@ -7503,27 +7574,7 @@ function ChatPageApp() {
         setMessages([{ role: "system", local: true, parts: [{ type: "text", text: t("chat.localCleared") }], ts: Date.now() }]);
         return true;
       case "compact":
-        echo();
-        setToast({ text: t("chat.compacting"), kind: "pending" });
-        try {
-          const res = await send("sessions.compact", buildCompactParams(key, args));
-          const r = res?.payload?.result || {};
-          // OpenClaw 回 tokensBefore/After 数字；Hermes(session.compress) 回
-          // token_line/headline 展示串——两种都接。
-          const detail =
-            typeof r.tokensBefore === "number" && typeof r.tokensAfter === "number"
-              ? t("chat.compactDetail", { before: fmtTokens(r.tokensBefore), after: fmtTokens(r.tokensAfter) })
-              : r.tokenLine || r.headline
-                ? `（${r.tokenLine || r.headline}）`
-                : "";
-          setToast(null);
-          pushLocal(t("chat.compacted", { detail }));
-          // 压缩重写了服务端转录 → 重载让 UI 显示压缩后的历史。
-          void loadHistory(key, { refresh: true });
-        } catch (e) {
-          setToast(null);
-          pushLocal(t("chat.compactFailed", { msg: e instanceof Error ? e.message : String(e) }));
-        }
+        await compactGatewaySession(key, args, raw);
         return true;
       case "usage": {
         echo();
@@ -8436,6 +8487,11 @@ function ChatPageApp() {
     }
     setToast({ text: t("chat.retryNoSource"), kind: "error" });
     setTimeout(() => setToast(null), 2200);
+  };
+  const compactContext = () => {
+    const key = activeKeyRef.current;
+    if (!key || !canDispatchComposerMessage(key)) return;
+    void sendChatMessage("/compact", [], "button");
   };
   // Toggle the group's saved pin, or pin its first actionable message — persisted per session.
   // On add, jump the carousel to the just-pinned item (its thread-order position
@@ -9481,6 +9537,33 @@ function ChatPageApp() {
   const recoveryCard = recoveryNotice ? <ChatServiceRecoveryNotice action={recoveryAction} /> : null;
   const activePendingSend = activeKey ? readPendingTrackedSends().find(entry => entry.key === activeKey) : undefined;
   const activePendingStop = activeKey ? pendingNativeStops.get(activeKey) : undefined;
+  const nativeReceiptId = activePendingSend && (!activePendingSend.backendId || activePendingSend.backendId === "shoggoth")
+    ? activePendingSend.idem : undefined;
+  const observerUncertain = !!activeKey && !activePendingSend && verificationKeys.has(activeKey);
+  useEffect(() => {
+    if (!connected || !activeKey || activeGroupId || activeBackend !== "shoggoth" || activeRecoveryRequired
+      || (!nativeReceiptId && !activePendingStop && !observerUncertain)) return;
+    let canceled = false;
+    let delay = 3000;
+    const check = async () => {
+      if (canceled || activeKeyRef.current !== activeKey || backendOfSession(activeKey) !== "shoggoth") return;
+      try {
+        if (nativeReceiptId) await verifyPendingTrackedSends(activeKey, { pollOperationId: nativeReceiptId });
+        else if (activePendingStop) await requestNativeStop(activePendingStop, true);
+        else await loadHistory(activeKey, { refresh: true });
+      } catch {
+        // A failed read leaves the same operation available for the next check.
+      } finally {
+        if (!canceled) {
+          delay = Math.min(delay * 2, 15000);
+          timer = setTimeout(check, delay);
+        }
+      }
+    };
+    let timer = setTimeout(check, delay);
+    return () => { canceled = true; clearTimeout(timer); };
+  }, [connected, activeKey, activeGroupId, activeBackend, activeRecoveryRequired, nativeReceiptId, activePendingStop,
+    observerUncertain, verifyPendingTrackedSends, requestNativeStop, loadHistory, backendOfSession]);
   const stopNotice = activePendingStop && !activeRecoveryRequired ? (
     <ChatStatusNotice title={t("chat.stopVerificationNoticeTitle")} tone="warning" className="chat-banner chat-verification-banner"
       testId="chat-stop-verification-notice" action={<button type="button" disabled={!connected || serviceRecoveryBusy}
@@ -9491,7 +9574,7 @@ function ChatPageApp() {
   const verificationNotice = activeKey && verificationKeys.has(activeKey) && !activeRecoveryRequired && !activePendingStop ? (
     <ChatStatusNotice title={t(activePendingSend && !activePendingSend.accepted ? "chat.sendVerificationNoticeTitle" : "chat.verificationNoticeTitle")} tone="warning" className="chat-banner chat-verification-banner"
       testId="chat-verification-notice" action={<button type="button" disabled={!connected || serviceRecoveryBusy}
-        onClick={() => void verifyPendingTrackedSends(activeKey, true)}>
+        onClick={() => void verifyPendingTrackedSends(activeKey, { userRequestedCheck: true })}>
         {t(activePendingSend ? activePendingSend.accepted ? "chat.verifyOriginalSend" : "chat.checkSendResult" : "chat.retryObserve")}
       </button>}>
       {t(chatVerificationNoticeKey(activePendingSend))}
@@ -10094,6 +10177,7 @@ function ChatPageApp() {
           dividerLabel: d
             ? `${d.fromReset ? t("chat.archiveResetAt", { time: when }) : t("chat.archiveEarlierAt", { time: when })}${d.truncated ? ` · ${t("chat.archiveTruncated")}` : ""}`
             : n.notice === "contextCompacted" ? t("chat.compactedCtx")
+              : n.notice === "contextRenewed" ? t("chat.renewedCtx")
               : n.notice === "runInterrupted" ? t("chat.runInterruptedNotice")
               : n.notice === "processComplete" ? t("chat.processCompleteNotice")
               : `${t("chat.modelSwitchedNotice")}${n.model ? ` · ${n.model}` : ""}`,
@@ -10168,6 +10252,7 @@ function ChatPageApp() {
             errorRaw: translated !== segText && segText ? segText : undefined,
             errorRepeat: m0.repeat,
             onRetry: m0.automation === "cron" || m0.errorCode?.startsWith("PRODUCT_COMPACTION_") ? undefined : () => retryErrorGroup(g),
+            onCompact: offersCompactContext(m0) ? compactContext : undefined,
             onCopy: segText ? () => copyText(segText) : undefined,
             onQuote: segText ? () => quoteGroup(g) : undefined,
             onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
@@ -10704,11 +10789,20 @@ function ChatPageApp() {
   );
   // Missing session metadata means an unknown window. The list-level default
   // can be a generic 200k fallback or belong to another model/backend.
-  const ctxLimit = active?.contextTokens;
-  const ctxPct =
-    active && active.totalTokensFresh !== false && active.totalTokens && ctxLimit
-      ? Math.min(100, Math.round((active.totalTokens / ctxLimit) * 100))
-      : null;
+  const nativeMeter = activeBackendDescriptor?.surfaces.agentHarness === true;
+  const contextMeter = sessionContextMeter(active, nativeMeter);
+  const contextIndicator = active && contextMeter && viewedSessionKey === active.key && !activeAgentHeaderPanel && (
+    <ChatContextMeter key={JSON.stringify([activeBackend, active.key])} meter={contextMeter} native={nativeMeter}
+      backend={activeBackend} agentId={agentOf(active.key)} sessionKey={active.key} product={active.productContext}
+      reply={activeBackendDescriptor?.surfaces.runtimeBindings && historyLoaded && earlierHistory.key === active.key
+        && searchHistoryWindowKeyRef.current !== active.key && !activeRunInFlight ? latestContextReply(messages) : null}
+      busy={!canDispatchComposerMessage(active.key) || activeRunInFlight || isSessionReplyPending(active)}
+      compacting={gatewayCompactions.current.has(active.key) || !!active.productContext?.pendingRunId
+        || runWaitBySession[active.key]?.stage === "compacting"}
+      onCompact={nativeMeter ? compactContext : supportsBackendSlash(activeBackend, activeCaps) ? () => {
+        if (canDispatchComposerMessage(active.key)) void compactGatewaySession(active.key, "", "/compact");
+      } : undefined} />
+  );
 
   // Once the agent list is ready (seeded from cache or fetched over WS), land
   // the user back in the LAST SESSION they had open (persisted per origin) —
@@ -11592,7 +11686,7 @@ function ChatPageApp() {
                   jumpToQuoted={jumpToQuoted} latestUserMessageKey={latestUserMessageKey}
                   latestAssistantMessageKeys={latestAssistantMessageKeys} imageContext={imageContext}
                   renderGroupContinuation={renderGroupContinuation} renderBackgroundTasks={renderBackgroundTasks} openTaskDetails={openTaskDetails}
-                  sending={sending} retryErrorGroup={retryErrorGroup} copyText={copyText} quoteGroup={quoteGroup}
+                  sending={sending} retryErrorGroup={retryErrorGroup} compactContext={compactContext} copyText={copyText} quoteGroup={quoteGroup}
                   pinnedIds={pinnedIds} pinGroup={pinGroup} deleteGroup={deleteGroup}
                 />
                 {activePluginConversation && <McpApprovalTarget conversation={activePluginConversation}
@@ -11640,18 +11734,6 @@ function ChatPageApp() {
                 ↓ {t("chat.latestMessage")}
               </button>
             )}
-            {/* bottom context meter: only surfaced once the window is nearly full (>80%) */}
-            {ctxPct != null && ctxPct > 80 && (
-              <div className="chat-ctx">
-                <span className="chat-ctx__meter">
-                  <span className="chat-ctx__fill" style={{ width: `${ctxPct}%` }} />
-                </span>
-                <span>
-                  {ctxPct}% · {fmtTokens(active.totalTokens)} / {fmtTokens(ctxLimit)}
-                </span>
-              </div>
-            )}
-
             {!immersive && activeKey && <McpConnectionRequests key={`mcp-requests:${activeKey}`} backendId={activeBackend} agentId={agentOf(activeKey)} sessionKey={activeKey} visible={!immersive && !activeGroupId && routerLocation.pathname === "/chat"} />}
             {!immersive && planDock}
             <div
@@ -11753,12 +11835,15 @@ function ChatPageApp() {
                     </span>
                   </div>
                   {effortControl && <ChatThinkFastMenu key={effortControlKey} {...effortControl} />}
-                  <ChatPermissionMenu
-                    options={permissionOptions}
-                    activeMode={activePermissionMode}
-                    onSelect={(option) => { void changePermissionMode(option); }}
-                    disabled={!connected}
-                  />
+                  <div className="chat-composer__permissions">
+                    <ChatPermissionMenu
+                      options={permissionOptions}
+                      activeMode={activePermissionMode}
+                      onSelect={(option) => { void changePermissionMode(option); }}
+                      disabled={!connected}
+                    />
+                    {!immersive && contextIndicator}
+                  </div>
                 </div>
                 <div className="chat-composer__right">
                   {supportsActiveAttachments && (
@@ -11922,7 +12007,7 @@ function ChatPageApp() {
           permissionSelectionDisabled={!connected}
           listLive={listLive}
           thinkingControl={effortControl ? { key: effortControlKey, props: effortControl } : undefined}
-          ctxSummary={ctxPct != null ? `${ctxPct}% · ${fmtTokens(active?.totalTokens)}/${fmtTokens(ctxLimit)}` : ""}
+          contextIndicator={contextIndicator}
           listening={listening}
           toggleTalk={toggleTalk}
           sttSupported={sttSupported}
@@ -12026,7 +12111,6 @@ function ChatPageHistoryFixture({ deps }: { deps: ChatPageTestDeps }) {
           changeModel={() => {}}
           modelSelectionDisabled={false}
           listLive
-          ctxSummary=""
           listening={false}
           toggleTalk={() => {}}
           sttSupported={false}

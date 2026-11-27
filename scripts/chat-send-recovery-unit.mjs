@@ -4,11 +4,19 @@ import fs from "node:fs";
 import vm from "node:vm";
 import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 const source = fs.readFileSync(new URL("../app/manage-ui/src/lib/chatSendRecovery.ts", import.meta.url), "utf8");
+const storageSource = fs.readFileSync(new URL("../app/manage-ui/src/lib/chatTelemetryStorage.ts", import.meta.url), "utf8");
 const module = { exports: {} };
-vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
-  target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+const transpile = code => ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+  target: ts.ScriptTarget.ES2022 } }).outputText;
+const storageExports = {};
+vm.runInNewContext(transpile(storageSource), { exports: storageExports });
+vm.runInNewContext(transpile(source), { module, exports: module.exports, require(id) {
+  assert.equal(id, "./chatTelemetryStorage");
+  return storageExports;
+} });
 const { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation, isExplicitChatSendRejection, isUncertainChatSendReceipt,
   PENDING_CHAT_SENDS_KEY, chatVerificationNoticeKey, createPendingNativeChatStopStore, nativeChatStopIsTerminal } = module.exports;
+const { PENDING_CHAT_TELEMETRY_KEY } = storageExports;
 assert.equal(chatVerificationNoticeKey({ accepted: true }), "chat.executionNeedsVerification");
 assert.equal(chatVerificationNoticeKey({}), "chat.sendNeedsVerification");
 assert.equal(chatVerificationNoticeKey(), "chat.observeNeedsVerification");
@@ -16,6 +24,22 @@ const values = new Map(), storage = { getItem: key => values.get(key) ?? null,
   setItem: (key, value) => values.set(key, value) };
 const store = createPendingChatSendStore(() => storage, () => 10);
 const key = "agent:openclaw-fixture:session", idem = "operation-original";
+const nativeOperation = "c1edaedd-1ec1-4a7d-987f-c04d315fe161";
+const telemetryId = "b320a148-af96-4ca7-bd61-849780aea4e4";
+assert.equal(store.remember(key, nativeOperation, undefined, "shoggoth", telemetryId), true);
+assert.deepEqual(JSON.parse(storage.getItem(PENDING_CHAT_SENDS_KEY)),
+  [{ key, idem: nativeOperation, at: 10, backendId: "shoggoth" }]);
+assert.equal(createPendingChatSendStore(() => storage, () => 11).telemetryId(nativeOperation), telemetryId);
+assert.equal(store.observeTerminal(key, nativeOperation, "shoggoth"), true);
+assert.equal(store.telemetryId(nativeOperation), telemetryId);
+assert.equal(store.forget(key, nativeOperation), true);
+assert.equal(store.telemetryId(nativeOperation), undefined);
+assert.deepEqual(JSON.parse(storage.getItem(PENDING_CHAT_TELEMETRY_KEY)), {});
+assert.equal(store.remember(key, nativeOperation, undefined, "shoggoth", telemetryId), true);
+const expired = createPendingChatSendStore(() => storage, () => 10 + 7 * 86_400_000);
+assert.equal(expired.telemetryId(nativeOperation), undefined);
+assert.equal(expired.has(key), true, "statistics retention cannot remove the chat recovery fence");
+assert.equal(store.forget(key, nativeOperation), true);
 const stopStore = createPendingNativeChatStopStore(() => storage);
 const nativeStop = { key, backendId: "native-test", runId: "run-original" };
 assert.equal(stopStore.remember(nativeStop), true);

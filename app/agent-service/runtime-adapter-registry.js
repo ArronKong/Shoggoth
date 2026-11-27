@@ -150,12 +150,15 @@ class RuntimeAdapterRegistry {
     return !!entry && (entry.pending > 1 || [...entry.requests].some(scope => scope !== current));
   }
 
-  canGenerateModelOnly(runtime, { purpose = null } = {}) {
+  canGenerateModelOnly(runtime, { purpose = null, binding = null } = {}) {
     const adapter = this.#adapters.get(runtime);
     // A purpose-specific proof must not silently enable other model-only
     // consumers, such as conversation compaction or memory extraction.
+    // With a Binding, the adapter may also rule out the CLI it actually runs.
     return isRuntimeAvailable(runtime) && adapter?.modelOnly === true
-      && (!adapter.modelOnlyPurposes || adapter.modelOnlyPurposes.includes(purpose));
+      && (!adapter.modelOnlyPurposes || adapter.modelOnlyPurposes.includes(purpose))
+      && (!binding || typeof adapter.canGenerateModelOnlyFor !== "function"
+        || adapter.canGenerateModelOnlyFor(binding, purpose) !== false);
   }
 
   // A native session id that the runtime can never continue (for example one
