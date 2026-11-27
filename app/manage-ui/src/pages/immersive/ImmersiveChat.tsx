@@ -73,6 +73,7 @@ export interface ImmersiveMessage {
   errorRaw?: string; // kind=error：hover 原文（与显示不同才给）
   errorRepeat?: number; // kind=error：连续相同失败 ×N
   onRetry?: () => void; // kind=error：重发上一条用户消息
+  onCompact?: () => void; // kind=error：上下文整理失败时发 /compact
   dividerLabel?: string; // kind=divider：分隔线文案
   dividerTitle?: string; // kind=divider：hover 原文（模型切换标记）
   // 悬浮操作 / 右键（无参闭包捕获 Group，动作与普通模式同一套 handler）
@@ -147,7 +148,7 @@ export interface ImmersiveBundle {
   permissionSelectionDisabled?: boolean;
   listLive: boolean;
   thinkingControl?: { key: string; props: ComponentProps<typeof ChatThinkFastMenu> };
-  ctxSummary: string; // 会话上下文用量摘要（"34% · 12k/200k"），空串 = 不显示
+  contextIndicator?: ReactNode;
   listening: boolean;
   toggleTalk: () => void;
   sttSupported: boolean;
@@ -189,7 +190,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
     onExit, phase, live, sendSeq, onHistoryInput, onLeaveHistoryTop, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
     submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, turnPlaceholder, queuedMessages, slashMenu, slashOpen, connectionRequests, planDock,
-    models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingControl, ctxSummary,
+    models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingControl, contextIndicator,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, quoteImages, clearQuote,
@@ -469,7 +470,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       if (document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]')) return;
-      if (lightboxOpen || slashOpen || document.querySelector(".model-menu")) return;
+      if (lightboxOpen || slashOpen || document.querySelector(".model-menu, [data-chat-context-details]")) return;
       if (overlay) { setOverlay(null); return; }
       if (pickerOpen) { setPickerOpen(false); return; }
       if (renameOpen) { setRenameOpen(false); return; }
@@ -820,6 +821,11 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                       ↻
                     </button>
                   )}
+                  {m.onCompact && (
+                    <button type="button" className={styles.errCompact} onClick={m.onCompact}>
+                      {t("chat.compactContext")}
+                    </button>
+                  )}
                 </div>
                 {footerFor(m)}
                 {actionsFor(m)}
@@ -1066,10 +1072,10 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
               triggerClassName={styles.pill}
               appearance="dark"
             />
+            {contextIndicator}
             {thinkingControl && (
               <ChatThinkFastMenu key={thinkingControl.key} {...thinkingControl.props} triggerClassName={styles.pill} appearance="dark" />
             )}
-            {ctxSummary && <span className={`${styles.pillStatic} ${styles.pillCtx}`} title={t("chat.ctxUsage")}>{ctxSummary}</span>}
           </div>
           <div className={styles.barRight}>
             <button type="button" className={listening ? `${styles.iconBtn} ${styles.iconBtnActive}` : styles.iconBtn} onClick={toggleTalk} disabled={!sttSupported} title={sttSupported ? (listening ? t("chat.stopTalk") : t("chat.startTalk")) : t("chat.sttUnsupported")}>

@@ -214,6 +214,9 @@ function rpcFixture(behavior = {}) {
             });
             if (behavior.holdCatalog) (behavior.catalogReplies ||= []).push(reply);
             else reply();
+          } else if (command.type === "compact" && behavior.compactNothing) {
+            current.send({ id: command.id, type: "response", command: "compact", success: false,
+              error: "Nothing to compact (session too small)" });
           } else if (["get_commands", "compact", "get_available_thinking_levels", "set_thinking_level", "get_session_stats"].includes(command.type)) {
             if (command.type === "get_session_stats") behavior.statsRequests = (behavior.statsRequests || 0) + 1;
             const data = command.type === "get_commands" ? { commands: [
@@ -711,6 +714,30 @@ test("Pi args keep templates, load native skills only for a skill command, isola
   assert.equal(args[args.indexOf("--provider") + 1], "openai");
   assert.equal(args[args.indexOf("--model") + 1], "gpt-5.6");
   fs.rmSync(trustedRoot, { recursive: true, force: true });
+});
+
+test("Pi /compact on a short session completes as nothing to compact instead of failing the turn", async () => {
+  const value = rpcFixture({ compactNothing: true });
+  try {
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    const started = await runtime.sessionStart({
+      source: "chat:short-compact", developerInstructions: "Keep changes scoped.",
+      model: "openai/gpt-5.6", cwd: value.workspace, permissionPolicy,
+    });
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    const result = await runtime.turnStart({
+      sessionId: started.session.id, operationId: "short-compact", prompt: "/compact",
+      context: "Check only this workspace.", model: "openai/gpt-5.6", cwd: value.workspace, permissionPolicy,
+    });
+    await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === result.turn.id), "compact completion");
+    const complete = events.find((event) => event.type === "complete" && event.turnId === result.turn.id);
+    assert.equal(complete.status, "completed", complete.errorCode);
+    assert.equal(events.some((event) => event.type === "context_compacted"), false, "nothing was compacted");
+    assert.ok(events.some((event) => event.type === "text" && /nothing to compact/u.test(event.text)));
+    await value.adapter.stopAll();
+  } finally { value.cleanup(); }
 });
 
 test("Pi discovers workspace commands and executes built-ins as RPC, skills as raw commands", async () => {

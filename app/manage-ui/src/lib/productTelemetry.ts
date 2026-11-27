@@ -1,5 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { getDesktopProductTelemetry } from "../api/client";
+import { clearPendingChatTelemetry } from "./chatTelemetryStorage";
 import type {
   TelemetryDimension, TelemetryFeature, TelemetryOutcome, TelemetrySettingError,
   TelemetrySettings, TelemetryPayload, TelemetryStep, TelemetryUsage,
@@ -9,6 +10,7 @@ import catalog from "../../../core/data/product-telemetry-catalog.json";
 type SettingsState = { settings: TelemetrySettings | null; saving: boolean; error: TelemetrySettingError | null };
 type Snapshot = Record<string, number | true | string[]>;
 export interface TelemetryOperation {
+  readonly recoveryId?: string;
   finish: (outcome: TelemetryOutcome, cause?: unknown, usage?: TelemetryUsage) => void;
 }
 
@@ -22,6 +24,7 @@ const seenPages = new Set<string>();
 const seenSnapshots = new Set<TelemetryDimension>();
 
 function publish(next: SettingsState) {
+  if (next.settings && !next.settings.detailedEpoch) clearPendingChatTelemetry();
   if (view.settings?.detailedEpoch !== next.settings?.detailedEpoch) {
     detailDay = null;
     seenPages.clear();
@@ -169,6 +172,14 @@ function errorKind(cause: unknown): string {
   return "unknown";
 }
 
+function emitOperationEnd(epoch: string, operationId: string, outcome: TelemetryOutcome, cause?: unknown, usage?: TelemetryUsage) {
+  let error: string | null = null;
+  if (outcome === "error") {
+    try { error = errorKind(cause); } catch { error = "unknown"; }
+  }
+  emit(epoch, { kind: "feature_end", payload: { operationId, outcome, errorKind: error, usage: usage ?? null } });
+}
+
 function activeDetailEpoch(): string | null {
   const epoch = view.settings?.detailedEpoch;
   return epoch && productPage() && document.visibilityState === "visible" && document.hasFocus()
@@ -188,17 +199,37 @@ export function startTelemetryOperation(feature: TelemetryFeature, backend?: unk
     let finished = false;
     emit(epoch, { kind: "feature_start", payload: { feature, operationId, backendType: backendTelemetryType(backend) } });
     return {
+      get recoveryId() { return !finished && epoch === view.settings?.detailedEpoch ? operationId : undefined; },
       finish(outcome, cause, usage) {
         if (finished || epoch !== view.settings?.detailedEpoch) return;
         finished = true;
-        let error: string | null = null;
-        if (outcome === "error") {
-          try { error = errorKind(cause); } catch { error = "unknown"; }
-        }
-        emit(epoch, { kind: "feature_end", payload: { operationId, outcome, errorKind: error, usage: usage ?? null } });
+        emitOperationEnd(epoch, operationId, outcome, cause, usage);
       },
     };
   } catch { return undefined; }
+}
+
+export function restoreChatTelemetryOperation(operationId: string | undefined): TelemetryOperation | undefined {
+  const bridge = getDesktopProductTelemetry();
+  if (!bridge || !operationId) return;
+  let finished = false;
+  return {
+    get recoveryId() { return !finished && view.settings?.detailedEpoch ? operationId : undefined; },
+    finish(outcome, cause, usage) {
+      if (finished) return;
+      finished = true;
+      const record = (settings: TelemetrySettings | null) => {
+        const epoch = (view.settings ?? settings)?.detailedEpoch;
+        if (epoch) emitOperationEnd(epoch, operationId, outcome, cause, usage);
+      };
+      if (view.settings) record(view.settings);
+      // The exact chat lookup can complete before settings finish loading.
+      else {
+        try { void bridge.getSettings().then(record).catch(() => {}); }
+        catch { /* statistics must never alter chat recovery */ }
+      }
+    },
+  };
 }
 
 export async function measureTelemetry<T>(feature: TelemetryFeature, backend: unknown, run: () => Promise<T>,

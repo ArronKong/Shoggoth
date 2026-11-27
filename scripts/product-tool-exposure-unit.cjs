@@ -95,4 +95,13 @@ test("background dispatch is resident and its instruction reaches only chat runs
   for (const source of ["cron", "kanban", "inspiration", "proactive"]) assert.equal(instructions(source, "codex").includes(line), false, source);
   assert.equal(manifest.SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes(line), false);
   assert.equal(manifest.SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS.includes(line), false);
+  // The session-stable policy is identical for chat and proactive turns of one
+  // native thread; the chat-only line travels with the turn instructions.
+  const stable = source => manifest.shoggothProductDeveloperInstructions({
+    source, sourceId: "source-1", profileName: "Agent", backendId: "shoggoth", runtime: "codex" }, { includeWorkSource: false });
+  assert.equal(stable("chat").includes(line), false);
+  assert.equal(stable("chat"), stable("proactive"));
+  assert.deepEqual(manifest.backgroundTaskInstructions({ source: "chat", runtime: "codex" }), [line]);
+  assert.deepEqual(manifest.backgroundTaskInstructions({ source: "proactive", runtime: "codex" }), []);
+  assert.deepEqual(manifest.backgroundTaskInstructions({ source: "chat", runtime: "hermes" }), []);
 });

@@ -65,7 +65,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const definition = officialConnectorDefinitions.find(value => value.id === id)!;
   const alipay = id === "alipay";
   const agentMail = id === "agently-mail";
-  const serviceOnly = id === "fliggy" || id === "baidu-maps";
+  const serviceOnly = id === "fliggy" || id === "baidu-maps" || id === "obsidian";
   const data = model.data?.items.find(item => item.id === id), installed = data?.state === "installed";
   const language = i18n.resolvedLanguage || i18n.language;
   const [values, setValues] = useState<Record<string, string>>({}), [code, setCode] = useState("");
@@ -254,7 +254,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const accountStatus = alipayClosing ? "alipayWaitingRevocation" : `accountStates.${account?.state || "unknown"}`;
   const guide = data?.canRemove || installed ? { url: definition.docsUrl, label: tr("source") } : undefined;
   const setupNotes = <>
-    {(installed || ["agently-mail", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
+    {(installed || ["agently-mail", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "obsidian"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
     {definition.accessUrl && <p><a className={s.connectionGuide} href={definition.accessUrl} target="_blank" rel="noreferrer">{tr("requestAccess")}</a></p>}
   </>;
   const remove = async () => {

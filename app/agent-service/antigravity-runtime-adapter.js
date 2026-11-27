@@ -30,6 +30,7 @@ const ANTIGRAVITY_CAPABILITIES = runtimeCapabilities({
   "account.read": false,
   "account.login": false,
   "account.logout": false,
+  "context.usage.exact": true,
   events: true,
   serverRequests: false,
 });
@@ -44,7 +45,7 @@ class AntigravityRuntimeHandle {
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = runtimeCapabilities({ ...ANTIGRAVITY_CAPABILITIES, serverRequests: host.nativeApprovalsAvailable === true,
-      "model.generate.toolFree": host.modelOnlyInstance === true, "account.quota.read": host.controlInstance === true });
+      "model.generate.toolFree": host.modelOnlyInstance === true });
     this.host = host;
     this.modelOnlyStopsHost = host.modelOnlyInstance === true;
     this.workspace = host.workspace;
@@ -55,7 +56,6 @@ class AntigravityRuntimeHandle {
   get registeredSecrets() { return []; }
 
   authenticationState(options) { return this.host.authenticationState(options); }
-  accountQuotaRead() { return this.host.accountQuotaRead(); }
   generateModelOnly(input) { return require("./acp-model-only").generateAcpModelOnly(this.host, input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {

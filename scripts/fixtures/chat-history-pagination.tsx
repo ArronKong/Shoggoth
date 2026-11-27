@@ -343,7 +343,7 @@ state.runHistoryFixture = async () => {
   return { passed: true, results, archive: [50, 100, 123], immersive: [50, 100, 150, 182], historyBoundary: true, lateSwitch: true };
 };
 state.runMessageNavigationFixture = async () => {
-  const [shortSession, readySession] = cases;
+  const [shortSession, readySession, longSession] = cases;
   const navigator = () => document.querySelector("[data-chat-message-navigator]");
   await control(shortSession.key, "navigation-threshold");
   select(shortSession.key);
@@ -353,5 +353,38 @@ state.runMessageNavigationFixture = async () => {
   select(readySession.key);
   await wait(() => count("navready") === 14 && thread().dataset.historyLoaded === "true", "seven user messages and seven replies");
   check(navigator()?.querySelectorAll("[data-chat-nav-mark]").length === 7, "seven user messages must show seven marks");
-  return { hiddenAt: 6, visibleAt: 7 };
+
+  select(longSession.key);
+  await wait(() => count(longSession.id) === 50 && thread().dataset.historyLoaded === "true", "long navigation history");
+  navigator()!.querySelector<HTMLButtonElement>("button")!.click();
+  const popup = () => document.querySelector<HTMLElement>("[data-chat-nav-list]");
+  await wait(() => {
+    const panel = popup();
+    return panel && panel.clientHeight > 0 && panel.scrollHeight > panel.clientHeight;
+  }, "long navigation list scrolls");
+
+  const panel = popup()!;
+  const composer = document.querySelector<HTMLElement>(".chat-composer")!;
+  const input = composer.querySelector("textarea")!;
+  const initialTop = composer.getBoundingClientRect().top;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "多行草稿\n".repeat(12));
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await wait(() => composer.getBoundingClientRect().top < initialTop - 40, "composer grows while navigation is open");
+
+  panel.scrollTop = panel.scrollHeight;
+  await frame();
+  const lastRow = Array.from(panel.querySelectorAll<HTMLButtonElement>("[data-chat-nav-row]")).at(-1)!;
+  const rowBounds = lastRow.getBoundingClientRect();
+  const composerBounds = composer.getBoundingClientRect();
+  const x = rowBounds.left + rowBounds.width / 2;
+  const y = rowBounds.top + rowBounds.height / 2;
+  check(x > composerBounds.left && x < composerBounds.right && y > composerBounds.top && y < composerBounds.bottom,
+    "the last navigation row overlaps the expanded composer");
+  check(lastRow.contains(document.elementFromPoint(x, y)), "the last navigation row is clickable above the composer");
+
+  const latestUserMessage = `HIST_${longSession.id}_180`;
+  lastRow.click();
+  await wait(() => !popup() && thread().querySelector("[data-chat-message-located]")?.textContent?.includes(latestUserMessage),
+    "selecting the last anchor closes the list and locates the message");
+  return { hiddenAt: 6, visibleAt: 7, clickableAboveComposer: true };
 };

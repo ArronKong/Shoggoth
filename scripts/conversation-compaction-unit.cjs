@@ -55,6 +55,9 @@ async function compactionFixture({ rounds = 50, authentication = null } = {}) {
       generateModelOnly: { value: async input => {
         calls++;
         assert.match(input.prompt, /Keep blue triangles/u);
+        // 0.8.385: a summary turned "the user will ask for the codename" into
+        // "Ask the user about the codename". Every action names its actor.
+        assert.match(input.prompt, /Name who acts in every request, decision and next action \(the user or the assistant\)/u);
         assert.equal(value.dispatcher.listRuns({ source: "chat" }).some(run => run.status === "running"), false);
         assert.ok(execution.records.size > 0, "recovery descriptor precedes dispatch");
         return response;
@@ -69,6 +72,17 @@ async function compactionFixture({ rounds = 50, authentication = null } = {}) {
     usage: { inputTokens: 100, outputTokens: 20, cachedInputTokens: 0, cacheWriteInputTokens: 0,
       reasoningOutputTokens: 0, totalTokens: 120 },
   }), reject: error => reject(error), async cleanup() { await value.coordinator.close(); checkpoints.close(); context.cleanup(); } };
+}
+
+// A failed summary no longer refuses its input: it continues on the fallback.
+async function finishRun(f, id) {
+  const run = f.dispatcher.getRun(id);
+  const thread = f.host.threads.find(item => item.id === run.runtimeSessionRef.sessionId);
+  const turn = thread.turns.find(item => item.id === run.runtimeTurnRef.turnId);
+  turn.status = "completed";
+  f.host.emit({ known: true, type: "complete", method: "turn/completed", threadId: thread.id, turnId: turn.id,
+    status: "completed", params: { threadId: thread.id, turn: { id: turn.id, status: "completed" } } });
+  await waitUntil(() => f.dispatcher.getRun(id).status === "completed", 2000, "fallback turn completed");
 }
 
 test("missing summary authentication fails before generation and remains actionable for chat", async () => {
@@ -120,7 +134,9 @@ test("changing the configured summary model does not reuse a failed attempt for 
     const sent = await f.coordinator.send({ operationId: "summary-model-old", sessionKey: SESSION_KEY, prompt: "continue" });
     await waitUntil(() => f.calls() === 1, 2000, "old summary model");
     f.reject(Object.assign(new Error("unsupported model"), { code: "RUNTIME_MODEL_UNAVAILABLE" }));
-    await waitUntil(() => f.dispatcher.getRun(sent.run.id).status === "failed", 2000, "old attempt finished");
+    await waitUntil(() => f.dispatcher.getRun(sent.run.id).status === "running", 2000, "old attempt fell back");
+    assert.equal(f.dispatcher.listRuns({ source: "compaction" })[0].errorCode, "PRODUCT_COMPACTION_MODEL_UNAVAILABLE");
+    await finishRun(f, sent.run.id);
     const original = f.productStore.getAgentProfile;
     f.productStore.getAgentProfile = id => ({ ...original.call(f.productStore, id), defaultModel: "new-summary-model" });
     f.reset(); f.resolve();
@@ -130,7 +146,7 @@ test("changing the configured summary model does not reuse a failed attempt for 
   } finally { await f.cleanup(); }
 });
 
-test("an upgrade retains a failed legacy summary instead of silently starting it again", async () => {
+test("an upgrade retains a failed legacy summary instead of silently starting it again, and the input falls back", async () => {
   const f = await compactionFixture();
   try {
     const sent = await f.coordinator.send({ operationId: "legacy-summary-before-upgrade", sessionKey: SESSION_KEY, prompt: "continue" });
@@ -146,10 +162,11 @@ test("an upgrade retains a failed legacy summary instead of silently starting it
     f.dispatcher.runs.set(legacyId, { ...failed, id: legacyId, idempotencyKey: legacyId, errorCode: "COMPACTION_FAILED" });
     f.coordinator.compactionBarriers.clear();
     const after = await f.coordinator.send({ operationId: "legacy-summary-after-upgrade", sessionKey: SESSION_KEY, prompt: "continue" });
-    await waitUntil(() => f.dispatcher.getRun(after.run.id).status === "failed", 2000, "legacy failure retained");
+    // The retained failure is not generated again; the input takes the fallback.
+    await waitUntil(() => ["running", "failed"].includes(f.dispatcher.getRun(after.run.id).status), 2000, "legacy failure retained");
+    assert.equal(f.dispatcher.getRun(after.run.id).status, "running", f.dispatcher.getRun(after.run.id).errorCode);
     assert.equal(f.calls(), 1);
     assert.equal(f.dispatcher.listRuns({ source: "compaction" }).length, 1);
-    assert.equal(f.dispatcher.getRun(after.run.id).errorCode, "PRODUCT_COMPACTION_FAILED");
   } finally { await f.cleanup(); }
 });
 

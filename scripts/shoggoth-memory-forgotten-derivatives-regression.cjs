@@ -70,6 +70,31 @@ test("unattributed legacy assistant history is excluded after forget while origi
   assert.equal(f.service.transcriptStore.listEvents(A, input.session.id).find(event => event.id === answer.id).content.text, ANSWER);
 });
 
+test("history older than the forgotten fact, and replies inheriting only it, survive forget", { timeout: 60000 }, async t => {
+  const f = await fixture(t), earlier = f.turn("先聊别的：灯塔几点开？", boundSession(f));
+  const old = appendAnswer(f, earlier, "灯塔晚上八点开。", { legacy: true }); await f.finish(earlier);
+  const item = await f.saveUser(FACT);
+  const followup = f.turn("灯塔周末呢？", earlier.session); begin(f, followup, [], [old]);
+  const inherited = appendAnswer(f, followup, "周末也开。"); await f.finish(followup);
+  assert.equal(inherited.content.ownMemoryProvenance.complete, false);
+  assert.equal(inherited.content.ownMemoryProvenance.unattributedThrough, old.occurredAt);
+  const late = f.turn("再问一次", earlier.session);
+  const lateLegacy = appendAnswer(f, late, "没有溯源的回答。", { legacy: true }); await f.finish(late);
+  const next = f.turn("然后呢", earlier.session); begin(f, next, [], [old, lateLegacy]);
+  const tainted = appendAnswer(f, next, "接着上面说。"); await f.finish(next);
+  assert.equal(Object.hasOwn(tainted.content.ownMemoryProvenance, "unattributedThrough"), true);
+  await forget(f, item);
+  const check = () => {
+    assert.equal(f.owner.recallPolicy.isEventVisible(A, old), true, "written before the fact existed");
+    assert.equal(f.owner.recallPolicy.isEventVisible(A, inherited), true, "inherits only that older reply");
+    assert.equal(f.owner.recallPolicy.isEventVisible(A, lateLegacy), false);
+    assert.equal(f.owner.recallPolicy.isEventVisible(A, tainted), false, "inherits an unattributed reply written after the fact");
+  };
+  check();
+  f.owner.recallPolicy.close(); f.owner.recallPolicy.open();
+  check();
+});
+
 test("fresh explicit reauthorization does not bless old derivative proofs", { timeout: 60000 }, async t => {
   const f = await fixture(t), item = await f.saveUser(FACT), input = f.turn("查一下代号", boundSession(f));
   begin(f, input, [item]); const old = appendAnswer(f, input, ANSWER); await f.finish(input);

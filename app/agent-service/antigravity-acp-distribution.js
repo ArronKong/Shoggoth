@@ -295,7 +295,6 @@ module.exports = {
   ANTIGRAVITY_ACP_SERVER_VERSION,
   ANTIGRAVITY_ACP_CONTRACTS,
   GOOGLE_TEAM_IDENTIFIER,
-  googleRequirement,
   antigravityAcpInstallState,
   installAntigravityAcpServer,
   resolveAntigravityAcpServer,

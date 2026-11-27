@@ -481,7 +481,6 @@
     "id": "google-workspace",
     "name": "Google Workspace",
     "setup": "local",
-    "hidden": true,
     "transport": {
       "kind": "stdio-command",
       "command": "gwscli",

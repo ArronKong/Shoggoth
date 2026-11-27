@@ -237,7 +237,10 @@ class DeepSeekHarnessRuntimeHost {
         "DeepSeek host paths are invalid",
       );
     }
-    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
+    // Hosts are created per WorkRun: the shared store keeps what each native
+    // session already holds across Runs and restarts.
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)({
+      store: options.promptLedgerStore ?? null, scope: "deepseek-harness" });
     this.binding = runtimeBinding(options.runtimeBinding || {
       runtime: DEEPSEEK_HARNESS_RUNTIME,
       runtimeProfileId: options.runtimeProfileId,
@@ -703,6 +706,7 @@ class DeepSeekHarnessRuntimeHost {
       );
     }
     const model = this._validateModel(requestedModel, models);
+    const modelRow = models.find(entry => model === null ? entry.isDefault : entry.model === model);
     const thinkingLevel = validateThinkingLevel(input.thinkingLevel);
     const fingerprint = inputFingerprint({ ...input, model, thinkingLevel });
     const existing = turnByOperation(session, input.operationId);
@@ -724,8 +728,7 @@ class DeepSeekHarnessRuntimeHost {
       return { turn: { id: existing.id, status: existing.status, items: [] } };
     }
     if (thinkingLevel != null) {
-      const targetModel = (model ? models.find((entry) => entry.model === model) : models.find((entry) => entry.isDefault)) ?? null;
-      if (!targetModel?.capabilities?.thinkingOptions?.includes(thinkingLevel)) {
+      if (!modelRow?.capabilities?.thinkingOptions?.includes(thinkingLevel)) {
         throw hostError("RUNTIME_MODEL_SETTINGS_INVALID", "DeepSeek thinking level is unavailable for this model");
       }
     }
@@ -765,6 +768,7 @@ class DeepSeekHarnessRuntimeHost {
       turnId,
       operationId: input.operationId,
       model,
+      modelContext: modelRow?.contextWindow ? { model: modelRow.model, window: modelRow.contextWindow } : null,
       thinkingLevel,
       acceptance: makeDeferred(),
       terminal: makeDeferred(),
@@ -1046,7 +1050,8 @@ class DeepSeekHarnessRuntimeHost {
     const command = input.prompt.trimStart().startsWith("/");
     if (command) this.promptLedger?.reset(active.sessionId);
     const context = command ? { blocks: [input.context || "", turn.run].filter(Boolean), commit() {} }
-      : delivery.promptBlocks(this.promptLedger, active.sessionId, { context: input.context || "", run: turn.run });
+      : delivery.promptBlocks(this.promptLedger, active.sessionId, { context: input.context || "",
+        contextIndex: input.contextIndex ?? null, run: turn.run });
     active.promptCommit = context.commit;
     await guardRuntimeTurnSubmission(input, "turn", () => {
       if (active.settled || active.interruptRequested || input.signal?.aborted) {
@@ -1062,6 +1067,7 @@ class DeepSeekHarnessRuntimeHost {
         prompt: input.prompt,
         context: context.blocks.join("\n\n"),
         turnDeveloperInstructions: turn.rules,
+        ...(active.modelContext ? { modelContext: active.modelContext } : {}),
         ...(active.thinkingLevel !== undefined ? { reasoningEffort: active.thinkingLevel } : {}),
       }, { timeoutMs: this.startupTimeoutMs });
     });

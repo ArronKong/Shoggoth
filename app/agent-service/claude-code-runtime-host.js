@@ -446,7 +446,10 @@ class ClaudeCodeRuntimeHost {
     if (!this.paths?.stateDir || !this.paths?.trustedRoot) {
       throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code host paths are invalid");
     }
-    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
+    // Hosts are created per WorkRun: the shared store keeps what each native
+    // session already holds across Runs and restarts.
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)({
+      store: options.promptLedgerStore ?? null, scope: "claude-code" });
     this.binding = runtimeBinding(options.runtimeBinding || {
       runtime: CLAUDE_CODE_RUNTIME,
       runtimeProfileId: options.runtimeProfileId,
@@ -1337,16 +1340,21 @@ class ClaudeCodeRuntimeHost {
       return false;
     }
     // Manual /compact and the CLI's automatic compaction both end with this
-    // boundary; it is the native completion fact.
+    // boundary; it is the native completion fact. RuntimeHandleV1 requires a
+    // compactionId to come with its completed compaction record, otherwise it
+    // retires the Host as a protocol violation in the middle of the turn.
     if (message.type === "system" && message.subtype === "compact_boundary") {
       this._acceptActive(active);
+      active.currentContextUsage = null;
+      active.currentContextModel = null;
       this._publish({
         known: true,
         method: "claude-code/system/compact_boundary",
         type: "context_compacted",
         sessionId: active.sessionId,
         turnId: active.turnId,
-        ...(safeString(message.uuid, 512) ? { compactionId: message.uuid } : {}),
+        ...(safeString(message.uuid, 512)
+          ? { compactionId: message.uuid, compaction: { id: message.uuid, status: "completed" } } : {}),
         contextUsage: unknownRuntimeContextUsage(active.sessionId, { observedAt: this.now(), source: "runtime_event" }),
       });
       return false;
@@ -1358,7 +1366,10 @@ class ClaudeCodeRuntimeHost {
     }
     if (message.type === "assistant") {
       this._acceptActive(active);
-      if (message.message?.usage) active.currentContextUsage = structuredClone(message.message.usage);
+      if (message.message?.usage && !message.parent_tool_use_id) {
+        active.currentContextUsage = structuredClone(message.message.usage);
+        active.currentContextModel = safeString(message.message.model, 512) ? message.message.model : null;
+      }
       this._onAssistantMessage(active, message);
       return false;
     }
@@ -1831,7 +1842,7 @@ class ClaudeCodeRuntimeHost {
       sessionId: active.sessionId,
       turnId: active.turnId,
     };
-    const capacity = result.modelUsage?.[active.model]?.contextWindow
+    const capacity = result.modelUsage?.[active.currentContextModel ?? active.model]?.contextWindow
       ?? (Object.keys(result.modelUsage || {}).length === 1 ? Object.values(result.modelUsage)[0]?.contextWindow : null);
     this._publish({ ...common, type: "context_usage",
       contextUsage: require("./runtime-context-usage").claudeRuntimeContextUsage(
@@ -2467,6 +2478,7 @@ class ClaudeCodeRuntimeHost {
     const delivery = require("./native-instruction-delivery");
     const { blocks, commit } = delivery.promptBlocks(sessionId === null ? null : this.promptLedger, sessionId, {
       context: typeof input.context === "string" ? input.context : "",
+      contextIndex: input.contextIndex ?? null,
       run: delivery.splitTurnInstructions(delivery.turnInstructions(input)).run,
     });
     blocks.push(`CURRENT USER REQUEST\n${input.prompt}`);

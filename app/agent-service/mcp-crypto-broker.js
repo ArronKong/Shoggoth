@@ -5,6 +5,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { McpAuthSecretStore } = require("./mcp-auth-secret-store");
 const { MCP_AUTH_STORAGE_CODES, mcpAuthStorageFailure } = require("./mcp-helper-diagnostics");
+const { PersistentCryptoWorker, WORKER_INTERRUPTED } = require("./persistent-crypto-worker");
 const { serviceError } = require("./security");
 const {
   MCP_CRYPTO_PROTOCOL_VERSION,
@@ -415,7 +416,7 @@ class McpCryptoBroker {
       // 只允许一次真实尝试；后续请求固定降级，避免刷新/MCP 重连反复弹窗。
       // Helper cache preflight runs before opening any credential storage.
       const cachePreflightFailed = operation === "helper.read" && error?.code === "MCP_HELPER_CACHE_UNAVAILABLE";
-      if (!cachePreflightFailed) {
+      if (!cachePreflightFailed && error?.code !== WORKER_INTERRUPTED) {
         if (this.opened && this.generation === generation) this.generationUnavailable = true;
         this.#rejectCapacityWaiters();
       }
@@ -512,26 +513,7 @@ class McpCryptoBroker {
       ? [this.appRoot, "--shoggoth-internal-role=mcp-crypto"]
       : ["--shoggoth-internal-role=mcp-crypto"];
     if (this.persistent && ["safeStorage.encrypt", "safeStorage.decrypt"].includes(operation)) {
-      try {
-        if (!this.persistentWorker) {
-          const worker = new (require("./persistent-crypto-worker").PersistentCryptoWorker)({
-            broker: this, gate, args, env: workerEnvironment(this.parentEnv),
-          });
-          worker.entry = { terminate: () => worker.close() };
-          this.active.add(worker.entry); this.persistentWorker = worker;
-        }
-        const worker = this.persistentWorker;
-        return worker.request({ gate, request, payload, responseOptions }).then(async result => {
-          // Periodic retirement bounds the lifetime of native crypto state.
-          // Never replay a request when worker completion is unknown.
-          if (worker.sequence >= 128) {
-            try { await worker.close(); } catch (error) { result.fill(0); throw error; }
-            this.active.delete(worker.entry);
-            if (this.persistentWorker === worker) this.persistentWorker = null;
-          }
-          return result;
-        });
-      } catch { return Promise.reject(cryptoError()); }
+      return this.#requestPersistentWorker({ gate, request, payload, responseOptions, args });
     }
     let child;
     try {
@@ -544,6 +526,38 @@ class McpCryptoBroker {
       return Promise.reject(cryptoError());
     }
     return this.#exchange(child, gate, request, payload, responseOptions);
+  }
+
+  async #requestPersistentWorker({ gate, request, payload, responseOptions, args }) {
+    if (this.persistentWorker?.interrupted) await this.#retirePersistentWorker(this.persistentWorker);
+    if (!this.opened || this.generation !== gate.generation) throw cryptoError();
+    if (!this.persistentWorker) {
+      const worker = new PersistentCryptoWorker({ broker: this, gate, args, env: workerEnvironment(this.parentEnv) });
+      worker.entry = { terminate: () => worker.close() };
+      this.active.add(worker.entry);
+      this.persistentWorker = worker;
+    }
+    const worker = this.persistentWorker;
+    let result;
+    try {
+      result = await worker.request({ gate, request, payload, responseOptions });
+    } catch (error) {
+      // Keep the current failure visible. After confirmed cleanup, the next
+      // independent request can open a new worker without replaying this one.
+      if (error?.code === WORKER_INTERRUPTED) await this.#retirePersistentWorker(worker);
+      throw error;
+    }
+    if (worker.sequence >= 128) {
+      try { await this.#retirePersistentWorker(worker); }
+      catch (error) { result.fill(0); throw error; }
+    }
+    return result;
+  }
+
+  async #retirePersistentWorker(worker) {
+    await worker.close();
+    this.active.delete(worker.entry);
+    if (this.persistentWorker === worker) this.persistentWorker = null;
   }
 
   #exchange(child, gate, request, payload, responseOptions) {

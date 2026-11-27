@@ -704,7 +704,7 @@ test("runtime catalog/provider stays bound to each visible Agent", async () => {
 
 test("every bound runtime routes its scoped command catalog", async () => {
   const steerable = new Set(["codex", "claude-code", "pi", "deepseek-harness"]);
-  for (const runtime of ["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness"]) {
+  for (const runtime of ["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness", "opencode"]) {
     const bound = profile({ runtime, providerRef: null });
     const { backend, calls } = fakeBackend((request) => {
       if (request.method === "profile.list") return page("profiles", [bound]);
@@ -736,6 +736,7 @@ test("Product memory command does not depend on a Runtime command capability and
       commands: [{ name: "active-memory", description: "Memory", args: null, category: "session", aliases: [] }] };
     if (request.method === "memory.active.command") return { text: "Active Memory: on globally.",
       configUpdate: { expectedRevision: 0, config: updated } };
+    if (request.method === "chat.command.exec") return { kind: "send", text: request.params.text, warning: null };
     throw new Error(`unexpected ${request.method}`);
   }, { profiles: [profile({ runtime: "opencode" })],
     serviceStatus: () => ({ ...readyStatus(true), activeMemoryCommands: true }),
@@ -752,7 +753,11 @@ test("Product memory command does not depend on a Runtime command capability and
   await arrived; assert.equal(completed, false); release();
   assert.deepEqual(await pending, { kind: "output", text: "Active Memory: on globally.", warning: null });
   assert.equal(calls.some(({ request }) => request.method === "chat.command.exec"), false);
-  await assert.rejects(backend.execSlash("shoggoth-default", key, "/native-runtime-command"), { code: "RUNTIME_CAPABILITY_UNSUPPORTED" });
+  // OpenCode's own /compact is a runtime command: the Service turns it into the
+  // chat send that compacts the thread.
+  assert.deepEqual(await backend.execSlash("shoggoth-default", key, "/compact"), { kind: "send", text: "/compact", warning: null });
+  assert.deepEqual(calls.filter(({ request }) => request.method === "chat.command.exec").map(({ request }) => request.params),
+    [{ sessionKey: SESSION_A, text: "/compact" }]);
 });
 
 test("memory command cannot turn a Service proposal into unrelated Core edits or report an unverified apply", async t => {
@@ -6087,6 +6092,26 @@ test("chat request failures distinguish archived inspiration and missing login w
   }
 });
 
+test("a resend the Service confirmed it never admitted is shown as not accepted, not as an internal error", async () => {
+  const { mapChatServiceError } = require("../app/agent-service/chat-service-protocol");
+  const mapped = mapChatServiceError(Object.assign(new Error("原发送已确认未受理"), { code: "WORK_RUN_SEND_REJECTED" }));
+  assert.equal(mapped.code, "WORK_RUN_SEND_REJECTED");
+  const { backend } = await readyBackend(request => {
+    assert.equal(request.method, "chat.send");
+    throw Object.assign(new Error(mapped.message), { code: mapped.code, admissionAccepted: false });
+  });
+  const errors = [], statuses = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hello", "rejected-send", {
+    error: (message, meta) => errors.push({ message, ...meta }),
+    status: value => statuses.push(value.kind),
+  });
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "WORK_RUN_SEND_REJECTED");
+  assert.equal(errors[0].message, "这条消息没有被受理，请重新发送");
+  assert.equal(errors[0].admissionAccepted, false, "the composer can restore the message");
+  assert.equal(statuses.includes("needs_verification"), false);
+});
+
 test("a busy inspiration rejects the chat send as not admitted instead of an uncertain receipt", async () => {
   const { backend } = await readyBackend(request => {
     assert.equal(request.method, "chat.send");
@@ -6154,6 +6179,22 @@ test("real failure detail is identical in live errors, history and terminal snap
   assert.match(errors[0], /HTTP 400 · FAILED_PRECONDITION/u);
   assert.ok(!errors[0].includes("检查登录"));
   assert.equal(history.messages[0].content[0].text, `错误：${errors[0]}`);
+});
+
+test("a saved error without failure detail keeps its code in history for the error-area remedy", async () => {
+  const code = "CONTEXT_COMPACTION_REQUIRED";
+  const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+  const item = transcriptHistoryItem({ id: "terminal-error", runId: "run-1", kind: "error", occurredAt: 200, seq: 1, contextExcluded: false,
+    content: { transcriptType: "terminal", status: "failed", errorCode: code, resultSummary: null } });
+  assert.equal(item.payload.message.errorCode, code);
+  assert.equal(item.payload.message.failure, undefined);
+  const { backend } = await readyBackend(request => {
+    assert.equal(request.method, "chat.history");
+    return page("messages", [item]);
+  });
+  const [historical] = (await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`)).messages;
+  assert.equal(historical.errorCode, code, "the reloaded error still offers Compact context");
+  assert.match(historical.content[0].text, /^错误：对话上下文已满/u);
 });
 
 test("a saved Codex gateway outage is redacted and presented as a service failure", async () => {

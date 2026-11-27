@@ -31,6 +31,7 @@ const {
   questionSchema,
   usageFromResult,
 } = require("../app/agent-service/claude-code-runtime-host");
+const { validateRuntimeEvent } = require("../app/agent-service/runtime-handle-v1");
 const { validQuotaSnapshot } = require("../app/core/oauth-account-quota");
 const { normalizeInteractiveRequestV1, parseMcpToolPermission } = require("../app/core/shoggoth-interaction-contract");
 
@@ -257,12 +258,17 @@ class FakeSdk {
       });
     }
     if (text === "/compact") {
+      // Claude Code 2.1.329 order: compacting status, cleared status, a fresh
+      // init for the compacted session, the boundary, the summary and the
+      // command's stdout as user messages, then a zero-turn result.
+      query.push({ type: "system", subtype: "status", status: "compacting", session_id: sessionId });
+      query.push({ type: "system", subtype: "status", status: null, session_id: sessionId });
       query.push({
         type: "system",
-        subtype: "local_command_output",
-        content: "Conversation compacted",
-        uuid: crypto.randomUUID(),
+        subtype: "init",
         session_id: sessionId,
+        cwd: params.options.cwd,
+        model: params.options.model || "sonnet",
       });
       query.push({
         type: "system",
@@ -271,6 +277,10 @@ class FakeSdk {
         session_id: sessionId,
         compact_metadata: { trigger: "manual", pre_tokens: 1000 },
       });
+      query.push({ type: "user", session_id: sessionId, isSynthetic: true,
+        message: { role: "user", content: "This session is being continued from a previous conversation." } });
+      query.push({ type: "user", session_id: sessionId,
+        message: { role: "user", content: "<local-command-stdout>Compacted </local-command-stdout>" } });
       query.push({
         type: "result",
         subtype: "success",
@@ -768,11 +778,17 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
       sessionId: started.session.id,
       includeTurns: true,
     });
-    assert.equal(commandHistory.session.turns.at(-1).items.at(-1).text, "Conversation compacted");
+    const commandRecord = commandHistory.session.turns.at(-1);
+    assert.equal(commandRecord.id, commandTurn.turn.id);
+    assert.equal(commandRecord.status, "completed", "the compact command finishes with its zero-turn result");
     const compacted = events.find((event) => event.type === "context_compacted");
     assert.equal(compacted.turnId, commandTurn.turn.id);
     assert.equal(compacted.compactionId, "compact-boundary-one");
+    assert.deepEqual(compacted.compaction, { id: "compact-boundary-one", status: "completed" });
     assert.equal(compacted.contextUsage.runtimeSessionId, started.session.id);
+    // The Service wraps this Host in RuntimeHandleV1, which retires a Host whose
+    // event fails validation. The boundary must pass it unchanged.
+    assert.doesNotThrow(() => validateRuntimeEvent(compacted));
     assert.equal(ctx.sdk.turnQueries.length, 1, "both turns share the session's resident process");
     const resident = ctx.sdk.turnQueries[0].child;
     assert.equal(resident.killed, false, "a finished turn hands the process back instead of closing it");

@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.384",
+      "version": "0.8.387",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.384",
-      "purl": "pkg:generic/shoggoth@0.8.384",
+      "bom-ref": "pkg:generic/shoggoth@0.8.387",
+      "purl": "pkg:generic/shoggoth@0.8.387",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -15716,6 +15716,25 @@
     },
     {
       "type": "library",
+      "name": "Obsidian Skills connector icon",
+      "version": "9c9560a870fd490b0e1a847f2c8401a50e2d931d",
+      "bom-ref": "source:Obsidian Skills connector icon",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "app/manage-ui/src/assets/mcp-logos/obsidian.png"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "OpenAI Codex",
       "version": "0.170.0",
       "bom-ref": "source:OpenAI Codex",
@@ -15863,7 +15882,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.384",
+      "ref": "pkg:generic/shoggoth@0.8.387",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
@@ -16389,6 +16408,7 @@
         "source:Lucide / Feather icons",
         "source:Memory MIME detection and AI option dependencies",
         "source:Multilingual E5-small bundled embedding model",
+        "source:Obsidian Skills connector icon",
         "source:OpenAI Codex",
         "source:OpenClaw Control UI",
         "source:OpenClaw managed model projection patch",

@@ -5,11 +5,11 @@ const path = require("node:path");
 const { hasSecret, hotPriorityFlags, lexicalTerms } = require("./memory-engine");
 const { isGroupChatRun } = require("./group-chat-run");
 const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations");
-const { shoggothProductDeveloperInstructions } = require("./product-capability-manifest");
+const { shoggothProductDeveloperInstructions, backgroundTaskInstructions } = require("./product-capability-manifest");
 const { serviceError } = require("./security");
 const { estimateContextTokens, estimateCodePointTokens } = require("./conversation-context-budget");
 const { contextTransportLimits, requestBudget, assertContextTransport } = require("./context-request-budget");
-const { systemInstructions, historyInstructions, instructionDelivery, runIdInstruction } = require("./native-instruction-delivery");
+const { systemInstructions, historyInstructions, instructionDelivery, runIdInstruction, contextIndexFor } = require("./native-instruction-delivery");
 const productToolExposure = require("./product-tool-exposure");
 const { measureComposition } = require("./context-breakdown");
 const { selectFileMemory } = require("./context-memory-bootstrap");
@@ -452,6 +452,7 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
   const outcomes = new Map();
   let truncated = false;
   let transportLimited = false;
+  let oldestSeq = null, oversized = null;
   for (let index = dialogue.length - 1; index >= 0; index--) {
     const event = resolveEvent(dialogue[index]);
     const text = replay && ["tool_call", "tool_result"].includes(event.kind)
@@ -462,7 +463,7 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
     const bytes = Buffer.byteLength(line) + separator;
     const tokens = estimateContextTokens(line) + separator;
     if (bytes <= remaining && tokens <= remainingTokens && line.length + separator <= remainingCharacters) {
-      selected.unshift(line); remaining -= bytes;
+      selected.unshift(line); remaining -= bytes; oldestSeq = event.seq;
       remainingTokens -= tokens;
       remainingCharacters -= line.length + separator;
       continue;
@@ -486,11 +487,50 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
     }
     truncated = true;
     transportLimited = bytes > remaining || line.length + separator > remainingCharacters;
+    if (!selected.length) oversized = { id: event.id, kind: event.kind, seq: event.seq };
     break;
   }
   const content = selected.length ? untrusted("PRIOR TRANSCRIPT", heading + selected.join("\n")) : "";
   return { content: [content, recap].filter(Boolean).join("\n\n"), truncated, transportLimited,
-    ...(partial ? { included: selected.length > 0 } : {}) };
+    ...(partial ? { included: selected.length > 0, oldestSeq, oversized } : {}) };
+}
+
+// A renewed thread that keeps only the newest originals also lists how older
+// user messages began, so the model can look them up by event ID. It shares
+// the retained budget; selection runs newest first, display oldest first.
+const EARLIER_EXCERPT_TOKENS = 4000;
+const EARLIER_EXCERPT_CHARACTERS = 160;
+function earlierUserExcerpt(events, { beforeSeq, limits, resolveEvent, eventFilter, oversized }) {
+  const heading = "Opening lines of earlier user messages, oldest first. Use event IDs to look up original messages.";
+  let tokens = limits.tokens - estimateContextTokens(untrusted("EARLIER USER MESSAGES", heading));
+  let bytes = limits.bytes - Buffer.byteLength(untrusted("EARLIER USER MESSAGES", heading));
+  let characters = limits.characters - untrusted("EARLIER USER MESSAGES", heading).length;
+  const lines = [];
+  const take = line => {
+    const cost = estimateContextTokens(line) + 1, size = Buffer.byteLength(line) + 1;
+    if (cost > tokens || size > bytes || line.length + 1 > characters) return false;
+    tokens -= cost; bytes -= size; characters -= line.length + 1;
+    return true;
+  };
+  // The newest record did not fit at all: name it so it can be read on demand.
+  const tail = oversized ? `[eventId=${oversized.id}] ${oversized.kind.toUpperCase()}: [too long to include; look up the original]` : null;
+  if (tail && !take(tail)) return "";
+  for (let index = events.length - 1; index >= 0; index--) {
+    const raw = events[index];
+    if (raw.seq >= beforeSeq || raw.kind !== "user" || raw.contextExcluded || isPublishedNoticeEvent(raw) || !eventFilter(raw)) continue;
+    const event = resolveEvent(raw);
+    const content = event?.content || {};
+    const text = content.text;
+    if (typeof text !== "string" || !text.trim() || content.redacted || content.borrowedMemoryDerived
+      || content.inputOrigin === "system" || content.cronOutputVersion !== undefined
+      || require("./ui-input-provenance").isUiActionSubmission(event)
+      || hasSecret(text) || require("../core/chat-secret-contract").secretReferences(text).length) continue;
+    const line = `[eventId=${event.id}] USER: ${preview(text, EARLIER_EXCERPT_CHARACTERS)}`;
+    if (!take(line)) break;
+    lines.unshift(line);
+  }
+  if (tail) lines.push(tail);
+  return lines.length ? untrusted("EARLIER USER MESSAGES", [heading, ...lines].join("\n")) : "";
 }
 
 function partialContinuation(prompt, events, resolveEvent, historicalView, historicalSourceSeq, projectText, readCreatedGroupReceipt) {
@@ -963,6 +1003,11 @@ class ContextCompiler {
       const sessionEvents = readEvents(this.transcriptStore, input.profile.id, input.transcriptSessionId);
       const currentUser = currentConversationUserEvent(input, sessionEvents);
       if (allowRecentHistoryRestore || input.nativePartialHistory || continuation) currentUserSeq = currentUser?.seq ?? null;
+      // A proactive, board or Inspiration turn has no user record of its own;
+      // everything on disk is earlier history it may restore from.
+      if (allowRecentHistoryRestore && currentUserSeq === null && !["chat", "cron"].includes(input.run.source)) {
+        currentUserSeq = (sessionEvents.at(-1)?.seq ?? 0) + 1;
+      }
       // A checkpoint's coverage hash spans every record of its prefix, so after
       // a revocation it is checked against the unfiltered session.
       checkpointEvents = recall.hasRevocations ? sessionEvents : null;
@@ -1298,6 +1343,7 @@ class ContextCompiler {
       ] : []),
       `Trusted current work source: ${JSON.stringify({ currentWorkSource: input.run.source,
         currentWorkSourceId: input.run.sourceId })}`,
+      ...backgroundTaskInstructions({ source: input.run.source, runtime: input.profile.runtime || "codex" }),
       `Frozen permission context: ${JSON.stringify(frozenPermissionContext)}`,
       runIdInstruction(input.run.id),
       ...(input.workspaceInstructions ? [input.workspaceInstructions] : []),
@@ -1461,14 +1507,21 @@ class ContextCompiler {
           // the newest originals that fit the retained target and continues
           // as a normal turn. The seed receipt records that history as partial.
           if (resized.truncated && transcriptSourceIdentity !== null && allowRecentHistoryRestore) {
-            const recent = recentDialogue(transcriptEvents, {
-              ...historyOptions,
-              recentHistorySessionId: input.transcriptSessionId,
-              tokenBudget: Math.min(historyTokens, input.requestBudget.retainedTokens),
-              eventFilter: event => !historicalView.forEvent(event) && !historicalView.forAssistant(event, historicalSourceSeq),
-            });
-            if (recent.included) {
-              resized = { ...recent, truncated: true };
+            const eventFilter = event => !historicalView.forEvent(event) && !historicalView.forAssistant(event, historicalSourceSeq);
+            const retained = Math.min(historyTokens, input.requestBudget.retainedTokens);
+            const excerptTokens = Math.min(EARLIER_EXCERPT_TOKENS, Math.floor(retained / 4));
+            // Reserve the excerpt's share of every limit before the originals.
+            const limits = { tokens: excerptTokens, bytes: Math.min(excerptTokens * 4, Math.floor(historyOptions.budget / 4)),
+              characters: Math.min(excerptTokens * 4, Math.floor(historyOptions.characterBudget / 4)) };
+            const recentOptions = { ...historyOptions, recentHistorySessionId: input.transcriptSessionId, eventFilter };
+            let recent = recentDialogue(transcriptEvents, { ...recentOptions, tokenBudget: retained - limits.tokens,
+              budget: historyOptions.budget - limits.bytes, characterBudget: historyOptions.characterBudget - limits.characters });
+            const excerpt = earlierUserExcerpt(transcriptEvents, { limits, resolveEvent, eventFilter, oversized: recent.oversized,
+              beforeSeq: recent.oversized?.seq ?? recent.oldestSeq ?? Infinity });
+            // Nothing older to list: the originals take the whole share.
+            if (!excerpt && recent.included) recent = recentDialogue(transcriptEvents, { ...recentOptions, tokenBudget: retained });
+            if (recent.included || excerpt) {
+              resized = { ...recent, content: [excerpt, recent.content].filter(Boolean).join("\n\n"), truncated: true };
               recentHistoryOnly = true;
             }
           }
@@ -1494,9 +1547,10 @@ class ContextCompiler {
       const item = deduped[index], content = projectText(item.content);
       if (content !== item.content) deduped[index] = block({ ...item, content });
     }
-    const dynamicContext = deduped.filter((item) => (
+    const dynamicItems = deduped.filter((item) => (
       ["skill-catalog", "user", "user-profile", "memory", "proactive-history", "transcript", "handoff", "checkpoint", "hook-data", "notice"].includes(item.kind)
-    )).sort((a, b) => b.priority - a.priority).map((item) => item.content).join("\n\n");
+    )).sort((a, b) => b.priority - a.priority);
+    const dynamicContext = dynamicItems.map((item) => item.content).join("\n\n");
     // Count only durable IDs whose complete selected block actually survived
     // the final projection. The search denominator is measured before caps.
     const injectedMemoryItems = (id, selected) => deduped.some((item) => item.id === id
@@ -1510,9 +1564,10 @@ class ContextCompiler {
         priorityCoverage: report.priorityCandidates === null || report.priorityCandidates === 0 ? null
           : Number((prioritySelected / report.priorityCandidates).toFixed(4)) };
     };
-    const dynamicContextWithoutTranscript = deduped.filter((item) => (
+    const continuingItems = deduped.filter((item) => (
       ["skill-catalog", "user", "user-profile", "memory", "proactive-history", "hook-data", "notice"].includes(item.kind)
-    )).sort((a, b) => b.priority - a.priority).map((item) => item.content).join("\n\n");
+    )).sort((a, b) => b.priority - a.priority);
+    const dynamicContextWithoutTranscript = continuingItems.map((item) => item.content).join("\n\n");
     const totalBytes = Buffer.byteLength(deliveredDeveloperInstructions, "utf8")
       + Buffer.byteLength(dynamicContext, "utf8");
     if (totalBytes > totalContextBytes
@@ -1558,6 +1613,9 @@ class ContextCompiler {
       turnDeveloperInstructions,
       dynamicContext,
       ...(input.contextLifecycleV1 === true ? { dynamicContextWithoutTranscript } : {}),
+      // Lets a Runtime record each block of either projection separately.
+      contextIndex: { full: contextIndexFor(dynamicItems),
+        ...(input.contextLifecycleV1 === true ? { continuing: contextIndexFor(continuingItems) } : {}) },
       report: {
         ...(proactive ? { inputOrigin: "system",
           ...(proactiveConversationSource ? { proactiveConversation: proactiveConversationSource } : {}) } : {}),

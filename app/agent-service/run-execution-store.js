@@ -61,7 +61,7 @@ class RunExecutionStore {
       || run.source !== "cron" || c.runtime !== "antigravity" || c.contextFresh !== true
       || typeof c.transcriptSessionId !== "string" || !Number.isSafeInteger(c.contextRevisions?.transcript))) throw invalid();
     if (request?.recentHistoryOnly !== undefined && (request.recentHistoryOnly !== true || request.restorePolicy
-      || run.source !== "chat" || c.contextFresh !== true || request.historyTruncated !== true
+      || !["chat", "proactive", "cron", "kanban", "inspiration"].includes(run.source) || c.contextFresh !== true || request.historyTruncated !== true
       || request.completeness !== "partial" || request.exceedsBudget || request.transportExceeded
       || !/^[a-f0-9]{64}$/u.test(request.recentHistorySourceIdentity || "")
       || typeof c.transcriptSessionId !== "string" || !Number.isSafeInteger(c.contextRevisions?.transcript))) throw invalid();

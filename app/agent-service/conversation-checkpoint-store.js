@@ -190,19 +190,24 @@ class ConversationCheckpointStore {
       return decided.get(event.id);
     };
   }
-  hasHistoricalSource(profileId, events, { fromSeq = 0, throughSeq = Infinity } = {}) {
-    if (!this.historicalMemory) return false;
+  hasHistoricalSource(profileId, events, range = {}) {
+    return this.historicalSourceSeqs(profileId, events, range).size > 0;
+  }
+  // Originals of superseded or expired memory, and same-Run replies echoing
+  // them. A summary has no per-claim provenance, so these never enter one.
+  historicalSourceSeqs(profileId, events, { fromSeq = 0, throughSeq = Infinity } = {}) {
+    if (!this.historicalMemory) return new Set();
     const view = this.historicalMemory.view(profileId);
-    if (!view.hasHistorical) return false;
+    if (!view.hasHistorical) return new Set();
     const userSeqs = new Map(events.filter((event) => event.kind === "user")
       .map((event) => [event.id, { runId: event.runId, seq: event.seq }]));
     const sourceSeq = (eventId, runId) => {
       const source = userSeqs.get(eventId);
       return source?.runId === runId ? source.seq : null;
     };
-    return events.some((event) => event.seq > fromSeq && event.seq <= throughSeq
+    return new Set(events.filter((event) => event.seq > fromSeq && event.seq <= throughSeq
       && !event.contextExcluded && ["user", "assistant"].includes(event.kind)
-      && (view.forEvent(event) || view.forAssistant(event, sourceSeq)));
+      && (view.forEvent(event) || view.forAssistant(event, sourceSeq))).map(event => event.seq));
   }
   memoryState(profileId) {
     if (!this.memoryStore) return { revision: null, invalidationRevision: null, freshUntil: null };
@@ -231,7 +236,11 @@ class ConversationCheckpointStore {
     try { return this.borrowedMemoryDependenciesCurrent?.(profileId, sessionId, normalized) === true; }
     catch { return false; }
   }
-  projectCompactionEvent(profileId, sessionId, event) {
+  projectCompactionEvent(profileId, sessionId, event, historical = null) {
+    // The summary sees only that a historical source existed here, never its text.
+    if (historical?.has(event.seq)) {
+      return { seq: event.seq, kind: event.kind, content: { omitted: "historical_memory_source", id: event.id } };
+    }
     const refs = extractBorrowedMemoryRefs(event);
     if (refs.length && !this.borrowedDependenciesCurrent(profileId, sessionId, refs)) {
       return { seq: event.seq, kind: event.kind, content: {
@@ -244,9 +253,10 @@ class ConversationCheckpointStore {
   }
   #projectCompactionSource(profileId, sessionId, events, descriptor) {
     const allowed = this.compactionSourceFilter(profileId, sessionId);
+    const historical = this.historicalSourceSeqs(profileId, events);
     const projected = events.filter(event => event.seq > descriptor.fromSeq && event.seq <= descriptor.throughSeq
       && !event.contextExcluded && ["user", "assistant", "tool_call", "tool_result"].includes(event.kind) && allowed(event))
-      .map(event => this.projectCompactionEvent(profileId, sessionId, event));
+      .map(event => this.projectCompactionEvent(profileId, sessionId, event, historical));
     const refs = mergeBorrowedMemoryRefs(...projected.map(extractBorrowedMemoryRefs));
     if (!descriptor.fragment) return { source: projected, refs };
     const fragment = descriptor.fragment;
@@ -443,7 +453,8 @@ class ConversationCheckpointStore {
     const record = this.get(profileId, sessionId);
     if (!record || !this.#memoryCompatible(profileId, record)) return null;
     const throughSeq = record.partial?.seq ?? record.coveredThroughSeq;
-    if (this.hasHistoricalSource(profileId, events, { throughSeq })) return null;
+    // Historical sources were omitted when it was made. A source that became
+    // historical later changed the memory anchor, failing #memoryCompatible.
     try { return coveredTranscript(events, throughSeq).hash === record.coveredHash ? record : null; }
     catch { return null; }
   }
@@ -512,7 +523,9 @@ class ConversationCheckpointStore {
     if (this.memoryStore && (expectedMemoryRevision !== memory.revision
       || expectedMemoryFreshUntil !== memory.freshUntil)) fail("CHECKPOINT_STALE");
     const events = readEvents(this.transcriptStore, profileId, sessionId);
-    if (this.hasHistoricalSource(profileId, events,
+    // A projected source replaced historical originals with placeholders and is
+    // re-proved below. Older commands without one may have summarized them.
+    if (!sourceProjection && this.hasHistoricalSource(profileId, events,
       { throughSeq: partial?.seq ?? throughSeq })) fail("CHECKPOINT_STALE");
     const current = this.compatible(profileId, sessionId, events);
     if (current?.coveredThroughSeq === throughSeq && current.coveredHash === coveredHash

@@ -40,7 +40,7 @@ async function main() {
     await rest("status?path=outside", undefined, { expected: 400 });
     await assert.rejects(f.ipc("connector.official.install", { id: "weread", expectedRevision: 0, path: "/outside" }), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
     const installed = [];
-    const legacyIds = OFFICIAL_SKILL_IDS.filter(id => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(id));
+    const legacyIds = OFFICIAL_SKILL_IDS.filter(id => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail", "obsidian"].includes(id));
     for (const id of legacyIds) {
       const state = await rest("install", { id, expectedRevision: 0 });
       assert.equal(state.state, "installed"); assert.equal(state.skillCount, 1); installed.push(state);

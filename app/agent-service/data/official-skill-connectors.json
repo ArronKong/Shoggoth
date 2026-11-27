@@ -180,5 +180,20 @@
       "zh-CN": "Agent 邮箱与个人 QQ 邮箱分开。发信、回复、转发和移到已删除前需要确认。",
       "en": "The dedicated Agent mailbox is separate from your personal QQ Mail. Sending, replying, forwarding and moving mail to Trash require confirmation."
     }
+  },
+  {
+    "id": "obsidian",
+    "name": "Obsidian",
+    "description": {
+      "zh-CN": "通过本机 Obsidian CLI 与 7 个官方 Skills 读写笔记、Bases、Canvas、属性和任务。",
+      "en": "Work with local Obsidian vaults via the desktop Obsidian CLI and all 7 official Obsidian skills."
+    },
+    "docsUrl": "https://obsidian.md/help/connectors",
+    "version": "1.2.3",
+    "fields": [],
+    "note": {
+      "zh-CN": "包含官方 obsidian-skills 全部 7 个 Skills（Markdown、Bases、Canvas、CLI、Headless、Defuddle、Knap）与桌面端受管 CLI 桥接。需要本机打开 Obsidian 1.12.4+ 并在「设置 → 通用 → 命令行接口」开启 CLI。写操作需审批；不开放 eval、开发调试或永久删除。Headless / Defuddle / Knap 为可选外部 CLI，不会自动安装。",
+      "en": "Installs all 7 official obsidian-skills (Markdown, Bases, Canvas, CLI, Headless, Defuddle, Knap) plus a managed desktop CLI bridge. Requires Obsidian 1.12.4+ open on this Mac with Command line interface enabled in Settings → General. Writes require approval; eval, dev commands and permanent deletion are disabled. Headless, Defuddle and Knap remain optional external CLIs and are not auto-installed."
+    }
   }
 ]

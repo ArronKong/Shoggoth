@@ -874,10 +874,15 @@ export class BridgeRuntime {
     if (this.activeTurns.has(params.remoteSessionId)) {
       throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
+    // The host catalog and bridge can have different defaults. Use the limit
+    // only for the model configured on this native session.
+    const window = params.modelContext?.window;
+    const contextWindow = Number.isSafeInteger(window) && window > 0 && record.config?.selection
+      && params.modelContext.model === modelRef(record.config.selection) ? window : null;
     record.setTurnInstructions(params.turnDeveloperInstructions || "");
     record.setTurnReasoningEffort?.(params.reasoningEffort);
     if (params.prompt.trimStart().startsWith("/")) {
-      return this.commandTurnStart(record, params);
+      return this.commandTurnStart(record, params, contextWindow);
     }
     await this.ctx.sessions.flush(record.agent.session);
     let replay = null;
@@ -893,6 +898,7 @@ export class BridgeRuntime {
       turnId: params.turnId,
       operationId: params.operationId,
       agent: record.agent,
+      contextWindow,
       toolCalls: new Map(),
       accepting: true,
       buffered: [],
@@ -935,7 +941,7 @@ export class BridgeRuntime {
     return { turnId: params.turnId, replayed: false };
   }
 
-  commandTurnStart(record, params) {
+  commandTurnStart(record, params, contextWindow) {
     const name = /^\/([a-z0-9][a-z0-9._:-]*)(?:\s|$)/u.exec(params.prompt.trim())?.[1];
     if (!name || !this.ctx.commands.find(record.agent, name)) {
       throw bridgeError("RUNTIME_COMMAND_NOT_FOUND", "DeepSeek command is not available");
@@ -943,7 +949,7 @@ export class BridgeRuntime {
     const active = {
       remoteSessionId: params.remoteSessionId, sessionId: params.sessionId,
       turnId: params.turnId, operationId: params.operationId,
-      agent: record.agent, toolCalls: new Map(), accepting: true, buffered: [],
+      agent: record.agent, contextWindow, toolCalls: new Map(), accepting: true, buffered: [],
       settled: false, commandTurn: true, commandName: name, abortController: new AbortController(),
     };
     this.activeTurns.set(params.remoteSessionId, active);
@@ -1053,7 +1059,7 @@ export class BridgeRuntime {
           known: true, type: "context_usage", method: "deepseek-harness/context_usage",
           sessionId: active.sessionId, turnId: active.turnId, contextUsage: {
             runtimeSessionId: active.sessionId, usedTokens: measure.totalTokens,
-            contextWindow: null, quality: "estimated", source: "session_stats", observedAt: Date.now(),
+            contextWindow: active.contextWindow ?? null, quality: "estimated", source: "session_stats", observedAt: Date.now(),
           },
         });
       } catch { /* Optional meter failures cannot affect the completed turn. */ }
@@ -1117,7 +1123,7 @@ export class BridgeRuntime {
         if (Number.isSafeInteger(measure?.totalTokens) && measure.totalTokens >= 0) usedTokens = measure.totalTokens;
       } catch { /* Metering is optional; the transaction remains authoritative. */ }
       return [{ ...base, method: "deepseek-harness/compaction_end", type: "context_compacted", contextUsage: {
-        runtimeSessionId: active.sessionId, usedTokens, contextWindow: null,
+        runtimeSessionId: active.sessionId, usedTokens, contextWindow: active.contextWindow ?? null,
         quality: usedTokens === null ? "unknown" : "estimated", source: "session_stats", observedAt: Date.now(),
       } }];
     }

@@ -147,13 +147,16 @@ function decodeDeniedRow(row, sessionId) {
   const input = JSON.parse(text(field(call, 3)));
   const identity = nativeToolCall({ id: text(field(call, 1)), name: text(field(call, 2)), input });
   if (!identity || (field(call, 9) !== undefined && text(field(call, 9)) !== identity.name)) return null;
-  const body = field(row.step_payload, 24), error = field(row.step_payload, 31);
-  if (!body || !error || !Buffer.from(field(body, 3) || []).equals(Buffer.from(error))) return null;
-  if (row.error_details?.length && !Buffer.from(row.error_details).equals(Buffer.from(error))) return null;
-  const output = text(field(error, 1) ?? field(error, 2));
-  if (!output || Buffer.byteLength(output) > MAX_INPUT_BYTES) return null;
-  return { ...identity, input, unannouncedFailure: true,
-    result: { status: "failed", output, timing: nativeTiming(row.step_payload) } };
+  const unresolved = { ...identity, result: null };
+  try {
+    const body = field(row.step_payload, 24), error = field(row.step_payload, 31);
+    if (!body || !error || !Buffer.from(field(body, 3) || []).equals(Buffer.from(error))) return unresolved;
+    if (row.error_details?.length && !Buffer.from(row.error_details).equals(Buffer.from(error))) return unresolved;
+    const output = text(field(error, 1) ?? field(error, 2));
+    if (!output || Buffer.byteLength(output) > MAX_INPUT_BYTES) return unresolved;
+    return { ...identity, input, unannouncedFailure: true,
+      result: { status: "failed", output, timing: nativeTiming(row.step_payload) } };
+  } catch { return unresolved; }
 }
 
 function decodeRow(row, sessionId) {
@@ -168,9 +171,10 @@ function decodeRow(row, sessionId) {
   const identity = nativeToolCall({ id: text(field(call, 1)), name: text(field(call, 2)),
     server: external ? null : text(field(body, 1)), input: JSON.parse(text(field(call, 3))) });
   if (!identity || (external && text(field(body, 2)) !== identity.name)) throw new Error("Invalid native identity");
-  let result = null;
-  if ([3, 7].includes(row.status)) {
-    if (row.status === 3 && row.error_details?.length) throw new Error("Native success contains an error");
+  // Incomplete responses still count toward identity uniqueness.
+  const unresolved = { ...identity, result: null };
+  if (![3, 7].includes(row.status) || (row.status === 3 && row.error_details?.length)) return unresolved;
+  try {
     let output;
     if (external) {
       const wrappedResponse = field(body, 4);
@@ -186,9 +190,9 @@ function decodeRow(row, sessionId) {
       const raw = text(field(body, 3));
       try { output = JSON.parse(raw); } catch { output = raw; }
     }
-    result = { status: row.status === 3 && output?.isError !== true ? "completed" : "failed", output, timing: nativeTiming(payload) };
-  }
-  return { ...identity, result };
+    const result = { status: row.status === 3 && output?.isError !== true ? "completed" : "failed", output, timing: nativeTiming(payload) };
+    return { ...identity, result };
+  } catch { return unresolved; }
 }
 
 function validateNativeStat(stat, directory) {

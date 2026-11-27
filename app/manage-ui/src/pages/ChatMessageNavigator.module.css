@@ -8,6 +8,9 @@
   pointer-events: none;
 }
 
+/* The portal shares the region's stacking context, so raise the region above the chat docks while open. */
+.region:has(.positioner[data-open]) { z-index: 6; }
+
 .trigger {
   inline-size: max(0px, calc(var(--page-inset-right) - var(--ui-scrollbar-track-size, 12px)));
   margin-inline-end: var(--ui-scrollbar-track-size, 12px);

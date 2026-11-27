@@ -782,6 +782,19 @@
       "sha256": "2e4581ffecbdf1acfa8be7e4d7e493d5d1ced27a4de249eae26d5cec97bed6fa"
     },
     {
+      "id": "obsidian",
+      "page": "https://obsidian.md/help/connectors",
+      "asset": "obsidian.png",
+      "assetUrl": "https://raw.githubusercontent.com/obsidianmd/obsidian-skills/9c9560a870fd490b0e1a847f2c8401a50e2d931d/plugins/obsidian/assets/icon.png",
+      "originalType": "image/png",
+      "originalWidth": 1024,
+      "originalHeight": 1024,
+      "bytes": 10092,
+      "sha256": "1a3bfbbbcebeca1372030cb1accd2c2e3c8bca82d5bf9b53a8743c2870a595a4",
+      "retrievedAt": "2026-11-27",
+      "normalization": "Official 1024 × 1024 icon from obsidianmd/obsidian-skills downsampled to 128 × 128."
+    },
+    {
       "id": "outlook-calendar",
       "page": "https://outlook.live.com/mail/",
       "asset": "outlook-calendar.png",

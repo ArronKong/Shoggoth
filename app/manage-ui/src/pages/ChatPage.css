@@ -935,31 +935,6 @@
   to { opacity: 1; transform: translate(-50%, -50%); }
 }
 
-/* context-usage capsule, floating just above the composer */
-.chat-ctx {
-  /* In normal flow, centered directly above the composer. The adjacency rule
-     below zeroes the composer's top margin so the gap is exactly 20px. */
-  align-self: center;
-  margin: 0 0 20px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: min(440px, calc(100% - 32px));
-  padding: 5px 14px;
-  border-radius: 999px;
-  background: var(--skin-glass-pill);
-  -webkit-backdrop-filter: blur(30px) saturate(170%);
-  backdrop-filter: blur(30px) saturate(170%);
-  box-shadow: 0 10px 28px -14px var(--skin-shadow-soft);
-  color: var(--muted-fg);
-  font-size: 12px;
-  font-weight: 400;
-}
-/* When the meter is present, it owns the 20px gap above the composer. */
-.chat-ctx + .chat-composer { margin-top: 0; }
-.chat-ctx__meter { width: 54px; height: 6px; border-radius: 999px; background: var(--bg-muted); overflow: hidden; }
-.chat-ctx__fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
-
 /* thread — full-height base layer; the floating header/composer docks overlay it,
    so messages scroll continuously under the glass bars (top ↔ bottom). */
 .chat-thread,
@@ -1313,6 +1288,8 @@
   display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; max-width: 100%;
 }
 .chat-composer__model-controls > span { display: inline-flex; min-width: 72px; }
+.chat-composer__permissions { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+.chat-composer__permissions:empty { display: none; }
 .chat-composer__right { margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
 /* composer toolbar controls — flat 32px pills per Figma (no raised bg/shadow) */
 .chat-composer__bar .chat-pill {
@@ -2166,6 +2143,21 @@
 
 /* per-message retry (failed turns) — slight accent so it reads as the fix-it */
 .chat-retrybtn { color: var(--accent-hover); }
+/* 报错区的「压缩上下文」是报错文案点名的补救操作，常显、带文字 */
+.chat-compactbtn {
+  height: 22px;
+  padding: 0 8px;
+  margin-left: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-hover);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-compactbtn:hover:not(:disabled) { background: var(--bg-hover); }
+.chat-compactbtn:disabled { opacity: 0.5; cursor: default; }
 
 /* expanded injected row keeps its pill visually "pressed" */
 .chat-sysline.is-open {

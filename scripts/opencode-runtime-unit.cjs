@@ -186,7 +186,8 @@ test("OpenCode chat advertises the exact model's variants and sends the selected
     custom_think: { modelParams: { thinkingConfig: { thinkingBudget: 2048 } } } };
   const host = f.host(ledger, async (method, route, body) => {
     if (route === "/provider") return { data: { connected: ["fixture"], all: [{ id: "fixture",
-      models: { "nested/model": { name: "Fixture", variants }, fixed: { name: "Fixed", capabilities: { reasoning: true } } } }] } };
+      models: { "nested/model": { name: "Fixture", variants, limit: { context: 100_000 } },
+        fixed: { name: "Fixed", capabilities: { reasoning: true } } } }] } };
     if (route === "/config") return { data: { model } };
     if (route.endsWith("/prompt_async")) { payloads.push(body); return { status: 204 }; }
     if (route.startsWith(`/session/${sessionId}/message?`)) {
@@ -194,7 +195,8 @@ test("OpenCode chat advertises the exact model's variants and sends the selected
       return { data: [
         { info: { id: message.messageID, sessionID: sessionId, role: "user" }, parts: [] },
         { info: { id: "msg_fixture12345", sessionID: sessionId, role: "assistant", parentID: message.messageID,
-          time: { completed: Date.now() }, finish: "stop" }, parts: [] },
+          time: { completed: Date.now() }, finish: "stop", providerID: "fixture", modelID: "nested/model",
+          tokens: { input: 20_000, output: 1_000, reasoning: 1_000, cache: { read: 62_000, write: 1_000 } } }, parts: [] },
       ] };
     }
     if (route === "/session/status") return { data: {} };
@@ -213,15 +215,20 @@ test("OpenCode chat advertises the exact model's variants and sends the selected
     const selected = { ...input, thinkingLevel: "max" };
     await host.turnStart(selected);
     assert.equal((await applied.settled).status, "completed");
+    const observed = applied.events.find(event => event.type === "context_usage")?.contextUsage;
+    assert.equal(observed?.usedTokens, 85_000);
+    assert.equal(observed?.contextWindow, 100_000);
+    assert.equal(observed?.quality, "estimated");
     assert.equal(payloads[0].variant, "max");
     assert.deepEqual(payloads[0].model, { providerID: "fixture", modelID: "nested/model" });
     await host.turnStart(selected);
     await assert.rejects(host.turnStart({ ...selected, thinkingLevel: "none" }), { code: "RUNTIME_OPERATION_CONFLICT" });
     assert.equal(payloads.length, 1, "a completed operation cannot replay at another effort");
     const inherited = completion(host);
-    await host.turnStart({ ...input, model, operationId: "inherit-variant", thinkingLevel: null });
+    await host.turnStart({ ...input, operationId: "inherit-variant", thinkingLevel: null });
     assert.equal((await inherited.settled).status, "completed");
     assert.equal(Object.hasOwn(payloads[1], "variant"), false);
+    assert.equal(inherited.events.find(event => event.type === "context_usage")?.contextUsage.contextWindow, 100_000);
   } finally { host.state = "stopped"; f.cleanup(); }
 });
 

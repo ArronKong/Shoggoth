@@ -30,6 +30,7 @@ const GROK_BUILD_CAPABILITIES = runtimeCapabilities({
   events: true,
   serverRequests: true,
   "context.usage.exact": true,
+  "context.usage.estimated": true,
   "context.compact.native": true,
   "context.compact.auto": true,
 });

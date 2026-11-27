@@ -120,7 +120,7 @@ function promptRegistry() {
   };
 }
 
-function fixture() {
+function fixture({ usedTokens } = {}) {
   const records = new Map(), frames = [], prompts = [];
   let nextBehavior = "complete", dispatches = 0;
   const create = async options => {
@@ -180,7 +180,7 @@ function fixture() {
       if (!record) throw new Error(`session "${id}" not found`);
       return { meta: record.session.header, events: record.events };
     } },
-    get: () => undefined,
+    get: name => name === "tokenMeter" && usedTokens != null ? { measure: () => ({ totalTokens: usedTokens }) } : undefined,
   });
   bridge.write = async frame => { frames.push(frame); };
   let requestId = 0;
@@ -224,6 +224,23 @@ test("continuous turns keep one complete prompt and replace only current instruc
   assert.equal(f.records.get("native-session").registry.sections.get("native:core").text, "NATIVE_CORE");
   assert.equal([...f.records.get("native-session").registry.sections.values()].filter(section => section.complete).length, 1);
   assert.equal(f.dispatches, 3);
+});
+
+test("context usage gets a window only from the matching session model", async () => {
+  const f = fixture({ usedTokens: 85_000 });
+  await f.start();
+  for (const [model, expected] of [["fixture/model", 100_000], ["fixture/other-model", null]]) {
+    await f.request("turn/start", {
+      remoteSessionId: "native-session", sessionId: "public-native-session", turnId: model,
+      operationId: model, prompt: "test " + model, modelContext: { model, window: 100_000 },
+    });
+    const events = f.frames.filter(frame => frame.event?.turnId === model).map(frame => frame.event);
+    const observation = events.find(event => event.type === "context_usage");
+    assert.equal(observation.contextUsage.usedTokens, 85_000);
+    assert.equal(observation.contextUsage.contextWindow, expected);
+    assert.equal(observation.contextUsage.quality, "estimated");
+    assert(events.indexOf(observation) < events.findIndex(event => event.type === "complete"));
+  }
 });
 
 test("host and current Run text preserve credential references and native-looking variables literally", async () => {

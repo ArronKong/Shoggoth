@@ -329,7 +329,8 @@ class RecallPolicyStore {
   _state(profileId, records) {
     const state = { profileId, records, byOperation: new Map(), byMemory: new Map(), suppressedRefs: new Set(),
       expiryCommits: new Map(),
-      suppressionSources: [], normalizedContents: new Map(), sourceTextCutoffs: new Map(),
+      suppressionSources: [], sourceRefTimes: new Map(), incompleteThreshold: null, incompleteItemTimes: null,
+      normalizedContents: new Map(), sourceTextCutoffs: new Map(),
       sourceLiteralCutoffs: new Map(), forgottenContents: new Set(),
       contentCutoffs: new Map(),
       derivedRuns: new Set(), derivedRevision: 0, derivedSourceRevision: null,
@@ -382,14 +383,15 @@ class RecallPolicyStore {
         { memoryRevision: record.memoryRevision, createdAt: record.createdAt });
       for (const ref of record.sourceRefs) state.suppressedRefs.add(ref);
       state.suppressionSources.push({ refs: record.sourceRefs, content: record.normalizedContent,
-        createdAt: record.createdAt });
+        createdAt: record.createdAt, memoryId: record.memoryId, contentHash: record.contentHash });
       for (const related of record.related) {
         state.forgottenContents.add(related.normalizedContent);
         state.contentCutoffs.set(related.normalizedContent,
           { memoryRevision: record.memoryRevision, createdAt: record.createdAt });
         for (const ref of related.sourceRefs) state.suppressedRefs.add(ref);
         state.suppressionSources.push({ refs: related.sourceRefs,
-          content: related.normalizedContent, createdAt: record.createdAt });
+          content: related.normalizedContent, createdAt: record.createdAt,
+          memoryId: related.memoryId, contentHash: related.contentHash });
       }
     }
     state.derivedRevision = 0;
@@ -427,6 +429,7 @@ class RecallPolicyStore {
       state.normalizedContents = unresolved;
       state.sourceTextCutoffs = new Map();
       state.sourceLiteralCutoffs = new Map();
+      state.sourceRefTimes = new Map();
       state.derivedRevision = state.revision;
       state.derivedSourceRevision = sourceRevision;
       return;
@@ -438,11 +441,13 @@ class RecallPolicyStore {
       state.normalizedContents = unresolved;
       state.sourceTextCutoffs = new Map();
       state.sourceLiteralCutoffs = new Map();
+      state.sourceRefTimes = new Map();
       state.derivedRevision = state.revision;
       state.derivedSourceRevision = sourceRevision;
       return;
     }
     const runs = new Set();
+    const sourceRefTimes = new Map();
     const resolvedRefs = new Set();
     const resolvedTextRefs = new Set();
     const indexed = typeof this.transcriptStore.matchRecallSourceRefs === "function";
@@ -467,6 +472,9 @@ class RecallPolicyStore {
           if (state.suppressedRefs.has(event.id)) {
             resolvedRefs.add(event.id);
             if (event.runId) runs.add(event.runId);
+            if (Number.isSafeInteger(event.occurredAt) && event.occurredAt >= 0) {
+              sourceRefTimes.set(event.id, Math.min(sourceRefTimes.get(event.id) ?? Infinity, event.occurredAt));
+            }
             // The claim may paraphrase its user message. Resolve its verified
             // body so a verbatim copy in another Run, including an assistant
             // quote with a prefix/suffix, cannot bypass the revoked source.
@@ -514,6 +522,7 @@ class RecallPolicyStore {
     state.normalizedContents = unresolved;
     state.sourceTextCutoffs = sourceTextCutoffs;
     state.sourceLiteralCutoffs = sourceLiteralCutoffs;
+    state.sourceRefTimes = sourceRefTimes;
     if (!indexed) {
       state.freshUserEvents = freshUserEvents;
       state.freshUserSourceRevision = sourceRevision;
@@ -633,12 +642,20 @@ class RecallPolicyStore {
     if (!state.hasSuppressions) return state.revision;
     this._deriveRuns(state);
     const authorized = this._reauthorizedContents(state);
+    // Incomplete-provenance history becomes visible when the earliest revoked
+    // fact's verified time changes. Both projections bind that time.
+    const thresholds = this.requireOwnMemoryProvenance
+      ? [state, this._conversationState(state)].map((view) => {
+        const threshold = this._suppressionThreshold(view);
+        return Number.isFinite(threshold) ? threshold : String(threshold);
+      }) : null;
     const cached = state.historicalVisibilityCache;
     if (cached?.revision === state.revision && cached.runs === state.derivedRuns
       && cached.normalized === state.normalizedContents
       && cached.sourceText === state.sourceTextCutoffs
       && cached.sourceLiterals === state.sourceLiteralCutoffs
-      && cached.authorized === authorized) return cached.digest;
+      && cached.authorized === authorized
+      && stableJson(cached.thresholds) === stableJson(thresholds)) return cached.digest;
     const ordered = (entries) => [...entries].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
     const visibility = [
       [...state.derivedRuns].sort(),
@@ -646,12 +663,13 @@ class RecallPolicyStore {
       ordered(state.sourceTextCutoffs).map(([hash, cutoffs]) => [hash, ordered(cutoffs)]),
       ordered(state.sourceLiteralCutoffs).map(([literal, cutoffs]) => [hashContent(literal), ordered(cutoffs)]),
       ordered(authorized).map(([event, contents]) => [event, ordered(contents)]),
+      ...(thresholds ? [["incomplete-provenance-before", thresholds]] : []),
     ];
     const digest = `${state.revision}:${crypto.createHash("sha256").update(stableJson(visibility)).digest("hex")}`;
     state.historicalVisibilityCache = { revision: state.revision, runs: state.derivedRuns,
       normalized: state.normalizedContents, sourceText: state.sourceTextCutoffs,
       sourceLiterals: state.sourceLiteralCutoffs,
-      authorized, digest };
+      authorized, thresholds, digest };
     return digest;
   }
   getStatus(profileId) {
@@ -798,18 +816,58 @@ class RecallPolicyStore {
     state.reauthorizedNextChange = nextChange;
     return byEvent;
   }
+  // Earliest time any suppressed fact in this view existed: its hash-verified
+  // memory item's creation, or an earlier resolved source event. The ledger's
+  // own createdAt is the withdrawal time and cannot bound this. A source
+  // without its verified item has no trustworthy time and closes the view.
+  _suppressionThreshold(state) {
+    this._deriveRuns(state);
+    const memoryRevision = this.memoryStore.getRevision(state.profileId);
+    const key = state.derivedSourceRevision === null ? null
+      : `${state.revision}:${state.derivedSourceRevision}:${memoryRevision}`;
+    if (key !== null && state.incompleteThreshold?.key === key) return state.incompleteThreshold.value;
+    // Item times change only with the ledger or the memory store, not with
+    // each transcript append.
+    const itemsKey = `${state.revision}:${memoryRevision}`;
+    if (state.incompleteItemTimes?.key !== itemsKey) {
+      let times = [];
+      try {
+        for (const source of state.suppressionSources) {
+          const item = this.memoryStore.get(state.profileId, source.memoryId);
+          if (!item || item.profileId !== state.profileId || hashContent(item.content) !== source.contentHash
+            || !Number.isSafeInteger(item.createdAt) || item.createdAt < 0) { times = null; break; }
+          times.push(item.createdAt);
+        }
+      } catch (cause) { throw this._unavailable(cause); }
+      state.incompleteItemTimes = { key: itemsKey, times };
+    }
+    const { times } = state.incompleteItemTimes;
+    let threshold = times === null ? -Infinity : Infinity;
+    if (times !== null) state.suppressionSources.forEach((source, index) => {
+      threshold = Math.min(threshold, times[index]);
+      for (const ref of source.refs) threshold = Math.min(threshold, state.sourceRefTimes.get(ref) ?? Infinity);
+    });
+    if (key !== null) state.incompleteThreshold = { key, value: threshold };
+    return threshold;
+  }
   _isEventVisible(state, event) {
     if (!event || typeof event !== "object") return false;
     this._deriveRuns(state);
     if (state.suppressedRefs.has(event.id)
       || (event.runId && (state.suppressedRefs.has(event.runId) || state.derivedRuns.has(event.runId)))) return false;
     if (this.requireOwnMemoryProvenance && ["assistant", "tool_call", "tool_result", "artifact"].includes(event.kind)) {
-      const proof = require("./shoggoth-memory/own-memory-provenance.cjs").ownMemoryProof(event, state.profileId);
+      const provenance = require("./shoggoth-memory/own-memory-provenance.cjs");
+      const proof = provenance.ownMemoryProof(event, state.profileId);
       // Old or incomplete history cannot prove that a reformulated answer is
-      // independent of a forgotten fact. Keep the original chat, omit it from
-      // memory/context projection after revocation. Explicit user text keeps
-      // its existing independent-source and reauthorization rules.
-      if ((!proof || !proof.complete) && state.hasSuppressions) return false;
+      // independent of a forgotten fact that already existed. Keep the
+      // original chat, omit it from memory/context projection after
+      // revocation unless its unattributed inputs all predate every revoked
+      // fact. Explicit user text keeps its existing independent-source and
+      // reauthorization rules.
+      if ((!proof || !proof.complete) && state.hasSuppressions) {
+        const horizon = provenance.unattributedHorizon(event, proof);
+        if (horizon === null || horizon >= this._suppressionThreshold(state)) return false;
+      }
       const dependencyRevision = JSON.stringify([this.memoryStore.getRevision(state.profileId), state.revision, state.derivedSourceRevision]);
       if (state.ownDependencyRevision !== dependencyRevision) {
         state.ownDependencyRevision = dependencyRevision; state.ownDependencyVisibility = new Map();

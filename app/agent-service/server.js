@@ -1025,10 +1025,14 @@ function createAgentService(options) {
     now: options.now,
   });
   const groupRuntimeMcpFactory = input => runtimeMcpGateIssuer.createMcpServer(input);
+  // What each native session already holds, shared by per-Run Hosts (see
+  // PromptBlockLedger). Hashes only; losing it only resends unchanged blocks.
+  const promptLedgerStore = new (require("./native-prompt-ledger-store").NativePromptLedgerStore)({ paths });
   const codexRuntimeAdapter = options.codexRuntimeAdapter
-    || new CodexRuntimeAdapter({ runtimePool, secretGateway: modelSecretGateway });
+    || new CodexRuntimeAdapter({ runtimePool, secretGateway: modelSecretGateway, promptLedgerStore });
   const grokBuildRuntimePool = options.grokBuildRuntimePool || new GrokBuildRuntimePool({
       ...poolCapacityOptions,
+    hostOptions: { promptLedgerStore },
     secretGateway: modelSecretGateway,
     paths,
     runtimeAccountLookup,
@@ -1045,6 +1049,7 @@ function createAgentService(options) {
     || new GrokBuildRuntimeAdapter({ runtimePool: grokBuildRuntimePool });
   const antigravityRuntimePool = options.antigravityRuntimePool || new AntigravityRuntimePool({
       ...poolCapacityOptions,
+    hostOptions: { promptLedgerStore },
     paths,
     runtimeAccountLookup,
     binaryPath: options.antigravityBinaryPath,
@@ -1062,6 +1067,7 @@ function createAgentService(options) {
     : path.join(repoRoot, "resources", "pi", "shoggoth-pi-extension.mjs"));
   const piRuntimePool = options.piRuntimePool || new PiRuntimePool({
       ...poolCapacityOptions,
+    hostOptions: { promptLedgerStore },
     paths,
     runtimeAccountLookup,
     binaryPath: options.piBinaryPath,
@@ -1076,6 +1082,7 @@ function createAgentService(options) {
     || new PiRuntimeAdapter({ runtimePool: piRuntimePool, secretGateway: modelSecretGateway });
   const claudeCodeRuntimePool = options.claudeCodeRuntimePool || new ClaudeCodeRuntimePool({
       ...poolCapacityOptions,
+    hostOptions: { promptLedgerStore },
     paths,
     runtimeAccountLookup,
     binaryPath: options.claudeCodeBinaryPath,
@@ -1113,6 +1120,7 @@ function createAgentService(options) {
   const deepSeekHarnessRuntimePool = options.deepSeekHarnessRuntimePool
     || new DeepSeekHarnessRuntimePool({
       ...poolCapacityOptions,
+      hostOptions: { promptLedgerStore },
       paths,
       runtimeAccountLookup,
       binaryPath: options.deepSeekHarnessBinaryPath,
@@ -2575,6 +2583,7 @@ function createAgentService(options) {
     queueClock: new (require("./runtime-telemetry").RuntimeQueueClock)({ paths, now: options.now }),
     telemetry: runtimeTelemetry,
     runtimeContextCache: new (require("./runtime-context-cache").RuntimeContextCache)({ paths, now: options.now }),
+    readStoredGrokContext: grokBuildRuntimePool.readStoredContext?.bind(grokBuildRuntimePool),
     getRuntimeModelContextWindow: (session, profile) => session.runtimeBindingId ? runtimeSupportFacts.contextWindow(
       productStore.getAgentRuntimeBinding(session.profileId, session.runtimeBindingId), profile,
       session.modelOverride ?? profile.defaultModel) : null,
@@ -4938,7 +4947,8 @@ function createAgentService(options) {
           policyStore: runtimeSelectionPolicyStore,
           selectAgentDefaultModel: profileServiceController.selectAgentDefaultModel,
           readAccountAdmission: accountId => runtimeAccountAdmission.read(accountId),
-          canGenerateCheckpoint: runtime => runtimeManager.canGenerateModelOnly?.(runtime) === true,
+          canGenerateCheckpoint: runtime => runtimeManager.canGenerateModelOnly?.(runtime,
+            { purpose: "conversation_compaction" }) === true,
           onChanged: payload => eventBuffer.append("agent.profile.changed", payload),
         }).handle(request.method, request.params);
       } catch (error) {

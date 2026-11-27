@@ -36,7 +36,16 @@ test("Pi uses current estimates and model catalog window; legacy billing totals 
   assert.equal(estimated.usedTokens, 60_000);
   assert.equal(estimated.contextWindow, 128_000);
   assert.equal(estimated.quality, "estimated");
-  assert.equal(piRuntimeContextUsage("session-1", { contextUsage: { tokens: null } }, 128_000, 2).quality, "unknown");
+  const inherited = piRuntimeContextUsage("session-1", {
+    tokens: { total: 900_000 }, contextUsage: { tokens: 110_000, contextWindow: 128_000 },
+  }, null, 1);
+  assert.equal(inherited.contextWindow, 128_000);
+  assert.equal(inherited.usedTokens, 110_000);
+  const compacted = piRuntimeContextUsage("session-1", { contextUsage: { tokens: null, contextWindow: 128_000 } },
+    null, 2, [{ role: "assistant", content: "old transcript" }]);
+  assert.equal(compacted.quality, "unknown");
+  assert.equal(compacted.usedTokens, null);
+  assert.equal(compacted.contextWindow, 128_000);
 });
 
 test("Codex normalizer and adapter preserve last-window usage independently of billed totals", async () => {

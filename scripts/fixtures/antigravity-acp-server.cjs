@@ -180,6 +180,11 @@ async function prompt(message) {
   }
   update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
   update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `ANSWER(${images} images)` } });
+  if (directive === "CONTEXT_USAGE") {
+    update(sessionId, { sessionUpdate: "usage_update", used: 85_000, size: 100_000 });
+    update("another-session", { sessionUpdate: "usage_update", used: 99_000, size: 100_000 });
+    update(sessionId, { sessionUpdate: "usage_update", used: -1, size: 100_000 });
+  }
   send({ id: message.id, result: { stopReason: "end_turn",
     ...(process.env.FAKE_ACP_TURN_USAGE ? { usage: JSON.parse(process.env.FAKE_ACP_TURN_USAGE) } : {}) } });
 }

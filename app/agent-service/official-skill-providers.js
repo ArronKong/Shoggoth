@@ -1,10 +1,11 @@
 "use strict";
 
 const CATALOG = require("./data/official-skill-connectors.json");
-const AUTHENTICATION = { doordash: "interactive", shop: "interactive", "quark-drive": "interactive", "rollinggo-hotel": "interactive", fliggy: "optional-api-key", weread: "api-key", "meituan-paotui": "interactive", alipay: "interactive", "baidu-maps": "api-key", "agently-mail": "interactive" };
+const AUTHENTICATION = { doordash: "interactive", shop: "interactive", "quark-drive": "interactive", "rollinggo-hotel": "interactive", fliggy: "optional-api-key", weread: "api-key", "meituan-paotui": "interactive", alipay: "interactive", "baidu-maps": "api-key", "agently-mail": "interactive", obsidian: "local-app" };
 const VERIFICATION_HOSTS = {
   "agently-mail": ["agent.qq.com"],
   "baidu-maps": [],
+  obsidian: [],
   doordash: ["identity.doordash.com"],
   shop: ["accounts.shop.app", "shop.com"],
   "quark-drive": ["pan.quark.cn"],

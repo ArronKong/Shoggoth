@@ -82,5 +82,17 @@ function workingRestorePolicy(store, session, profile) {
     && item.snapshotId === transfer?.snapshotId && item.sourceSessionRevision === transfer?.sourceSessionRevision);
   return record?.restorePolicy ?? null;
 }
+// First transcript seq a native thread may hold verbatim, for deciding whether
+// it holds superseded or expired memory sources. Only a recent-originals seed
+// leaves them out, and that thread then holds the events after its baseline
+// (the seed record lands after the first user message, so not its own seq).
+// Any other thread may hold the whole session.
+function historicalScopeStart(events, scope) {
+  const seeded = events.findLast(event => event.contextExcluded && event.kind === "status"
+    && event.content?.transcriptType === "context.native.seeded" && sameMaintenanceScope(event.content.scope, scope));
+  return seeded?.content.partial === true && Number.isSafeInteger(seeded.content.baseline?.throughSeq)
+    ? seeded.content.baseline.throughSeq : 0;
+}
+
 module.exports = { readContextTransfer, recordContextTransfer, maintenanceScope, sameMaintenanceScope,
-  validRestorePolicy, maintenanceRecords, recordMaintenance, workingRestorePolicy };
+  validRestorePolicy, maintenanceRecords, recordMaintenance, workingRestorePolicy, historicalScopeStart };

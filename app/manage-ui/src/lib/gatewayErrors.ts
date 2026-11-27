@@ -2,9 +2,9 @@ import publicErrors from "../../../agent-service/chat-error-messages.json";
 
 // 已知网关/模型错误串 → i18n key 的显示层翻译。
 // 收录原则：只翻【全串语义都被译文覆盖】的固定文案（gateway 自有兜底/汇总文案，
-// 或 "401 Invalid API Key" 这类本身就是全部信息的短句）。provider 透传的具体错误
-// （配额/账单/带 request id 的限流详情等）**不硬翻**——细节和链接比统一中文更有用，
-// 原样显示。因此模式必须足够特异，宽泛词（\b429\b、rate limit、Failed to authenticate
+// 或 "401 Invalid API Key" 这类固定短句）。固定的上游原因可单独翻译，保留 request ID
+// 和 HTTP 状态等诊断信息。provider 透传的具体文案和链接原样显示。
+// 因此模式必须足够特异，宽泛词（\b429\b、rate limit、Failed to authenticate
 // 前缀）一律不收，避免把信息量更大的具体文案压扁。
 // 匹配不中原样返回，对任意非错误文本调用无害。顺序：具体在前。
 // 调用方在【渲染时】翻译（不落地进 state），语言切换即时全量生效；
@@ -33,7 +33,8 @@ function productErrorMessage(raw: string, t: TFn): string | null {
   if (!fallback) return null;
   // Older live events and cached errors carried only this fallback envelope.
   // Present the recovery action without rewriting the saved transcript.
-  if (fallback[2].startsWith("RUNTIME_COMPACTION_") && Object.hasOwn(publicErrors.runtime, fallback[2])) {
+  if ((fallback[2].startsWith("RUNTIME_COMPACTION_") || ["CONTEXT_COMPACTION_REQUIRED", "CONTEXT_INPUT_TOO_LARGE"].includes(fallback[2]))
+    && Object.hasOwn(publicErrors.runtime, fallback[2])) {
     return t(`chatErrors:runtime.${fallback[2]}`);
   }
   if (fallback[2] === "EXECUTION_CONTRACT_STALE") return t("chat.gwErrors.runtimeSettingsChanged");
@@ -48,7 +49,7 @@ export function translateProductError(raw: string, t: TFn): string {
 }
 
 // Error-code presentation data, shared by all Chat surfaces and runtimes.
-// Provider text and codes retain their original language; only App copy changes.
+// Provider codes retain their original spelling.
 const FAILURE_SUMMARIES: Record<string, string> = {
   ANTIGRAVITY_REGION_UNSUPPORTED: "regionUnsupported",
   ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED: "checkpointFailed",
@@ -75,8 +76,11 @@ function detailedFailure(raw: string, t: TFn): string | null {
   const match = /^(错误：)?([^\n]+)\n(上游原因|启动详情)：([\s\S]+)\n错误码：([A-Z][A-Z0-9_]{0,127})$/u.exec(raw);
   if (!match) return null;
   const [, prefix, summary, detailLabel, originalDetail, code] = match;
-  const detail = originalDetail.replace(/\[(已隐藏|地址已隐藏|邮箱已隐藏|路径已隐藏)\]/gu, (_match, label: string) =>
-    t(`chat.gwErrors.${({ 已隐藏: "redacted", 地址已隐藏: "redactedUrl", 邮箱已隐藏: "redactedEmail", 路径已隐藏: "redactedPath" } as Record<string, string>)[label]}`));
+  const detail = originalDetail
+    .replace(/^Insufficient Balance(?=(?: \(request_id: [^()\r\n]+\))?(?:\r?\n|$))/u,
+      () => t("chat.gwErrors.insufficientBalance"))
+    .replace(/\[(已隐藏|地址已隐藏|邮箱已隐藏|路径已隐藏)\]/gu, (_match, label: string) =>
+      t(`chat.gwErrors.${({ 已隐藏: "redacted", 地址已隐藏: "redactedUrl", 邮箱已隐藏: "redactedEmail", 路径已隐藏: "redactedPath" } as Record<string, string>)[label]}`));
   const freeUsageLimit = code === "RUNTIME_QUOTA_EXHAUSTED" && /^Free usage limit reached\b/iu.test(originalDetail);
   const summaryKey = freeUsageLimit ? "runtimeFreeUsageLimit" : FAILURE_SUMMARIES[code];
   const title = summaryKey ? t(`chat.gwErrors.${summaryKey}`)
@@ -115,6 +119,7 @@ const PATTERNS: Array<[RegExp, string]> = [
   [/^assistant turn failed before producing content[.!]?$/i, "runFailedNoReply"],
   // gateway 固定的链路/瞬态文案
   [/^All models are temporarily rate-limited[.!]?$/i, "allModelsRateLimited"],
+  [/^(?:错误：)?Insufficient Balance$/u, "insufficientBalance"],
   [/^(?:You )?exceeded your current quota[.!]?$/i, "quotaExceeded"],
   [/^LLM idle timeout[.!]?$/i, "idleTimeout"],
   [/^initialization conflicted[.!]?$/i, "initConflicted"],

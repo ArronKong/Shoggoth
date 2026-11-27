@@ -14,6 +14,8 @@ const { MemoryStore } = require("../app/agent-service/memory-store");
 const { MemoryEngine } = require("../app/agent-service/memory-engine");
 const { TranscriptStore } = require("../app/agent-service/transcript-store");
 const { ConversationRecallService } = require("../app/agent-service/conversation-recall-service");
+const { hashContent } = require("../app/agent-service/recall-policy-store");
+const { OwnMemoryProvenance, ownMemoryProof, unattributedHorizon } = require("../app/agent-service/shoggoth-memory/own-memory-provenance.cjs");
 
 const profileId = "profile-1";
 function note(value, sourceRefs = ["event-fact", "run-fact"], validUntil = null) {
@@ -1224,4 +1226,184 @@ test("memory tools admit only chat-origin Inspiration, never growth or card runs
         (error) => error.code === "MCP_TOOL_FORBIDDEN");
     }
   } finally { value.cleanup(); }
+});
+
+// The native Service configuration: transcript-backed sources and own-memory
+// provenance, on a clock the test controls.
+function provenanceScenario() {
+  let now = 1000;
+  const value = contextFixture({ now: () => now });
+  const session = { id: value.transcriptSessionId, sessionKey: value.run.sourceId, profileId,
+    workspace: value.run.workspace, status: "ready" };
+  const policy = value.memoryEngine.recallPolicy;
+  policy.transcriptStore = value.transcripts;
+  policy.chatSessionStore = { listSessions: () => [session],
+    getSession: (key) => key === session.sessionKey ? session : null, getRevision: () => 1 };
+  policy.requireOwnMemoryProvenance = true;
+  const set = (time) => { now = time; };
+  // proof undefined: legacy output written before provenance existed.
+  const output = (id, time, proof) => {
+    set(time);
+    const runId = `${id}-run`;
+    return value.append({ id, runId, kind: "assistant", occurredAt: time, content: { text: `关于 ${id} 的回答`,
+      ...(proof ? { ownMemoryProvenance: { version: 1, profileId, runId, refs: [], ...proof } } : {}) } });
+  };
+  const fact = (time, sourceRefs) => {
+    set(time);
+    return value.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "紫铜灯塔的口令是 LIGHT4821", sourceRefs, classification: "explicit" });
+  };
+  return Object.assign(value, { policy, set, output, fact });
+}
+
+test("incomplete-provenance history older than every revoked fact stays in projection; later history stays out", () => {
+  const value = provenanceScenario();
+  try {
+    const { policy } = value;
+    const older = value.output("older", 1100, { complete: false });
+    const legacy = value.output("legacy", 1150);
+    value.set(1200);
+    const source = value.append({ id: "fact-source", runId: "fact-run", kind: "user", occurredAt: 1200,
+      content: { text: "请记住紫铜灯塔的口令是 LIGHT4821" } });
+    const between = value.output("between", 1300, { complete: false });
+    const item = value.fact(1400, [source.id, "fact-run"]);
+    assert.equal(item.createdAt, 1400);
+    const later = value.output("later", 1500, { complete: false });
+    const proven = value.output("proven", 1500, { complete: true });
+    const dependent = value.output("dependent", 1500, { complete: true,
+      refs: [{ id: item.id, hash: hashContent(item.content) }] });
+    for (const event of [older, legacy, between, later, proven, dependent]) {
+      assert.equal(policy.isEventVisible(profileId, event), true, `${event.id} before any revocation`);
+    }
+    value.set(1600);
+    value.memoryEngine.delete({ profileId, id: item.id, reason: "forgotten", operationId: "forget-lighthouse" });
+    const check = () => {
+      assert.equal(policy.isEventVisible(profileId, older), true, "older than the source and the memory");
+      assert.equal(policy.isEventVisible(profileId, legacy), true, "legacy output without a proof is bounded by its own time");
+      assert.equal(policy.isMemorySourceEventVisible(profileId, older), true);
+      assert.equal(policy.isEventVisible(profileId, between), false, "the source message already existed");
+      assert.equal(policy.isEventVisible(profileId, later), false);
+      assert.equal(policy.isEventVisible(profileId, { ...older, occurredAt: undefined }), false,
+        "an output without a time has no bound");
+      assert.equal(policy.isEventVisible(profileId, proven), true, "complete provenance is unchanged");
+      assert.equal(policy.isEventVisible(profileId, dependent), false, "complete provenance is unchanged");
+    };
+    check();
+    policy.close(); policy.open([profileId]);
+    check();
+  } finally { value.cleanup(); }
+});
+
+test("a reconciled legacy deletion bounds incomplete history by its verified item and inherited horizons", () => {
+  const value = provenanceScenario();
+  try {
+    const { policy } = value;
+    const old = value.output("old", 1100, { complete: false });
+    // Its sources no longer resolve; the verified item time still bounds it.
+    const item = value.fact(1200, ["deleted-session-event", "deleted-session-run"]);
+    const inheritsOld = value.output("inherits-old", 1300, { complete: false, unattributedThrough: old.occurredAt });
+    const inheritsLater = value.output("inherits-later", 1400, { complete: false, unattributedThrough: 1250 });
+    const forged = value.output("forged", 1500, { complete: true, unattributedThrough: 1100 });
+    // A primary-store deletion without a recorded reason: a data migration or
+    // an older App. Loading the ledger records it as legacy_unknown.
+    value.memoryStore.upsert({ ...value.memoryStore.get(profileId, item.id), status: "deleted", updatedAt: 1500 });
+    policy.close(); policy.open([profileId]);
+    assert.equal(policy.getMemoryReason(profileId, value.memoryStore.get(profileId, item.id)), "legacy_unknown");
+    assert.equal(policy.isEventVisible(profileId, old), true);
+    assert.equal(policy.isEventVisible(profileId, inheritsOld), true, "it inherited only history older than the fact");
+    assert.equal(policy.isEventVisible(profileId, inheritsLater), false);
+    assert.equal(policy.isEventVisible(profileId, forged), false, "a bound on a complete proof is not a proof");
+  } finally { value.cleanup(); }
+});
+
+test("a revoked fact without its verified item time keeps all incomplete history out", () => {
+  const value = provenanceScenario();
+  try {
+    const { policy } = value;
+    const old = value.output("old", 1100, { complete: false });
+    const proven = value.output("proven", 1100, { complete: true });
+    const item = value.fact(1200, ["fact-event", "fact-run"]);
+    value.memoryEngine.delete({ profileId, id: item.id, reason: "forgotten", operationId: "forget-unverified" });
+    assert.equal(policy.isEventVisible(profileId, old), true);
+    const digest = policy.getHistoricalVisibilityRevision(profileId);
+    const store = policy.memoryStore;
+    try {
+      for (const replace of [() => null, (found) => ({ ...found, content: `${found.content}（已改）` }),
+        (found) => ({ ...found, createdAt: undefined }), (found) => ({ ...found, profileId: "profile-2" })]) {
+        policy.memoryStore = new Proxy(store, { get(target, key) {
+          if (key === "get") {
+            return (owner, id) => { const found = target.get(owner, id); return found && id === item.id ? replace(found) : found; };
+          }
+          const member = target[key];
+          return typeof member === "function" ? member.bind(target) : member;
+        } });
+        policy.close(); policy.open([profileId]);
+        assert.equal(policy.isEventVisible(profileId, old), false);
+        assert.equal(policy.isEventVisible(profileId, proven), true);
+        assert.equal(policy.getRevision(profileId), Number(digest.split(":")[0]));
+        assert.notEqual(policy.getHistoricalVisibilityRevision(profileId), digest,
+          "checkpoints bound to the earlier visibility are rebuilt");
+      }
+    } finally { policy.memoryStore = store; }
+    policy.close(); policy.open([profileId]);
+    assert.equal(policy.getHistoricalVisibilityRevision(profileId), digest);
+  } finally { value.cleanup(); }
+});
+
+test("stored-memory removal bounds only the memory-source view of incomplete history", () => {
+  const value = provenanceScenario();
+  try {
+    const { policy } = value;
+    const old = value.output("old", 1100, { complete: false });
+    const item = value.fact(1200, ["fact-event", "fact-run"]);
+    const later = value.output("later", 1300, { complete: false });
+    value.memoryEngine.delete({ profileId, id: item.id, reason: "memory_removed", operationId: "remove-lighthouse" });
+    assert.equal(policy.isEventVisible(profileId, old), true);
+    assert.equal(policy.isEventVisible(profileId, later), true, "the conversation keeps its dialogue");
+    assert.equal(policy.isMemorySourceEventVisible(profileId, old), true);
+    assert.equal(policy.isMemorySourceEventVisible(profileId, later), false);
+    value.memoryEngine.delete({ profileId, id: item.id, reason: "forgotten", operationId: "forget-lighthouse" });
+    assert.equal(policy.isEventVisible(profileId, later), false, "a later full forget still wins");
+    assert.equal(policy.isEventVisible(profileId, old), true);
+  } finally { value.cleanup(); }
+});
+
+test("own-memory provenance records how late its inherited unattributed inputs can be", () => {
+  const tracker = new OwnMemoryProvenance(null);
+  const input = (id) => ({ profileId, run: { id, profileId } });
+  const output = (runId, occurredAt, proof) => ({ id: `${runId}-out`, runId, kind: "assistant", occurredAt,
+    content: { text: "回答", ...(proof ? { ownMemoryProvenance: { version: 1, profileId, runId, refs: [], ...proof } } : {}) } });
+  const project = (id, items, events, unattributed) => {
+    tracker.begin(input(id), items, events, unattributed);
+    return tracker.projection({ id, profileId });
+  };
+  const legacy = output("legacy", 100), bounded = output("bounded", 300, { complete: false, unattributedThrough: 150 });
+  const proven = output("proven", 400, { complete: true });
+  const inherited = project("inherits", [], [legacy, bounded, proven]);
+  assert.equal(inherited.complete, false);
+  assert.equal(inherited.unattributedThrough, 150);
+  assert.equal(ownMemoryProof({ runId: "inherits", content: { ownMemoryProvenance: inherited } }, profileId), inherited);
+  const clean = project("clean", [], [proven]);
+  assert.equal(clean.complete, true);
+  assert.equal(Object.hasOwn(clean, "unattributedThrough"), false);
+  // Checkpoints, truncated memory, untimed history and dropped refs may carry
+  // any fact that exists now: incomplete without a bound.
+  const many = Array.from({ length: 129 }, (_, index) => ({ id: `memory-${index}`, content: `条目 ${index}` }));
+  for (const unbounded of [project("checkpoint", [], [legacy], true),
+    project("untimed", [], [{ ...legacy, occurredAt: undefined }]), project("overflow", many, [legacy])]) {
+    assert.equal(unbounded.complete, false);
+    assert.equal(Object.hasOwn(unbounded, "unattributedThrough"), false);
+  }
+  assert.equal(tracker.projection({ id: "never-began", profileId }), null);
+  tracker.read(input("read-only"), { items: [] });
+  assert.equal(Object.hasOwn(tracker.projection({ id: "read-only", profileId }), "unattributedThrough"), false,
+    "a Run whose context was never compiled has no bound");
+  for (const bad of [{ complete: true, unattributedThrough: 1 }, { complete: false, unattributedThrough: -1 },
+    { complete: false, unattributedThrough: 1.5 }, { complete: false, unattributedThrough: "1" }]) {
+    assert.equal(ownMemoryProof(output("bad", 10, bad), profileId), null, JSON.stringify(bad));
+  }
+  const late = output("late", 200, { complete: false, unattributedThrough: 900 });
+  assert.equal(unattributedHorizon(late, ownMemoryProof(late, profileId)), 200, "an output cannot depend on later facts");
+  assert.equal(unattributedHorizon({ ...bounded, occurredAt: undefined }, ownMemoryProof(bounded, profileId)), 150);
+  assert.equal(unattributedHorizon({ ...legacy, occurredAt: undefined }, null), null);
 });

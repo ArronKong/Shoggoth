@@ -3,21 +3,22 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
+import { sessionContextMeter } from "../app/manage-ui/src/lib/chatContextMeter.ts";
 
 const source = readFileSync(new URL("../app/manage-ui/src/pages/ChatPage.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("ChatPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const declarations = new Map();
 function visit(node) {
-  if (ts.isVariableDeclaration(node) && ["dispatchSlash", "ctxLimit", "ctxPct"].includes(node.name.getText(ast))) {
+  if (ts.isVariableDeclaration(node) && ["dispatchSlash", "contextMeter"].includes(node.name.getText(ast))) {
     declarations.set(node.name.getText(ast), node.initializer.getText(ast));
   }
   ts.forEachChild(node, visit);
 }
 visit(ast);
-assert.equal(declarations.size, 3, "exercise the production dispatcher and meter");
+assert.equal(declarations.size, 2, "exercise the production dispatcher and meter");
 const compile = code => ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const dispatcher = compile(`globalThis.dispatch = ${declarations.get("dispatchSlash")};`);
-const meter = compile(`const ctxLimit = ${declarations.get("ctxLimit")}; globalThis.pct = ${declarations.get("ctxPct")};`);
+const meter = compile(`globalThis.pct = ${declarations.get("contextMeter")}?.percent ?? null;`);
 const key = "agent:main:dashboard:reset-regression";
 function fixture({ deny = false, switchDuringRequest = false, native = false, hermes = false } = {}) {
   const calls = [], toasts = [], archive = { key, msgs: ["old archive"] };
@@ -25,6 +26,8 @@ function fixture({ deny = false, switchDuringRequest = false, native = false, he
     activeKeyRef: { current: key },
     localSlashHistoryRef: { current: { forget: k => calls.push(["forget-slash", k]) } },
     optimisticHistoryRef: { current: { forget: k => calls.push(["forget-optimistic", k]) } },
+    openclawPreamblesRef: { current: { forget: k => calls.push(["forget-preambles", k]) } },
+    interactiveRunsRef: { current: new Set([key]) },
     runStatusBySessionRef: { current: new Map() },
     chatBackendDescriptors: new Map([["fixture", { surfaces: { agentHarness: native } }]]),
     backendOfSession: () => "fixture",
@@ -103,9 +106,9 @@ for (const [active, expected] of [
   [{ totalTokens: 293851, contextTokens: 200000 }, 100],
   [{ totalTokens: 293851, contextTokens: 500000, totalTokensFresh: false }, null],
 ]) {
-  const context = { active, defaultCtxTokens: 200000 };
+  const context = { active, nativeMeter: false, defaultCtxTokens: 200000, sessionContextMeter };
   vm.runInNewContext(meter, context);
-  assert.equal(context.pct, expected, "only the selected session can establish its window");
+  assert.equal(context.pct === null ? null : Math.round(context.pct), expected, "only the selected session can establish its window");
 }
 assert.doesNotMatch(source, /defaultCtxTokens|defaultContextTokens/, "usage, status and immersive views must not reintroduce a generic window");
 console.log("chat reset/context regression: PASS (reset, rejection, session switch, runtime args, backend isolation, unknown and known windows)");

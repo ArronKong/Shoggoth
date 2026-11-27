@@ -130,6 +130,9 @@ class PiRpcProcess {
       if (message.success) pending.resolve(message.data);
       else pending.reject(processError(
         message.error === `Unknown command: ${pending.type}` ? "PI_RPC_COMMAND_UNSUPPORTED"
+          // Pi 1.5.0: "Nothing to compact (session too small)".
+          : pending.type === "compact" && /^Nothing to compact\b/u.test(String(message.error || ""))
+            ? "PI_COMPACT_NOTHING_TO_COMPACT"
           : /auth|credential|api key|login|unauthorized/iu.test(String(message.error || ""))
           ? "AUTH_REQUIRED" : "PI_RPC_REQUEST_FAILED",
         `Pi RPC ${pending.type} failed`,

@@ -1188,7 +1188,8 @@ class OpenCodeRuntimeHost {
         createdAt: now, updatedAt: now }); current.updatedAt = Math.max(current.updatedAt, now); });
     const active = { sessionId: session.id, turnId: id, messageId, accepted: false,
       done: false, idle: false, cursor: 0, pending: new Set(), responded: new Set(), usage: null,
-      model: selectedModel, abort: new AbortController() };
+      model: selectedModel, contextWindow: nativeModel?.limit?.context ?? defaultRow?.contextWindow,
+      abort: new AbortController() };
     this.activeTurns.set(session.id, active);
     this.#markLive(id);
     try {
@@ -1460,6 +1461,28 @@ class OpenCodeRuntimeHost {
     throw error("OPENCODE_MESSAGE_HISTORY_LIMIT", "OpenCode turn history exceeds reconciliation limit");
   }
 
+  async #messageContextUsage(active, info) {
+    if (info.summary || !safe(info.providerID, 128) || !safe(info.modelID, 384)) return null;
+    const { tokens } = info;
+    const counts = [tokens?.input, tokens?.output, tokens?.reasoning, tokens?.cache?.read, tokens?.cache?.write];
+    if (tokens?.output <= 0 || !counts.every(count => Number.isSafeInteger(count) && count >= 0)) return null;
+    // Match OpenCode's context meter: one assistant request, including its
+    // cached input and reasoning. The accumulated turn usage is a separate fact.
+    const usedTokens = counts.reduce((sum, count) => sum + count, 0);
+    if (!Number.isSafeInteger(usedTokens)) return null;
+    let window = active.model === `${info.providerID}/${info.modelID}` ? active.contextWindow : null;
+    if (!Number.isSafeInteger(window) || window <= 0) {
+      try {
+        const catalog = await this.readConfiguredProviderCatalog(AbortSignal.timeout(1000));
+        const models = catalog.all?.find(provider => provider.id === info.providerID)?.models;
+        window = models && Object.hasOwn(models, info.modelID) ? models[info.modelID]?.limit?.context : null;
+      } catch { /* An unavailable catalog cannot change the completed turn. */ }
+    }
+    return { runtimeSessionId: active.sessionId, usedTokens,
+      contextWindow: Number.isSafeInteger(window) && window > 0 ? window : null,
+      quality: "estimated", source: "session_stats", observedAt: this.now() };
+  }
+
   async #finishFromMessages(active, messages) {
     const userIndex = messages.findIndex(message => message.info.id === active.messageId
       && message.info.role === "user");
@@ -1480,6 +1503,9 @@ class OpenCodeRuntimeHost {
       ? active.retryFailure?.code ?? "OPENCODE_TURN_FAILED" : openCodeFailureCode(last.info.error);
     const failure = missingResult ? active.retryFailure?.detail ?? runtimeFailureDetail("OpenCode did not return a reply.")
       : openCodeFailureDetail(last.info.error, this.registeredSecrets);
+    const beforeObservation = active.done;
+    const contextUsage = status === "completed" ? await this.#messageContextUsage(active, last.info) : null;
+    if (active.done !== beforeObservation || this.activeTurns.get(active.sessionId) !== active) return;
     const timestamp = this.now();
     this.ledger.update(data => { const session = sessionById(data, active.sessionId);
       const turn = turnById(session, active.turnId);
@@ -1500,6 +1526,8 @@ class OpenCodeRuntimeHost {
       sessionId: active.sessionId, turnId: active.turnId,
       responseId: last.info.id, provider: last.info.providerID, model: last.info.modelID,
       usage, ...(typeof last.info.cost === "number" ? { costUsd: last.info.cost } : {}) });
+    if (contextUsage) this.#publish({ known: true, method: "opencode/session.message", type: "context_usage",
+      sessionId: active.sessionId, turnId: active.turnId, contextUsage });
     this.#publish({ known: true, method: "opencode/session.message", type: "complete",
       sessionId: active.sessionId, turnId: active.turnId, status,
       ...(errorCode ? { errorCode, failure } : {}) });

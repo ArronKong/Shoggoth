@@ -3738,6 +3738,7 @@ const en: Dict & {
     compactFailed: "Compaction failed: {{msg}}",
     compactingCtx: "Compacting context…",
     compactedCtx: "Context compacted",
+    renewedCtx: "Continued in a new thread with recent messages",
     recallingMemory: "Recalling memory…",
     recalledMemory: "Memory recalled",
     promptApproval: "Command approval",
@@ -3903,13 +3904,14 @@ const en: Dict & {
     commandNoReply: "(Command sent, but this backend returned no text reply)",
     sendFailed: "Send failed: {{msg}}",
     // Display-layer rewrites of known gateway/model error strings (lib/gatewayErrors.ts;
-    // fixed full-string messages only — provider-specific errors pass through, URLs preserved)
+    // fixed messages and reasons, with provider diagnostic details preserved)
     gwErrors: {
       regionUnsupported: "Google's model API does not support the region of this request. The task did not complete; check the service's supported regions and your current network egress.",
       checkpointFailed: "Context checkpoint failed.",
       runtimeFailureNoDetails: "Antigravity failed to complete this task. The provider did not supply displayable error details. The task was not replayed automatically; check the native session before deciding whether to retry.",
       runtimeFailureSummary: "The task failed and was not replayed automatically. See the provider details below.",
       providerReason: "Provider error: {{detail}}",
+      insufficientBalance: "Insufficient Balance",
       startupDetail: "Startup details: {{detail}}",
       taskFailedCode: "The Shoggoth task did not finish ({{code}}).",
       requestFailedCode: "The Shoggoth request failed ({{code}}).",
@@ -4139,6 +4141,7 @@ const en: Dict & {
     hiddenN: "Hidden {{count}} message(s)",
     undo: "Undo",
     retry: "Retry this turn (resend the previous message)",
+    compactContext: "Compact context",
     retryNoSource: "No previous message found to retry",
     toolErrorNamed: "{{tool}} · failed",
     toolError: "Tool failed",
@@ -4907,11 +4910,6 @@ const en: Dict & {
     oauthQuotaNotIntegrated: "Account quota is not available through this runtime.",
     oauthQuotaUnsupported: "This sign-in method does not provide readable account quota.",
     oauthQuotaUnavailable: "Account quota is temporarily unavailable. Hover again to retry.",
-    oauthQuotaAntigravityCliSource: "From the account signed in to Antigravity CLI",
-    oauthQuotaAntigravityCliMissing: "Install the Antigravity CLI (agy) to read its account quota.",
-    oauthQuotaAntigravityCliUpdateRequired: "Update the Antigravity CLI (agy) to read its account quota.",
-    oauthQuotaAntigravityCliSignInRequired: "Sign in to the Antigravity CLI (agy) to read its account quota.",
-    oauthQuotaAntigravityCliPermissionDenied: "Antigravity denied the quota request for the CLI account.",
     oauthQuotaLoading: "Reading account quota…",
     oauthQuotaWindow: "Quota window",
     oauthQuotaRemaining: "{{percent}} left",

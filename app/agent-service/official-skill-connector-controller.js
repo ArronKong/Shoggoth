@@ -76,16 +76,18 @@ class OfficialSkillConnectorController {
       if (recoverInterruptedPrivateFile(this.recordPath, { trustedRoot: this.paths.trustedRoot }) === "uncertain") throw new Error();
       if (lstatIfExists(this.recordPath)) {
         const stored = JSON.parse(readPrivateFile(this.recordPath, { maxBytes: 2 * 1024 * 1024 }));
-        const previousIds = STORED_SKILL_IDS.filter(id => !["rollinggo-hotel", "baidu-maps", "agently-mail"].includes(id));
+        const previousIds = STORED_SKILL_IDS.filter(id => !["rollinggo-hotel", "baidu-maps", "agently-mail", "obsidian"].includes(id));
         const baseIds = previousIds.filter(id => !["shop", "doordash"].includes(id));
         // Quark was added after Shop and DoorDash. Preserve the accepted catalogs
         // and also recognize each release's complete pre-Quark ownership record.
         const acceptedCatalogs = [baseIds, [...baseIds, "shop"], previousIds]
           .flatMap(ids => [ids, ids.filter(id => id !== "quark-drive")]);
         acceptedCatalogs.push(
-          STORED_SKILL_IDS.filter(id => !["baidu-maps", "agently-mail"].includes(id)),
-          STORED_SKILL_IDS.filter(id => id !== "agently-mail"),
-          OFFICIAL_SKILL_IDS.filter(id => id !== "agently-mail"),
+          STORED_SKILL_IDS.filter(id => !["baidu-maps", "agently-mail", "obsidian"].includes(id)),
+          STORED_SKILL_IDS.filter(id => !["agently-mail", "obsidian"].includes(id)),
+          OFFICIAL_SKILL_IDS.filter(id => !["agently-mail", "obsidian"].includes(id)),
+          STORED_SKILL_IDS.filter(id => id !== "obsidian"),
+          OFFICIAL_SKILL_IDS.filter(id => id !== "obsidian"),
           STORED_SKILL_IDS, OFFICIAL_SKILL_IDS,
         );
         if (stored?.schemaVersion !== 1 || !Array.isArray(stored.items)

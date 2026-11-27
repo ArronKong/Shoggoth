@@ -303,5 +303,14 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 - Full text: [undici.txt](licenses/source/openclaw-memory/undici.txt), [undici-fetch.txt](licenses/source/openclaw-memory/undici-fetch.txt), [undici-milo.txt](licenses/source/openclaw-memory/undici-milo.txt).
 - Changes / provenance: Same-major security refresh of the independently vendored HTTP client. The upstream package files and MIT notice are preserved. The separate Fetch MIT notice and the bundled Milo parser ISC notice are retained as well.
 
+### Obsidian Skills connector icon
+
+- License: MIT.
+- Source: https://github.com/obsidianmd/obsidian-skills/blob/9c9560a870fd490b0e1a847f2c8401a50e2d931d/plugins/obsidian/assets/icon.png
+- Revision / evidence: 9c9560a870fd490b0e1a847f2c8401a50e2d931d.
+- Local files: `app/manage-ui/src/assets/mcp-logos/obsidian.png`.
+- Full text: [OBSIDIAN-SKILLS.txt](licenses/source/OBSIDIAN-SKILLS.txt).
+- Changes / provenance: Resized from the upstream icon. At connector installation, Shoggoth fetches the official skills at the pinned revision.
+
 See [runtime source locations](RUNTIME-LICENSE-SOURCES.md) for MPL corresponding source.
 Brand names and logos identify compatible services; their trademarks remain with their owners.

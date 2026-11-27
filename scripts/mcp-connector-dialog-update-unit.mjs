@@ -478,7 +478,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const rootRequire=createRequire(new URL('../package.json',import.meta.url));
  const {parseRegistryEntry}=rootRequire('./app/agent-service/mcp-registry-client');
  const featured=rootRequire('./app/agent-service/data/mcp-featured-servers.json');
- const hiddenIds=new Set(['google-workspace','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
+ const hiddenIds=new Set(['zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
  const chinesePresets=new Set(['amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
  const chineseOfficial=new Set(['agently-mail','alipay','baidu-maps','fliggy','meituan-paotui','quark-drive','rollinggo-hotel','weread']);
  const officialCatalog=rootRequire('./app/agent-service/data/official-skill-connectors.json');
@@ -698,10 +698,11 @@ console.log('PASS installed dialog identities: registry, eight official componen
   installedServers=[{...installed,id:'saved-google-workspace',name:'Google Workspace',recommendationId:googleWorkspace.id,auth:{kind:'none'},transport:{kind:'stdio-command',command:'/Users/fixture/bin/gwscli'}}];
   await mount();
   assert.equal(section('installed').findByType('strong').children.join(''),'Google Workspace');
+  assert.equal(cardIds().includes(googleWorkspace.id),false,'installed Google Workspace is omitted from recommendations');
   await Renderer.act(async()=>section('installed').findByType('button').props.onClick());
   assert.equal(rendered.root.findByType(mod.default).props.server.id,'saved-google-workspace');
   assert.equal(rendered.root.findByType(mod.default).props.recommendation,googleWorkspace);
-  console.log('PASS hidden Google Workspace recommendation: installed connector remains manageable');
+  console.log('PASS Google Workspace: installed connector remains manageable without a duplicate recommendation');
   await unmount();
   const {validateMcpRemoteUrl}=rootRequire('./app/agent-service/native-mcp-store');
   const normalizedPresets=recommendations.filter(value=>value.url && validateMcpRemoteUrl(value.url)!==value.url);

@@ -1016,8 +1016,7 @@ type OAuthQuotaCredits =
 
 export type OAuthAccountQuota =
   | { status: "unsupported" }
-  | { status: "unavailable"; reason?: "antigravity-cli-missing" | "antigravity-cli-update-required"
-      | "antigravity-cli-sign-in-required" | "antigravity-cli-permission-denied" }
+  | { status: "unavailable" }
   | { status: "available"; checkedAt: number; accountName?: string; quotaScope?: string; windows: Array<{
       label: string | null;
       durationMinutes: number | null;
@@ -1042,7 +1041,6 @@ export interface OAuthProvider {
   disconnectCommand: string | null;
   disconnectable: boolean;
   canReadQuota?: boolean;
-  quotaSource?: "antigravity-cli";
   quotaScope?: string | null;
   cachedQuota?: Extract<OAuthAccountQuota, { status: "available" }>;
   /**
@@ -2652,6 +2650,24 @@ export interface RuntimeContextUsage {
   quality: "exact" | "estimated" | "unknown";
   source: "runtime_event" | "session_stats" | "estimate";
   observedAt: number;
+}
+/** Shoggoth's estimates from the immutable input snapshot of one reply. */
+export interface ContextComposition {
+  historyDelivered: boolean;
+  toolExposure: "resident" | "all";
+  rulesTokens: number;
+  definitionTokens: number;
+  toolTokens: number;
+  memoryTokens: number;
+  skillTokens: number;
+  historyTokens: number;
+  messageTokens: number;
+  toolCount: number;
+}
+export interface ContextBreakdown {
+  runId: string;
+  snapshotId: string | null;
+  composition: ContextComposition | null;
 }
 export interface ProductContextState {
   automatic: "enabled" | "unavailable" | "disabled";

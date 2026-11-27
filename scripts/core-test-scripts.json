@@ -26,5 +26,6 @@
   "shoggoth-memory-flush-entries-regression.cjs",
   "shoggoth-memory-flush-deadline-unit.cjs",
   "shoggoth-memory-review-regression.cjs",
-  "core-test-runner-unit.cjs"
+  "core-test-runner-unit.cjs",
+  "native-prompt-ledger-unit.cjs"
 ]

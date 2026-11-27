@@ -172,7 +172,7 @@ const ENCRYPTED_MUTATION_METHODS = new Set([
   "agent.restore",
 ]);
 const RUNTIME_COMMAND_METHODS = new Set(["chat.command.list", "chat.command.exec", activeMemoryCommand.METHOD]);
-const NATIVE_SLASH_RUNTIMES = new Set(["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness"]);
+const NATIVE_SLASH_RUNTIMES = new Set(["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness", "opencode"]);
 const NATIVE_STEER_RUNTIMES = new Set(["codex", "claude-code", "pi", "deepseek-harness"]);
 // 1 MiB of JSON-escaped control text can require ~130 protocol-sized frames;
 // 256 remains finite while covering both that case and 8,192 ordinary page items.
@@ -305,6 +305,7 @@ const CHAT_REQUEST_MESSAGES = Object.freeze({
   CRON_MODEL_UPDATE_BUSY: DOMAIN_PUBLIC_MESSAGES.CRON_MODEL_UPDATE_BUSY,
   CHAT_ATTACHMENT_INVALID: CHAT_PUBLIC_MESSAGES.CHAT_ATTACHMENT_INVALID,
   CHAT_ATTACHMENT_DELIVERY_FAILED: CHAT_PUBLIC_MESSAGES.CHAT_ATTACHMENT_DELIVERY_FAILED,
+  WORK_RUN_SEND_REJECTED: CHAT_PUBLIC_MESSAGES.WORK_RUN_SEND_REJECTED,
   INSPIRATION_ARCHIVED: "此会话关联的灵感已归档，请先在「灵感便签」中恢复它，或切换到普通聊天会话",
   INSPIRATION_NOT_FOUND: "此会话关联的灵感已删除或不存在，历史记录仍可查看；请切换到普通聊天会话继续",
 });
@@ -2321,7 +2322,6 @@ class ShoggothBackend extends AgentBackend {
       const authRead = accountProfile ? ["profile.auth.read", { profileId: accountProfile.id }]
         : group.binding ? ["profile.binding.auth.read", group.binding] : null;
       const canReadQuota = RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(descriptor.runtime);
-      const quotaSource = descriptor.runtime === "antigravity" ? "antigravity-cli" : null;
       let loggedIn = false;
       let quotaScope;
       let statusError = descriptor.binaryPath ? null : descriptor.unavailableReason;
@@ -2346,7 +2346,7 @@ class ShoggothBackend extends AgentBackend {
         if (canReadAuth && !authRead) statusVerification = "unverified";
         if (canReadAuth && authRead) {
           try {
-            const verified = canReadQuota && !quotaSource ? await this._readScopedOAuth(...authRead) : await this._call(...authRead);
+            const verified = canReadQuota ? await this._readScopedOAuth(...authRead) : await this._call(...authRead);
             loggedIn = verified.status === "authenticated";
             quotaScope = verified.quotaScope;
             readiness = loggedIn ? "ready" : verified.status === "unauthenticated" ? "auth-required" : "unverified";
@@ -2407,7 +2407,6 @@ class ShoggothBackend extends AgentBackend {
           ? runtimeCliCommand(descriptor, descriptor.logoutArgs) : null,
         disconnectable: false,
         ...(canReadQuota ? { canReadQuota: true } : {}),
-        ...(quotaSource ? { quotaSource } : {}),
         ...(loggedIn && quotaScope !== undefined ? { quotaScope } : {}),
         ...(switchable && (descriptor.binaryPath || !enabled)
           ? { connection: { id: descriptor.runtime, enabled } } : {}),

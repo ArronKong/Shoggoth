@@ -62,6 +62,19 @@ async function sendNext(coordinator, sessionKey, operationId) {
 const compactionRuns = coordinator => coordinator.dispatcher.listRuns({ source: "compaction" });
 const compactedMarkers = (f, session) => f.service.transcriptStore.listEvents(session.profileId, session.id)
   .filter(event => event.content?.transcriptType === "context.native.compacted");
+// A failed summary or native compaction serves a waiting input; that input owns
+// the visible outcome. Its own terminal stays in the journal, out of the chat.
+function assertMaintenanceFailuresHidden(f, session) {
+  const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+  const failures = f.service.transcriptStore.listEvents(session.profileId, session.id)
+    .filter(event => event.kind === "error" && event.content?.transcriptType === "terminal"
+      && /^(?:native-compaction-|compaction-)/u.test(event.runId || ""));
+  for (const event of failures) {
+    assert.equal(event.contextExcluded, true, `${event.runId} ${event.content.errorCode} stays out of the conversation`);
+    assert.equal(transcriptHistoryItem(event, "compaction"), null, `${event.content.errorCode} is not rendered`);
+  }
+  return failures.length;
+}
 
 test("compaction modes: OpenCode and Codex by command, Grok Build, Claude Code, Pi and DeepSeek by turn, Antigravity self-managed", () => {
   assert.deepEqual(nativeCompaction("opencode"), { mode: "command", automatic: true });
@@ -125,9 +138,11 @@ for (const terminal of ["completed", "failed"]) {
         turn: { id: turnId, status: terminal } } }));
       await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "post-compaction admission");
       const run = coordinator.getRun(ack.run.id);
-      assert.equal(run.status, terminal === "completed" ? "running" : "failed", run.errorCode);
+      // A failed compact renews the thread instead of refusing the input.
+      assert.equal(run.status, "running", run.errorCode);
       assert.equal(commands, 1);
-      assert.equal(host.turnStartCalls, terminal === "completed" ? 2 : 1, "input starts once only after a successful matching turn");
+      // After a failed compact the host is stopped; the renewed thread may start on a new one.
+      assert.equal(host.turnStartCalls, terminal === "completed" ? 2 : 1, "the full thread never receives the input");
       if (terminal === "completed") {
         assert.equal(compactedMarkers(f, session).length, 1, "native event and command completion share one boundary");
         host.emit(normalizeCodexEvent({ method: "thread/compacted", params: { threadId: native, turnId } }));
@@ -135,8 +150,10 @@ for (const terminal of ["completed", "failed"]) {
         await f.complete(run);
       }
       else {
-        assert.match(run.errorCode, /^RUNTIME_COMPACTION_/u);
+        assert.match(compactionRuns(coordinator)[0].errorCode, /^RUNTIME_COMPACTION_/u);
         assert.equal(compactedMarkers(f, session).length, 0, "an item receipt without a successful terminal cannot claim completion");
+        assert.notEqual(run.runtimeSessionRef.sessionId, native, "the input ran on a renewed thread");
+        await f.complete(run);
       }
     } finally { await f.close(); }
   });
@@ -199,6 +216,31 @@ async function recoveringCodexCompaction() {
   };
 }
 
+test("Codex: a Binding whose CLI cannot isolate a summary goes straight to native compaction", async () => {
+  const fixture = await openRuntime("codex");
+  const { f, coordinator, session } = fixture;
+  const seen = [];
+  // Type level Codex summarizes; this Binding's observed CLI (0.159.2) cannot.
+  coordinator.runtimeManager.canGenerateModelOnly = (runtime, { binding = null } = {}) => {
+    if (runtime === "codex") seen.push(binding);
+    return runtime === "codex" && !binding;
+  };
+  try {
+    await underPressure(fixture, "codex-unisolated");
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "codex-unisolated-next", prompt: "Continue the work" });
+    await waitUntil(() => compactionRuns(coordinator).length > 0, 15000, "a maintenance run");
+    const runs = compactionRuns(coordinator);
+    assert.equal(runs.some(run => run.id.startsWith("compaction-")), false, "no product summary task is created");
+    assert.equal(runs.some(run => run.id.startsWith("native-compaction-")), true, "native compaction takes over directly");
+    const current = f.service.chatSessionStore.getSession(session.sessionKey);
+    const binding = seen.find(Boolean);
+    assert.equal(binding?.runtime, "codex", "the summary route asks with the Binding it would use");
+    assert.ok(binding.runtimeProfileId && binding.runtimeAccountId);
+    assert.equal(coordinator.getRun(ack.run.id).status, "queued", "the input waits for the native compaction");
+    assert.equal(current.runtimeBindingId, f.binding("codex").id);
+  } finally { await f.close(); }
+});
+
 test("Codex auth recovery keeps the same input queued, reports live/snapshot progress and sends it once", async () => {
   const fixture = await recoveringCodexCompaction();
   const { f, coordinator, session, state } = fixture;
@@ -228,20 +270,20 @@ test("Codex auth recovery keeps the same input queued, reports live/snapshot pro
   } finally { await f.close(); }
 });
 
-test("Codex auth recovery is bounded; a new input after restart retries only undispatched compaction", async () => {
+test("Codex auth recovery is bounded; the input then continues once on a renewed thread across restart", async () => {
   const fixture = await recoveringCodexCompaction();
   let { f, coordinator } = fixture;
   const { session, state } = fixture;
   try {
     fixture.arm(Infinity);
-    const failed = await sendNext(coordinator, session.sessionKey, "auth-exhausted-input");
-    assert.equal(failed.status, "failed");
-    assert.equal(failed.errorCode, "RUNTIME_COMPACTION_FAILED");
+    const renewed = await sendNext(coordinator, session.sessionKey, "auth-exhausted-input");
+    assert.equal(renewed.status, "running", "an undispatched compact that cannot recover renews the thread");
     assert.equal(state.attempts, 4, "three delayed retries exhaust the recovery window");
     assert.equal(state.commands, 0);
     const [compact] = compactionRuns(coordinator);
     assert.equal(compact.errorCode, "RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED");
     for (const field of ["runtimeSessionRef", "runtimeTurnRef", "runtimeAttemptRef"]) assert.equal(compact[field], null);
+    await f.complete(renewed);
     const root = f.root, transport = f.transport;
     await f.close({ remove: false });
     fixture.arm(0);
@@ -252,10 +294,9 @@ test("Codex auth recovery is bounded; a new input after restart retries only und
     fixture.install(coordinator);
     const recovered = await sendNext(coordinator, session.sessionKey, "auth-new-input-after-restart");
     assert.equal(recovered.status, "running", recovered.errorCode);
-    assert.equal(state.commands, 1);
-    assert.equal(compactionRuns(coordinator).length, 2);
-    assert.equal(coordinator.getRun(failed.id).status, "failed", "the old failed input is never replayed");
-    assert.equal(f.transport.hosts.get("codex").turnStartCalls, 2);
+    assert.equal(state.commands, 0, "the renewed thread needs no compaction");
+    assert.equal(compactionRuns(coordinator).length, 1, "restart never replays the failed compact");
+    assert.equal(f.transport.hosts.get("codex").turnStartCalls, 3, "each input was sent exactly once");
     await f.complete(recovered);
   } finally { await f.close(); }
 });
@@ -266,14 +307,20 @@ for (const code of ["RUNTIME_AUTH_REQUIRED", "CODEX_ACCOUNT_PROTOCOL_INVALID", "
     const { f, coordinator, session, state } = fixture;
     try {
       fixture.arm(Infinity, code);
-      const failed = await sendNext(coordinator, session.sessionKey, `auth-blocked-${code}`);
-      assert.equal(failed.status, "failed");
-      assert.equal(failed.errorCode, code === "RUNTIME_AUTH_REQUIRED" ? "RUNTIME_AUTH_REQUIRED"
-        : code === "CODEX_ACCOUNT_PROTOCOL_INVALID" ? "RUNTIME_INCOMPATIBLE" : "RUNTIME_COMPACTION_FAILED",
-      "the waiting message preserves login/protocol remedies instead of recommending an ineffective /compact");
+      const result = await sendNext(coordinator, session.sessionKey, `auth-blocked-${code}`);
+      if (code === "RUNTIME_TURN_ACCEPTANCE_UNKNOWN") {
+        // A compaction failure, not an account one: the thread is renewed.
+        assert.equal(result.status, "running", result.errorCode);
+        assert.equal(fixture.host.turnStartCalls, 2);
+        await f.complete(result);
+      } else {
+        assert.equal(result.status, "failed");
+        assert.equal(result.errorCode, code === "RUNTIME_AUTH_REQUIRED" ? "RUNTIME_AUTH_REQUIRED" : "RUNTIME_INCOMPATIBLE",
+          "the waiting message preserves login/protocol remedies instead of renewing or recommending /compact");
+        assert.equal(fixture.host.turnStartCalls, 1);
+      }
       assert.equal(state.attempts, 1);
       assert.equal(state.commands, 0);
-      assert.equal(fixture.host.turnStartCalls, 1);
       assert.equal(coordinator.nativeCompactionAuthRecoveries.size, 0);
     } finally { await f.close(); }
   });
@@ -326,7 +373,7 @@ test("OpenCode: the waiting input runs once after one native compaction command"
   } finally { await f.close(); }
 });
 
-test("OpenCode: a failed compaction rejects waiting input until an explicit /compact succeeds", async () => {
+test("OpenCode: a failed compaction renews the thread; an explicit /compact still works afterwards", async () => {
   let fail = true, opened = null;
   const fixture = await openRuntime("opencode", handle => {
     opened = handle;
@@ -340,17 +387,20 @@ test("OpenCode: a failed compaction rejects waiting input until an explicit /com
   });
   const { f, coordinator, session } = fixture;
   try {
-    await underPressure(fixture, "opencode-fail");
-    const rejected = await sendNext(coordinator, session.sessionKey, "opencode-fail-next");
-    assert.equal(rejected.status, "failed");
-    assert.equal(rejected.errorCode, "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN");
-    assert.equal(rejected.runtimeTurnRef, null, "the input never reached the CLI");
-    const blocked = await sendNext(coordinator, session.sessionKey, "opencode-fail-blocked");
-    assert.equal(blocked.errorCode, "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN");
-    fail = false;
+    const old = await underPressure(fixture, "opencode-fail");
     // An unconfirmed compaction stops its host; the next acquire is a restarted
     // host that still owns the persisted CLI session.
     opened.terminated = new Promise(() => {});
+    const renewed = await sendNext(coordinator, session.sessionKey, "opencode-fail-next");
+    assert.equal(renewed.status, "running", "an unconfirmed compact renews the thread instead of refusing");
+    assert.equal(compactionRuns(coordinator)[0].status === "completed", false);
+    assert.notEqual(renewed.runtimeSessionRef.sessionId, old.runtimeSessionId, "the input never reached the old thread");
+    const boundary = f.service.transcriptStore.listEvents(old.profileId, old.id)
+      .filter(event => event.content?.transcriptType === "context.renewed");
+    assert.deepEqual(boundary.map(event => event.content.reason), ["required"]);
+    assert.equal(boundary[0].content.runtimeSessionId, old.runtimeSessionId);
+    await f.complete(renewed);
+    fail = false;
     const manual = await f.send(session.sessionKey, "opencode-manual-compact", "/compact");
     assert.equal(manual.status, "completed", manual.errorCode);
     const released = await sendNext(coordinator, session.sessionKey, "opencode-after-manual");
@@ -385,7 +435,51 @@ test("Grok Build: /compact runs as one native command turn and its compacted not
   } finally { await f.close(); }
 });
 
-for (const historical of [false, true]) test(`DeepSeek manual compact ${historical ? "rejects historical sources before dispatch" : "uses one native command turn"}`, async () => {
+test("Grok Build: the automatic native compaction resumes the chat thread with the rules that thread holds", async () => {
+  const receipts = new Map(), resumed = [];
+  const fixture = await openRuntime("grok-build", handle => {
+    handle.capabilities = { "context.compact.native": true };
+    handle.commandExecute = async ({ text }) => ({ kind: "send", text, warning: null });
+    // Like Grok's native system-rule receipt: a thread keeps the rules it was
+    // created with, and a resume with other rules is refused before sending.
+    const start = handle.sessionStart, resume = handle.sessionResume;
+    handle.sessionStart = async input => {
+      const started = await start(input);
+      receipts.set(started.session.id, input.developerInstructions ?? "");
+      return started;
+    };
+    handle.sessionResume = async input => {
+      resumed.push(input.developerInstructions ?? "");
+      if (receipts.has(input.sessionId) && receipts.get(input.sessionId) !== (input.developerInstructions ?? "")) {
+        throw Object.assign(new Error("Native system rules require a fresh session"),
+          { code: "RUNTIME_SESSION_INSTRUCTIONS_CHANGED", acceptance: "not_sent", sessionId: input.sessionId });
+      }
+      return resume(input);
+    };
+  });
+  const { f, coordinator, session } = fixture;
+  try {
+    const current = await underPressure(fixture, "grok-rules");
+    assert.ok(receipts.get(current.runtimeSessionId)?.length > 0, "the chat thread recorded its rules");
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "grok-rules-next", prompt: "Continue the work" });
+    await waitUntil(() => compactionRuns(coordinator).some(run => run.status === "running" && run.runtimeTurnRef),
+      5000, "compaction turn on the chat thread");
+    const [compact] = compactionRuns(coordinator);
+    assert.equal(compact.runtimeSessionRef.sessionId, current.runtimeSessionId, "compacts the chat's own thread");
+    assert.equal(f.service.transcriptStore.listEvents(current.profileId, current.id)
+      .some(event => event.content?.transcriptType === "context.instructions.renewal"), false, "no rules renewal");
+    f.transport.hosts.get("grok-build").emit({ known: true, type: "context_compacted", threadId: current.runtimeSessionId,
+      turnId: compact.runtimeTurnRef.turnId, contextUsage: unknownRuntimeContextUsage(current.runtimeSessionId) });
+    await f.complete(compact, "Conversation compacted.");
+    await waitUntil(() => coordinator.getRun(ack.run.id).status === "running", 5000, "released input");
+    const run = coordinator.getRun(ack.run.id);
+    assert.equal(run.runtimeSessionRef.sessionId, current.runtimeSessionId, "the input continues on the compacted thread");
+    assert.ok(resumed.length > 0 && resumed.every(rules => rules === receipts.get(current.runtimeSessionId)));
+    await f.complete(run);
+  } finally { await f.close(); }
+});
+
+for (const historical of [false, true]) test(`DeepSeek manual compact ${historical ? "renews a thread with historical sources instead of dispatching" : "uses one native command turn"}`, async () => {
   let commands = 0;
   const fixture = await openRuntime("deepseek-harness", handle => {
     handle.capabilities = require("../app/agent-service/deepseek-harness-runtime-adapter").DEEPSEEK_HARNESS_CAPABILITIES;
@@ -399,10 +493,15 @@ for (const historical of [false, true]) test(`DeepSeek manual compact ${historic
     const compact = await f.send(session.sessionKey, `deepseek-manual-${historical}`, "/compact");
     const host = f.transport.hosts.get("deepseek-harness");
     if (historical) {
-      assert.equal(compact.status, "failed");
-      assert.equal(compact.errorCode, "CONTEXT_COMPACTION_REQUIRED");
+      // The thread holds a historical memory source verbatim: /compact renews
+      // it instead of summarizing it natively, and never reaches the CLI.
+      assert.equal(compact.status, "completed", compact.errorCode);
+      assert.equal(compact.resultSummary, "Conversation context renewed.");
       assert.equal(commands, 0, "unsafe history cannot enter the CLI command path");
       assert.equal(host.turnStartCalls, 1, "only the preceding ordinary turn was sent");
+      const renewed = f.service.chatSessionStore.getSession(session.sessionKey);
+      assert.equal(renewed.runtimeSessionId, null);
+      assert.equal(renewed.retiredRuntimeSessions.at(-1).runtimeSessionId, first.runtimeSessionRef.sessionId);
     } else {
       assert.equal(compact.status, "running");
       assert.equal(commands, 1);
@@ -414,6 +513,57 @@ for (const historical of [false, true]) test(`DeepSeek manual compact ${historic
       assert.equal(compactedMarkers(f, current).length, 1);
     }
   } finally { await f.close(); }
+});
+
+test("Antigravity: /compact renews the thread instead of sending the command to the model", async () => {
+  const { f, session } = await openRuntime("antigravity");
+  try {
+    const first = await f.send(session.sessionKey, "antigravity-compact-first");
+    await f.complete(first);
+    const host = f.transport.hosts.get("antigravity"), starts = host.turnStartCalls;
+    const compact = await f.send(session.sessionKey, "antigravity-manual-compact", "/compact");
+    assert.equal(compact.status, "completed", compact.errorCode);
+    assert.equal(compact.resultSummary, "Conversation context renewed.");
+    assert.equal(host.turnStartCalls, starts, "the literal /compact never reaches the model");
+    const renewed = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(renewed.runtimeSessionId, null);
+    assert.equal(renewed.retiredRuntimeSessions.at(-1).runtimeSessionId, first.runtimeSessionRef.sessionId);
+    // The switch has no output of its own: a model-excluded boundary shows it,
+    // and history projects it as the renewal notice.
+    const boundaries = f.service.transcriptStore.listEvents(renewed.profileId, renewed.id)
+      .filter(event => event.content?.transcriptType === "context.renewed");
+    assert.equal(boundaries.length, 1);
+    assert.equal(boundaries[0].contextExcluded, true);
+    assert.deepEqual(boundaries[0].content, { transcriptType: "context.renewed",
+      runtimeSessionId: first.runtimeSessionRef.sessionId, reason: "manual" });
+    const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+    assert.equal(transcriptHistoryItem(boundaries[0]).payload.message.notice, "contextRenewed");
+    const next = await f.send(session.sessionKey, "antigravity-after-compact");
+    assert.equal(next.status, "running", next.errorCode);
+    assert.notEqual(next.runtimeSessionRef.sessionId, first.runtimeSessionRef.sessionId);
+    await f.complete(next);
+  } finally { await f.close(); }
+});
+
+test("Codex offers tool-free generation only for conversation summaries", () => {
+  const { CodexRuntimeAdapter } = require("../app/agent-service/codex-runtime-adapter");
+  const adapter = new CodexRuntimeAdapter({ runtimePool: { get: async () => ({}) } });
+  assert.equal(adapter.modelOnly, true);
+  assert.deepEqual(adapter.modelOnlyPurposes, ["conversation_compaction"]);
+});
+
+test("a thread's historical scope starts after a recent-originals seed and covers the session otherwise", () => {
+  const { historicalScopeStart, maintenanceScope } = require("../app/agent-service/context-transfer");
+  const scope = maintenanceScope({ runtimeSessionId: "native-1", runtimeBindingId: "binding-1" },
+    { runtime: "codex", runtimeProfileId: "profile-1", runtimeAccountId: "account-1" });
+  const seeded = (seq, partial, throughSeq) => ({ seq, contextExcluded: true, kind: "status", content: {
+    transcriptType: "context.native.seeded", scope, partial, baseline: { usedTokens: 1, throughSeq, operationId: "op" } } });
+  const user = seq => ({ seq, kind: "user", content: { text: "u" } });
+  assert.equal(historicalScopeStart([user(1), user(2), seeded(4, true, 2), user(3)], scope), 2,
+    "the seed record lands after the new thread's first user message");
+  assert.equal(historicalScopeStart([user(1), seeded(3, false, 1)], scope), 0, "a complete seed may hold every source");
+  assert.equal(historicalScopeStart([user(1)], scope), 0);
+  assert.equal(historicalScopeStart([seeded(3, true, 1)], { ...scope, nativeSessionId: "other" }), 0, "another thread's seed");
 });
 
 test("Antigravity: the planning budget does not refuse input; the CLI compacts internally", async () => {
@@ -512,6 +662,7 @@ for (const behavior of ["success", "unavailable", "failure", "later-failure"]) {
         assert.equal(current.runtimeSessionId, old.runtimeSessionId, "failed preparation preserves old native history");
         assert.equal(current.retiredRuntimeSessions.length, old.retiredRuntimeSessions.length);
         if (behavior === "later-failure") assert.equal(calls(), 2, "a completed first segment did not retire the source");
+        if (behavior !== "unavailable") assert.ok(assertMaintenanceFailuresHidden(f, current) > 0, "the failed summary was journaled");
       }
       const attempts = calls();
       await f.complete(run);
@@ -529,7 +680,7 @@ for (const behavior of ["success", "unavailable", "failure", "later-failure"]) {
 
 for (const runtime of ["opencode", "grok-build"]) {
   for (const outcome of ["success", "failure", "unknown", "timeout", "unsupported"]) {
-    test(`${runtime} effective input limit: ${outcome} never replays maintenance or input`, async () => {
+    test(`${runtime} effective input limit: ${outcome} never replays maintenance or input, and never refuses it`, async () => {
       let commands = 0;
       const fixture = await openRuntime(runtime, handle => {
         handle.capabilities = { "context.compact.native": outcome !== "unsupported" };
@@ -566,20 +717,25 @@ for (const runtime of ["opencode", "grok-build"]) {
         }
         await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 10000, "budget-bound input admission");
         const run = coordinator.getRun(ack.run.id);
-        assert.equal(run.status, outcome === "success" ? "running" : "failed", run.errorCode);
+        assert.equal(run.status, "running", run.errorCode);
         if (outcome !== "success") {
-          assert.match(run.errorCode, /^RUNTIME_COMPACTION_/u);
-          assert.equal(run.runtimeTurnRef, null, "an uncompleted required compact cannot release the input");
+          // An uncompleted required compact never releases the input onto the
+          // full thread; it renews the thread on the same binding instead.
+          assert.notEqual(compactionRuns(coordinator)[0].status, "completed");
+          const renewed = f.service.chatSessionStore.getSession(session.sessionKey);
+          assert.equal(run.runtimeSessionRef.sessionId, renewed.runtimeSessionId);
+          assert.notEqual(renewed.retiredRuntimeSessions.at(-1)?.runtimeSessionId, renewed.runtimeSessionId);
+          if (outcome !== "unsupported") assertMaintenanceFailuresHidden(f, renewed);
         }
         assert.equal(commands, outcome === "unsupported" ? 0 : 1);
         assert.equal(compactionRuns(coordinator).length, 1);
         const host = f.transport.hosts.get(runtime);
-        assert.equal(host.threads.flatMap(thread => thread.turns).filter(turn => turn.items.some(item => item.clientId === `${runtime}-${outcome}-next`)).length, outcome === "success" ? 1 : 0);
-        if (outcome === "success") await f.complete(run);
+        assert.equal(host.threads.flatMap(thread => thread.turns).filter(turn => turn.items.some(item => item.clientId === `${runtime}-${outcome}-next`)).length, 1);
+        await f.complete(run);
         const later = await sendNext(coordinator, session.sessionKey, `${runtime}-${outcome}-later`);
-        assert.equal(later.status, outcome === "success" ? "running" : "failed", later.errorCode);
-        assert.equal(commands, outcome === "unsupported" ? 0 : 1);
-        if (outcome === "success") await f.complete(later);
+        assert.equal(later.status, "running", later.errorCode);
+        assert.equal(commands, outcome === "unsupported" ? 0 : 1, "maintenance is never replayed");
+        await f.complete(later);
       } finally { await f.close(); }
     });
   }

@@ -8,7 +8,7 @@ const { STATE_VERSION, PAUSE_REASONS, createProductTelemetryStore } = require(".
 const { createPostHogTransport } = require("./product-telemetry-posthog");
 
 const SYSTEM_CLOCK = { now: Date.now, monotonic: () => performance.now(), setTimeout, clearTimeout };
-const emptyDetail = () => ({ lastSealedDay: null, draft: null, steps: [] });
+const emptyDetail = () => ({ lastSealedDay: null, draft: null, steps: [], pendingChats: [] });
 const queueRow = event => ({ event, attemptsTotal: 0, attemptDay: null, attemptsToday: 0, nextAttemptAt: 0 });
 const tierOf = row => telemetryTier(row.event.event);
 const isFresh = (event, now) => now - Date.parse(event.timestamp) < LIMITS.ttlMs;
@@ -44,7 +44,9 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     if (store) return;
     store = createProductTelemetryStore(statePath);
     state = store.state;
-    if (state?.version === 1) state = { ...state, version: STATE_VERSION, detail: emptyDetail() };
+    if (state && state.version < STATE_VERSION) {
+      state = { ...state, version: STATE_VERSION, detail: { ...emptyDetail(), ...state.detail } };
+    }
     draft = state?.detail.draft ?? null;
   }
 
@@ -97,8 +99,9 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     draft = null;
     if (!state) return true;
     const outbox = tier === "all" ? [] : state.outbox.filter(row => tierOf(row) === "basic");
-    if (outbox.length === state.outbox.length && !state.detail.draft) return true;
-    return commit({ ...state, outbox, detail: { ...state.detail, draft: null } });
+    const detail = state.detail;
+    if (outbox.length === state.outbox.length && !detail.draft && !detail.pendingChats.length) return true;
+    return commit({ ...state, outbox, detail: { ...detail, draft: null, pendingChats: [] } });
   }
 
   function refreshPreferences() {
@@ -166,8 +169,8 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     return respond(null);
   }
 
-  function enqueue(next, event) {
-    const outbox = [...next.outbox, queueRow(event)];
+  function boundState(next) {
+    const outbox = [...next.outbox];
     while (outbox.length > LIMITS.events || Buffer.byteLength(JSON.stringify({ ...next, outbox })) > LIMITS.stateBytes) {
       const oldestDetail = outbox.findIndex(row => tierOf(row) === "detailed");
       if (oldestDetail === -1) return null;
@@ -176,10 +179,17 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     return { ...next, outbox };
   }
 
+  function enqueue(next, event) {
+    return boundState({ ...next, outbox: [...next.outbox, queueRow(event)] });
+  }
+
   function prune(now) {
     if (!state) return true;
     const outbox = state.outbox.filter(row => isFresh(row.event, now) && row.attemptsTotal < LIMITS.attemptsTotal);
-    return outbox.length === state.outbox.length || commit({ ...state, outbox });
+    const detail = state.detail;
+    const pendingChats = detail.pendingChats.filter(row => now - row.startedAt < LIMITS.ttlMs);
+    if (outbox.length === state.outbox.length && pendingChats.length === detail.pendingChats.length) return true;
+    return commit({ ...state, outbox, detail: { ...detail, pendingChats } });
   }
 
   function sealDay(now, day) {
@@ -263,12 +273,17 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     properties[key] = values.slice(0, LIMITS.list);
   }
 
+  function enqueueStep(next, step, now) {
+    if (next.detail.steps.includes(step)) return null;
+    const event = createTelemetryEvent(STEP_EVENT, {
+      distinctId: next.distinctId, uuid: randomUUID(), nowMs: now, build,
+    }, { step });
+    return enqueue({ ...next, detail: { ...next.detail, steps: [...next.detail.steps, step] } }, event);
+  }
+
   function recordStep(step, now) {
     if (state.detail.steps.includes(step) || !prune(now)) return false;
-    const event = createTelemetryEvent(STEP_EVENT, {
-      distinctId: state.distinctId, uuid: randomUUID(), nowMs: now, build,
-    }, { step });
-    const next = enqueue({ ...state, detail: { ...state.detail, steps: [...state.detail.steps, step] } }, event);
+    const next = enqueueStep(state, step, now);
     if (!next || !commit(next)) return false;
     schedule(LIMITS.firstFlushMs);
     return true;
@@ -290,6 +305,9 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     const properties = { ...current.properties };
     // A v2 draft from an upgrade day remains valid in its original format.
     const supportsBreakdown = properties.catalog_version === catalog.version;
+    let pendingChats = state.detail.pendingChats;
+    let startedOperation;
+    let finishedOperation;
     let firstChat = false;
     if (kind === "completed_background_task_opened") {
       if (!supportsBreakdown || properties.opened_completed_background_task) return false;
@@ -303,7 +321,11 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
       if (properties[key]) return false;
       Object.assign(properties, JSON.parse(JSON.stringify(payload.values)), { [key]: true });
     } else if (kind === "feature_start") {
-      if (operations.has(payload.operationId)) return false;
+      if (operations.has(payload.operationId) || pendingChats.some(row => row.operationId === payload.operationId)) return false;
+      if (payload.feature === "chat_send" && payload.backendType === "shoggoth") {
+        if (pendingChats.length >= LIMITS.pending) return false;
+        pendingChats = [...pendingChats, { operationId: payload.operationId, startedAt: now }];
+      }
       if (operations.size >= LIMITS.pending) {
         const at = monotonic();
         for (const [id, operation] of operations) {
@@ -311,25 +333,32 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
         }
         if (operations.size >= LIMITS.pending) return false;
       }
-      operations.set(payload.operationId, { at: monotonic(), feature: payload.feature, finished: false });
+      startedOperation = { at: monotonic(), feature: payload.feature, finished: false };
       bump(properties, payload.feature + "_attempt_count");
       include(properties, "used_backend_types", payload.backendType);
     } else if (kind === "feature_end") {
       const operation = operations.get(payload.operationId);
-      if (!operation || operation.finished) return false;
-      const elapsed = monotonic() - operation.at;
-      operation.finished = true;
-      if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= LIMITS.ttlMs) return false;
-      const bucket = catalog.durationBuckets[[1000, 5000, 30_000, 120_000].filter(limit => elapsed >= limit).length];
-      bump(properties, operation.feature + "_" + payload.outcome + "_count");
-      bump(properties, operation.feature + "_duration_" + bucket + "_count");
+      const pending = pendingChats.find(row => row.operationId === payload.operationId);
+      if (operation?.finished || (!operation && !pending)) return false;
+      if (pending && (now < pending.startedAt || now - pending.startedAt >= LIMITS.ttlMs)) return false;
+      const feature = operation?.feature ?? "chat_send";
+      // The monotonic start time is valid only within the original process.
+      if (operation) {
+        const elapsed = monotonic() - operation.at;
+        if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= LIMITS.ttlMs) return false;
+        const bucket = catalog.durationBuckets[[1000, 5000, 30_000, 120_000].filter(limit => elapsed >= limit).length];
+        bump(properties, feature + "_duration_" + bucket + "_count");
+        finishedOperation = operation;
+      }
+      if (pending) pendingChats = pendingChats.filter(row => row !== pending);
+      bump(properties, feature + "_" + payload.outcome + "_count");
       if (payload.errorKind) {
         bump(properties, "error_" + payload.errorKind + "_count");
-        if (supportsBreakdown && catalog.errorBreakdownFeatures.includes(operation.feature)) {
-          bump(properties, operation.feature + "_error_" + payload.errorKind + "_count");
+        if (supportsBreakdown && catalog.errorBreakdownFeatures.includes(feature)) {
+          bump(properties, feature + "_error_" + payload.errorKind + "_count");
         }
       }
-      firstChat = operation.feature === "chat_send" && payload.outcome === "success";
+      firstChat = feature === "chat_send" && payload.outcome === "success";
       if (firstChat) {
         const { runtimeType = "unknown", providerId = "unknown", modelId = "unknown" } = payload.usage || {};
         include(properties, "used_runtime_types", runtimeType);
@@ -340,12 +369,24 @@ function createProductTelemetry({ statePath, configStore, clock = SYSTEM_CLOCK, 
     }
     const next = { ...current, properties };
     if (Buffer.byteLength(JSON.stringify(next)) > LIMITS.eventBytes) return false;
+    const persistChat = pendingChats !== state.detail.pendingChats;
+    if (persistChat) {
+      // The attempt or outcome and its recovery record must survive together.
+      const saved = { ...state, detail: { ...state.detail, draft: next, pendingChats } };
+      const withStep = firstChat ? enqueueStep(saved, "first_chat_succeeded", now) : null;
+      const bounded = withStep ?? boundState(saved);
+      if (!bounded || !commit(bounded)) return false;
+      clearCheckpoint();
+      if (withStep) schedule(LIMITS.firstFlushMs);
+    }
+    if (startedOperation) operations.set(payload.operationId, startedOperation);
+    if (finishedOperation) finishedOperation.finished = true;
     draft = next;
-    if (checkpointTimer === null) {
+    if (!persistChat && checkpointTimer === null) {
       checkpointTimer = clock.setTimeout(checkpoint, LIMITS.checkpointMs);
       checkpointTimer?.unref?.();
     }
-    if (firstChat) recordStep("first_chat_succeeded", now);
+    if (firstChat && !persistChat) recordStep("first_chat_succeeded", now);
     return true;
   }
 

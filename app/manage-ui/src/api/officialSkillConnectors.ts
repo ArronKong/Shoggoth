@@ -1,7 +1,7 @@
 import { jsonFetch } from "./client";
 import { MCP_CHANGE_EVENT } from "./mcpConnectors";
 
-export type OfficialConnectorId = "doordash" | "shop" | "quark-drive" | "rollinggo-hotel" | "fliggy" | "meituan-paotui" | "weread" | "alipay" | "baidu-maps" | "agently-mail";
+export type OfficialConnectorId = "doordash" | "shop" | "quark-drive" | "rollinggo-hotel" | "fliggy" | "meituan-paotui" | "weread" | "alipay" | "baidu-maps" | "agently-mail" | "obsidian";
 export interface OfficialConnectorStatus {
   id: OfficialConnectorId; revision: number;
   state: "notInstalled" | "installing" | "installed" | "removing" | "failed";
@@ -36,6 +36,9 @@ export function officialConnectorErrorKey(error: unknown) {
   if (suffix === "PURCHASE_REVIEW_REQUIRED") return "purchaseReview";
   if (suffix === "QUARK_FAILED") return "quarkFailed";
   if (suffix === "QUARK_LIMITED") return "quarkLimited";
+  if (suffix === "OBSIDIAN_CLI_UNAVAILABLE") return "obsidianCliUnavailable";
+  if (suffix === "OBSIDIAN_NOT_RUNNING") return "obsidianNotRunning";
+  if (suffix === "OBSIDIAN_FAILED") return "obsidianFailed";
   if (suffix === "OPERATION_UNCERTAIN") return "uncertain";
   if (suffix === "SESSION_REQUIRED") return "sessionRequired";
   if (/REVISION_CONFLICT|BUSY/.test(suffix)) return "conflict";

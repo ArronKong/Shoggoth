@@ -46,10 +46,12 @@ async function main() {
     getSubjects: async () => ({ items: [{ profileId: "profile-a", agentId: "profile-a", backendId: "shoggoth", label: "Isolated acceptance profile", enabled: true }], unavailableBackends: [] }) });
   const urlFiles = new Map();
   for (const [id, release] of Object.entries(RELEASES)) {
-    if (!release.mcp && !release.native && !release.quark && !release.baidu && !release.platformArchives) urlFiles.set(`https://codeload.github.com/${release.repo}/zip/${release.ref}`, `${id}-repository.zip`);
+    if (!release.mcp && !release.native && !release.quark && !release.baidu && !release.obsidian && !release.platformArchives) urlFiles.set(`https://codeload.github.com/${release.repo}/zip/${release.ref}`, `${id}-repository.zip`);
     for (const archive of Object.values(release.platformArchives || {})) urlFiles.set(archive.url, path.basename(new URL(archive.url).pathname));
     if (release.runtime) urlFiles.set(release.runtime.url, { fliggy: "flyai-cli-1.0.16.tgz", alipay: "alipay-runtime-darwin-0.4.8.tgz" }[id]);
   }
+  const obsidianRelease = require("../app/agent-service/obsidian-skill-installer").RELEASE;
+  urlFiles.set(obsidianRelease.url, "obsidian-skills.zip");
   for (const archive of Object.values(require("../app/agent-service/data/doordash-cli-release.json").archives)) urlFiles.set(archive.url, path.basename(new URL(archive.url).pathname));
   const quarkRelease = require("../app/agent-service/quark-skill-installer").RELEASE;
   urlFiles.set(quarkRelease.url, `quarkclouddrive-${quarkRelease.version}.zip`);
@@ -84,16 +86,23 @@ async function main() {
       try { return await prepareOfficialSkill({ ...options, fetch }); }
       catch (error) { console.error(JSON.stringify({ stage: "prepare", provider: options.providerId, lastPublicDownload: downloads.at(-1) || null })); throw error; }
     } });
-  const expectedBusiness = { doordash: "search_stores", shop: "search_catalog", "quark-drive": "search_files", "rollinggo-hotel": "search_hotels", "baidu-maps": "place", "agently-mail": "search_mail", fliggy: "travel_search", weread: "bookshelf", "meituan-paotui": "delivery_preview", alipay: "submit_payment" };
+  const expectedBusiness = { doordash: "search_stores", shop: "search_catalog", "quark-drive": "search_files", "rollinggo-hotel": "search_hotels", "baidu-maps": "place", "agently-mail": "search_mail", obsidian: "search_notes", fliggy: "travel_search", weread: "bookshelf", "meituan-paotui": "delivery_preview", alipay: "submit_payment" };
   const receipts = [];
   try {
     skills.open(["profile-a"]); store.open(); manager.open(); mcp.open(); controller.open();
     for (const id of ids) {
       const installed = await controller.handle("connector.official.install", { id, expectedRevision: 0 });
-      assert.equal(installed.state, "installed"); assert.equal(installed.skillCount, 1);
-      const skill = skills.listGlobalEnabled().find(item => item.id === `official-${id}`);
+      assert.equal(installed.state, "installed");
+      assert.equal(installed.skillCount, id === "obsidian" ? 7 : 1);
+      const primarySkillId = id === "obsidian" ? "official-obsidian-cli" : `official-${id}`;
+      const skill = skills.listGlobalEnabled().find(item => item.id === primarySkillId);
       assert.ok(skill); assert.deepEqual(skill.requiredTools, ["mcp_server_list", "mcp_server_tools", "mcp_server_call"]);
       assert.deepEqual(skill.requiredRuntimeCapabilities, ["mcp"]);
+      if (id === "obsidian") {
+        for (const extraId of ["official-obsidian-markdown", "official-obsidian-bases", "official-obsidian-json-canvas", "official-obsidian-headless", "official-obsidian-defuddle", "official-obsidian-knap"]) {
+          assert.ok(skills.listGlobalEnabled().some(item => item.id === extraId), `missing ${extraId}`);
+        }
+      }
       const registration = store.get(installed.serverId);
       assert.equal(registration.status, PROVIDERS[id].requiredFields.length ? "needsSetup" : "ready");
       // Required credentials gate business readiness, not the local protocol
@@ -139,7 +148,7 @@ async function main() {
       }
       const item = controller.records.get(id).installation;
       assert.ok(item.files.some(file => file.path === "payload-manifest.json"));
-      assert.ok(item.files.some(file => file.path === `adapters/official-${id}/SKILL.md`));
+      assert.ok(item.files.some(file => file.path === `adapters/${primarySkillId}/SKILL.md`));
       const accountFixture = id === "doordash" ? path.join(controller._root(id), "home", "preserved-account-fixture.json") : null;
       if (accountFixture) fs.writeFileSync(accountFixture, "isolated-private-fixture", { mode: 0o600 });
       if (id === "doordash") store.update({ id: installed.serverId, expectedRevision: store.revision, patch: { disabledProfileIds: ["profile-a"] } });
@@ -163,7 +172,8 @@ async function main() {
       }
       const removed = await controller.handle("connector.official.remove", { id, expectedRevision: repaired.revision });
       assert.equal(removed.state, "notInstalled"); assert.equal(store.get(installed.serverId), null);
-      assert.equal(fs.existsSync(runtimeRoot), false); assert.equal(skills.listGlobalEnabled().some(entry => entry.id === `official-${id}`), false);
+      assert.equal(fs.existsSync(runtimeRoot), false);
+      assert.equal(skills.listGlobalEnabled().some(entry => entry.id === primarySkillId || (id === "obsidian" && entry.id.startsWith("official-obsidian-"))), false);
       receipts.push({ id, version: installed.installedVersion, pinnedFiles: count, tools: tools.map(tool => tool.name), install: true, handshake: true, explicitReconnect: true, removal: true, ...(cliSmoke ? { cliSmoke } : {}), ...(liveSearch ? { liveSearch } : {}), ...(liveAuthorizationStart ? { liveAuthorizationStart } : {}) });
       console.log(JSON.stringify({ provider: id, outcome: "PASS", pinnedFiles: count, tools: tools.length }));
     }

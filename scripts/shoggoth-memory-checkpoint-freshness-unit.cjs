@@ -227,7 +227,7 @@ test("a temporary memory expiry invalidates a checkpoint without a journal revis
   } finally { store.close(); f.cleanup(); }
 });
 
-test("cross-session correction cannot recompact an old source or its assistant echo", () => {
+test("cross-session correction recompacts with placeholders for an old source and its assistant echo", () => {
   let now = 500;
   const f = contextFixture({ now: () => now });
   const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
@@ -262,10 +262,23 @@ test("cross-session correction cannot recompact an old source or its assistant e
       classification: "explicit", supersedes: old.id });
     assert.equal(store.compatible(f.profile.id, f.transcriptSessionId), null,
       "旧摘要包含过时来源时即使原话前缀未变也不能继续使用");
-    assert.equal(planConversationCompaction({ profileId: f.profile.id,
+    const recompact = planConversationCompaction({ profileId: f.profile.id,
       sessionId: f.transcriptSessionId, transcriptStore: f.transcripts,
-      checkpointStore: store, force: true, targetThroughSeq: 2 }), null,
-    "旧会话不得为过时来源生成新的模型摘要提示");
+      checkpointStore: store, force: true, targetThroughSeq: 2 });
+    assert.ok(recompact, "旧会话照常摘要，过时来源只留占位");
+    assert.doesNotMatch(recompact.prompt, /蓝色/u, "过时来源及其助手复述都不进入模型摘要提示");
+    assert.equal((recompact.prompt.match(/"omitted":"historical_memory_source"/gu) || []).length, 2);
+    assert.match(recompact.prompt, /"id":"old-color-user"/u);
+    const placeholderSummary = store.commit({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+      expectedRevision: recompact.expectedRevision, expectedMemoryRevision: recompact.expectedMemoryRevision,
+      expectedMemoryFreshUntil: recompact.expectedMemoryFreshUntil,
+      expectedRevocationVisibility: recompact.expectedRevocationVisibility,
+      throughSeq: recompact.throughSeq, coveredHash: recompact.coveredHash, partial: recompact.partial,
+      previousId: recompact.previousId, sourceProjection: recompact.sourceProjection,
+      summary: summary("（已更正的旧事实）"), provenance: { runId: "summary-new", bindingId: "binding",
+        runtime: "pi", model: "model", method: "model" } });
+    assert.equal(store.compatible(f.profile.id, f.transcriptSessionId)?.id, placeholderSummary.id,
+      "带占位的新摘要可提交并继续使用");
     assert.throws(() => store.commit({ profileId: f.profile.id,
       sessionId: f.transcriptSessionId,
       expectedRevision: f.transcripts.getRevision(f.profile.id, f.transcriptSessionId),
@@ -281,7 +294,7 @@ test("cross-session correction cannot recompact an old source or its assistant e
   } finally { store.close(); f.cleanup(); }
 });
 
-test("expiry boundary stops compaction of a still-active temporary memory source", () => {
+test("expiry boundary replaces a still-active temporary memory source with a placeholder", () => {
   let now = 500;
   const f = contextFixture({ now: () => now });
   const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
@@ -300,7 +313,10 @@ test("expiry boundary stops compaction of a still-active temporary memory source
     now = 510;
     assert.equal(f.memoryStore.get(f.profile.id, item.id).status, "active");
     assert.equal(store.historicalMemory.view(f.profile.id).forEvent(source).refs[0].status, "expired");
-    assert.equal(plan(), null, "validUntil 到达时即使 journal 未变也不得摘要旧事实");
+    const expired = plan();
+    assert.ok(expired, "validUntil 到达后照常摘要");
+    assert.doesNotMatch(expired.prompt, /本周二交付/u, "到期的旧事实只留占位，不进入摘要提示");
+    assert.match(expired.prompt, /"omitted":"historical_memory_source"/u);
   } finally { store.close(); f.cleanup(); }
 });
 
@@ -325,9 +341,11 @@ test("legacy in-place edits retain a cautious warning without claiming the edite
     assert.deepEqual(notice.refs[0], { id: old.id, status: "superseded",
       sourceBinding: "legacy_unverified" });
     assert.match(notice.note, /Do not infer the user said the edited content/u);
-    assert.equal(planConversationCompaction({ profileId: f.profile.id,
+    const plan = planConversationCompaction({ profileId: f.profile.id,
       sessionId: f.transcriptSessionId, transcriptStore: f.transcripts,
-      checkpointStore: store, force: true, targetThroughSeq: 1 }), null);
+      checkpointStore: store, force: true, targetThroughSeq: 1 });
+    assert.doesNotMatch(plan.prompt, /蓝色|黄色/u, "the legacy source is only a placeholder");
+    assert.match(plan.prompt, /"omitted":"historical_memory_source","id":"legacy-source"/u);
   } finally { store.close(); f.cleanup(); }
 });
 

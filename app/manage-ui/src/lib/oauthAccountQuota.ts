@@ -15,8 +15,8 @@ type Entry = {
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const accountKey = (backend: string, id: string) => JSON.stringify([backend, id]);
-const accountScope = ({ status, quotaScope, quotaSource }: OAuthProvider) =>
-  quotaScope ?? JSON.stringify([status.source, status.tokenPreview, quotaSource]);
+const accountScope = ({ status, quotaScope }: OAuthProvider) =>
+  quotaScope ?? JSON.stringify([status.source, status.tokenPreview]);
 
 export function canShowOAuthAccountQuota(provider: OAuthProvider): boolean {
   const { status } = provider;
@@ -69,8 +69,7 @@ export function refreshOAuthQuota(backend: string, provider: OAuthProvider): Pro
   if (before?.scope === scope && before.request) return before.request.promise;
   if (before && before.scope !== scope) removeEntry(key, before);
   const entry: Entry = before?.scope === scope ? before : { backend, id, scope };
-  // The CLI response has no account identifier. Read a fresh snapshot on each open.
-  const retrying = entry.quota && (entry.quota.status !== "available" || provider.quotaSource === "antigravity-cli");
+  const retrying = entry.quota && entry.quota.status !== "available";
   if (retrying) delete entry.quota;
   entry.requested = true;
   entries.set(key, entry);
@@ -123,7 +122,7 @@ export async function prefetchMissingOAuthQuotas(backend: string, providers: OAu
   if (changed) publish();
 
   const revision = readPageCacheRevision();
-  const accounts = [...eligible.values()].filter(provider => provider.quotaSource !== "antigravity-cli")
+  const accounts = [...eligible.values()]
     .sort((a, b) => Number(!!a.connection) - Number(!!b.connection));
   // Wait for existing reads too, so a second scan does not skip ahead of the first.
   for (let i = 0; i < accounts.length && revision === readPageCacheRevision(); i += 2) {

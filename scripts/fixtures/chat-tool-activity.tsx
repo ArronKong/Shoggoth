@@ -15,6 +15,8 @@ const backend = options.get("backend") || "openclaw";
 const language = options.get("language") || "zh-CN";
 const runtime = options.get("runtime") || "codex";
 const proactive = options.get("scenario") === "proactive";
+const meterScenario = options.get("scenario") === "context-meter";
+const meterCase = options.get("meterCase");
 const heartbeatId = `notice-${"1".repeat(64)}`, reviewId = `notice-${"2".repeat(64)}`;
 const agentId = backend === "openclaw" ? "main" : `${backend}-activity`;
 const sessionKey = proactive ? "da0087b1-1407-4806-bf91-fde0580a007f" : "main";
@@ -31,6 +33,28 @@ let history: any[] = options.get("scenario") === "openclaw-long" ? openClawLongT
     content: [{ type: "text", text: index === 0 ? "Scheduled heartbeat report" : "Daily Spark Notes report" }],
     timestamp: now + index, shoggoth: { proactiveNotice: { id, kind: index === 0 ? "heartbeat" : "inspiration" } } }))] : [intro];
 const zh = language === "zh-CN";
+const contextUsage = { runtimeSessionId: "fixture-thread", usedTokens: 403750, contextWindow: 475000,
+  quality: runtime === "pi" ? "estimated" : "exact", source: "runtime_event", observedAt: now };
+const meterWindow = backend === "openclaw" ? 128000 : backend === "hermes" ? 200000 : contextUsage.contextWindow;
+const gatewayUsed = backend === "openclaw" ? 76800 : 150000;
+const meterPermission = backend === "hermes" ? { id: "inherit", label: "Inherit" }
+  : backend === "openclaw" ? { id: "workspace", label: "Workspace" } : { id: "auto-review", label: "Approve for me" };
+const meterCaps = { attachments: {}, slash: true, permissions: { scope: "session", apply: "next-turn",
+  defaultMode: meterPermission.id, options: [meterPermission] } };
+let snapshotReads = 0;
+const otherMeterKey = `agent:${agentId}:other-meter`;
+let releaseSnapshot: (() => void) | undefined;
+if (meterScenario) {
+  Object.assign(sessions[0], { agentName: backend === "shoggoth" ? (runtime === "pi" ? "Pi" : "Codex") : backend, label: "上下文预览",
+    ...(backend === "shoggoth" ? { runtime, contextUsage,
+      productContext: { automatic: "enabled", measurement: "live", budget: { tokens: 475000, source: "runtime", triggerTokens: 380000 } } }
+    : { totalTokens: gatewayUsed, contextTokens: meterWindow, totalTokensFresh: true }) });
+  history = [{ ...intro, content: "看看当前会话的上下文。", timestamp: now - 60_000 },
+    { role: "assistant", id: "meter-answer", content: "这个示例可以在输入框里查看上下文明细。", timestamp: now - 15_000,
+      ...(backend === "shoggoth" ? { shoggoth: { nativeUiVersion: 1, runId: "meter-turn" }, responseMetadata: { context: {
+        usedTokens: contextUsage.usedTokens, windowTokens: meterWindow, quality: contextUsage.quality } } } : {}) }];
+  if (meterCase === "switch") sessions.push({ ...sessions[0], key: otherMeterKey, updatedAt: now - 10000 });
+}
 const text = {
   directory: zh ? "查看助理列表" : "View the Agent directory",
   command: zh ? "核对聊天回归" : "Check chat regressions",
@@ -72,7 +96,9 @@ class FixtureSocket {
     const request = JSON.parse(data); state.requests.push(request);
     const payload = request.method === "sessions.list" ? { sessions, hasMore: false }
       : request.method === "agents.list" ? { agents: [{ id: agentId, name: sessions[0].agentName, backendId: backend }] }
-      : request.method === "chat.history" ? { messages: history, hasMore: false, nextCursor: null, sourceId: `fixture:${key}` } : {};
+      : request.method === "chat.history" ? { messages: meterCase === "switch" && request.params.sessionKey === otherMeterKey
+        ? [{ ...history[1], content: "Second meter session", shoggoth: { nativeUiVersion: 1, runId: "other-meter-turn" } }] : history,
+        hasMore: false, nextCursor: null, sourceId: `fixture:${request.params.sessionKey}` } : {};
     setTimeout(() => this.emit({ type: "res", id: request.id, ok: true, payload }), 0);
   }
   close() { this.readyState = 3; }
@@ -80,6 +106,27 @@ class FixtureSocket {
 state.WebSocket = FixtureSocket;
 state.fetch = async (url: unknown, init?: RequestInit) => {
   const path = String(url);
+  if (meterScenario) {
+    const u = new URL(path, location.href);
+    if (u.pathname.endsWith("/context")) {
+      const session = u.searchParams.get("sessionKey"), runId = u.searchParams.get("runId");
+      const other = meterCase === "switch" && session === otherMeterKey;
+      check(!init?.method && (other ? runId === "other-meter-turn" : session === key && runId === "meter-turn")
+        && u.searchParams.get("backend") === backend && backend === "shoggoth", "read only the matching session and turn");
+      snapshotReads++;
+      if (meterCase === "switch" && !other) await new Promise<void>(resolve => { releaseSnapshot = resolve; });
+      return Response.json({ runId, snapshotId: other || meterCase === "missing" ? null : "ctx-" + "a".repeat(64), composition: other || meterCase === "missing" ? null : {
+        historyDelivered: false, toolExposure: runtime === "pi" ? "resident" : "all", toolCount: 48,
+        rulesTokens: 8550, definitionTokens: 3400, toolTokens: 21600, memoryTokens: 6720,
+        skillTokens: 2980, historyTokens: 0, messageTokens: 640 } });
+    }
+    if (u.pathname === "/__api/status") return Response.json({ backends: [{ id: backend, connected: true, info: { readyAgentIds: [agentId] } }] });
+    if (u.pathname.endsWith("/runtime-models")) return Response.json({ selection: { sessionKey: key, bindingId: "fixture",
+      runtime, model: runtime === "codex" ? "gpt-5.4" : "fixture-model", canSwitch: false, candidates: [] },
+      models: [], runtimes: [], capabilities: meterCaps });
+    if (u.pathname === "/__api/chat/capabilities") return Response.json(meterCaps);
+    if (u.pathname === "/__api/chat/secrets/prepare") return Response.json({ text: JSON.parse(String(init?.body)).text, references: [], version: 1 });
+  }
   if (path === "/__api/proactive") {
     const request = JSON.parse(String(init?.body));
     state.proactiveRequests.push(request);
@@ -131,6 +178,113 @@ const expand = async () => {
 const closeDetails = async () => {
   details()?.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)?.click();
   await wait(() => !details(), "close activity dialog");
+};
+
+const meterButton = () => document.querySelector<HTMLButtonElement>("[data-chat-context-trigger]");
+const meterComposer = () => meterButton()?.closest<HTMLElement>("[data-chat-composer]");
+const meterPanel = () => document.querySelector<HTMLElement>("[data-chat-context-details]");
+const refreshMeter = (update: object) => {
+  Object.assign(sessions[0], update);
+  state.socket.emit({ type: "event", event: "sessions.changed", payload: { sessionKey: key } });
+};
+state.prepareContextMeter = async () => {
+  await wait(() => document.body.textContent?.includes("这个示例") && meterComposer()?.querySelector(".chat-pill--permission"), "session meter and permission control");
+  check(!snapshotReads && !document.querySelector("[data-chat-context-details]"), "closed meter makes no snapshot request");
+  const button = meterButton()!, rect = button.getBoundingClientRect();
+  const icon = button.querySelector("svg")!.getBoundingClientRect();
+  check(icon.width === 14 && icon.height === 14 && rect.width >= 28 && rect.height >= 32,
+    "the compact context ring keeps its full pointer target");
+  const permission = button.previousElementSibling?.querySelector(".chat-pill--permission")?.getBoundingClientRect();
+  check(permission && permission.right <= rect.left && Math.abs(rect.top - permission.top) < 2, "ring is immediately right of permissions on the same row");
+  check(document.querySelectorAll("[data-chat-context-trigger]").length === 1 && !button.textContent
+    && !!button.closest('[data-testid="immersive-chat"]') === (options.get("immersive") === "1"), "one icon in the visible composer");
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+};
+state.inspectContextMeter = async (interaction: string) => {
+  const panel = meterPanel;
+  await wait(() => panel()?.querySelector('[data-part="free"]') && (backend !== "shoggoth" || meterCase === "missing"
+    ? panel()?.querySelector('[role="status"]')?.textContent === i18n.t("contextMeter." + (backend === "shoggoth" ? "unavailable" : "totalsOnly"))
+    : panel()?.querySelector('li[data-part="other"]')), interaction + " reveals measured categories or available totals");
+  check(snapshotReads === Number(backend === "shoggoth"), "one native read and no gateway reads");
+  if (backend === "shoggoth" && meterCase !== "missing") {
+    check(!!panel()!.querySelector('li[data-part="catalog"]') === (runtime !== "pi"), "deferred tools shown separately");
+    check(!!panel()!.querySelector('li[data-part="tools"]') === (runtime === "pi"), "resident tools counted once");
+    const messages = panel()!.querySelector('li[data-part="other"]')!;
+    check(messages.children[1].textContent === (zh ? "消息" : "Messages")
+      && getComputedStyle(messages.firstElementChild!).backgroundColor === "rgb(0, 0, 0)", "black messages category");
+  }
+  await wait(() => panel()?.querySelector("footer button:enabled"), "session ready to compact");
+  const compact = getComputedStyle(panel()!.querySelector("footer button")!);
+  check(compact.borderTopWidth === "0px" && parseFloat(compact.borderRadius) >= 100 && getComputedStyle(panel()!).borderTopWidth === "0px",
+    "borderless panel and pill-shaped action");
+  check(compact.backgroundColor !== getComputedStyle(panel()!).backgroundColor, "pill remains visible on the panel");
+  const totalBar = panel()!.querySelector('[data-part="used"]');
+  if (totalBar) check(getComputedStyle(totalBar).backgroundColor === getComputedStyle(meterButton()!.querySelector("circle:last-child")!).stroke,
+    "total-only bars share the ring color");
+  check(!panel()!.innerText.includes("≈") && [...panel()!.querySelectorAll("li > :first-child")].every(dot => getComputedStyle(dot).borderRadius === "50%"),
+    "round legend, estimates identified without approximation glyphs");
+  const b = panel()!.getBoundingClientRect(), r = meterButton()!.getBoundingClientRect(), c = meterComposer()!.getBoundingClientRect();
+  check(b.x >= 0 && b.right <= innerWidth && b.y >= 0 && b.bottom <= r.top + 1, "popup fits above the meter");
+  check(panel()!.contains(document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)), "panel can receive pointer input above the active chat");
+  const x = Math.max(0, Math.floor(Math.min(b.x, c.x) - 10)), y = Math.max(0, Math.floor(Math.min(b.y, c.y) - 10));
+  return { x, y, width: Math.min(innerWidth, Math.ceil(Math.max(b.right, c.right) + 10)) - x,
+    height: Math.min(innerHeight, Math.ceil(Math.max(b.bottom, c.bottom) + 10)) - y };
+};
+state.checkContextMeterClosed = async () => {
+  await wait(() => !meterPanel(), "Escape closes the panel");
+  check(!!meterButton()?.closest('[data-testid="immersive-chat"]') === (options.get("immersive") === "1"), "Escape keeps the current composer");
+};
+state.clickContextCompact = async () => {
+  const compact = () => document.querySelector<HTMLButtonElement>("[data-chat-context-details] footer button")!;
+  if (meterCase === "full") {
+    refreshMeter({ hasActiveRun: true });
+    await wait(() => compact()?.disabled, "busy session blocks compaction");
+    compact().click();
+    check(!state.requests.some((r: any) => r.method === "chat.send"), "disabled button cannot start a turn");
+    refreshMeter({ hasActiveRun: false });
+    await wait(() => compact() && !compact().disabled, "idle session can compact again");
+  }
+  const field = meterComposer()!.querySelector("textarea")!;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(field, "My draft");
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  const button = compact();
+  button.click(); button.click();
+  const commands = () => state.requests.filter((r: any) => ["sessions.compact", "chat.send"].includes(r.method));
+  await wait(() => commands().length, "compact dispatch");
+  const [cmd] = commands();
+  check(commands().length === 1 && field.value === "My draft", "dispatch once and preserve the draft");
+  check(backend === "shoggoth" ? cmd.method === "chat.send" && cmd.params.sessionKey === key && cmd.params.message === "/compact"
+    : cmd.method === "sessions.compact" && cmd.params.key === key, "use the session's existing command path");
+  const dark = options.get("theme") === "dark";
+  for (const [usedTokens, level, label, color] of [
+    [meterWindow * 7 / 10 - 1, "normal", "<70%", dark ? "rgb(166, 168, 175)" : "rgb(133, 135, 140)"],
+    [meterWindow * 7 / 10, "warning", "70%", dark ? "rgb(240, 163, 75)" : "rgb(201, 119, 22)"],
+    [meterWindow * 8 / 10, "warning", "80%", dark ? "rgb(240, 163, 75)" : "rgb(201, 119, 22)"],
+    [meterWindow * 8 / 10 + 1, "high", ">80%", dark ? "rgb(255, 114, 118)" : "rgb(212, 50, 57)"],
+  ] as const) {
+    refreshMeter(backend === "shoggoth" ? { contextUsage: { ...contextUsage, usedTokens } } : { totalTokens: usedTokens });
+    await wait(() => meterButton()?.getAttribute("aria-label") === i18n.t("contextMeter.details") + " · " + label, "updated " + label);
+    const arc = meterButton()!.querySelector("circle:last-child")!;
+    check(meterButton()!.dataset.level === level && getComputedStyle(arc).stroke === color
+      && Math.abs(parseFloat(arc.getAttribute("stroke-dasharray")!) - usedTokens / meterWindow * 100) < 0.000001, "exact ring color and progress at " + label);
+  }
+  refreshMeter(backend === "shoggoth" ? { contextUsage: { ...contextUsage, contextWindow: null } } : { contextTokens: undefined });
+  await wait(() => !meterButton() && !meterPanel(), "missing window removes the trigger and its open panel");
+  return { backend, runtime, snapshotReads, method: cmd.method };
+};
+state.switchMeterSession = async () => {
+  await wait(() => releaseSnapshot, "first session's snapshot pending");
+  window.dispatchEvent(new CustomEvent("openclaw:open-chat-session", { detail: otherMeterKey }));
+  await wait(() => thread()?.innerText.includes("Second meter session") && !document.querySelector("[data-chat-context-details]"), "session change closes panel");
+  const rect = meterButton()!.getBoundingClientRect();
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+};
+state.checkLateMeterSnapshot = async () => {
+  const status = () => document.querySelector('[data-chat-context-details] [role="status"]')?.textContent;
+  await wait(() => status() === i18n.t("contextMeter.unavailable"), "second session has no snapshot");
+  releaseSnapshot!(); await pause();
+  check(snapshotReads === 2 && status() === i18n.t("contextMeter.unavailable"), "late response cannot replace the selected session's snapshot");
+  return { backend, snapshotReads, sessionSwitch: true };
 };
 
 function failedTurnHistory(): any[] {

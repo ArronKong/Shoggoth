@@ -12,6 +12,9 @@ const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-com
 const { codexRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { modelSecretProviderConfig } = require("./codex-runtime-config");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
+const crypto = require("node:crypto");
+// Ledger key of the developer instructions a thread holds (hash only).
+const APPLIED_INSTRUCTIONS_KEY = "developer-instructions";
 
 const CODEX_COMMANDS = normalizeRuntimeCommands([
   { name: "compact", description: "Compact the current Codex conversation" },
@@ -81,6 +84,14 @@ function hasIsolatedFeatures(features, runtimeVersion) {
       && !PRESENTATION_FEATURES.includes(feature.name) && !isCodexRetiredFeatureMarker(feature, runtimeVersion));
 }
 
+// Codex 0.159.2 advertises its native request_user_input tool even when the
+// feature and MCP inventories pass the isolated generation checks.
+function isolatedGenerationVerified(runtimeVersion) {
+  return runtimeVersion !== "0.159.2";
+}
+
+const runtimeVersionKey = binding => JSON.stringify([binding.runtimeProfileId, binding.runtimeAccountId]);
+
 function definedProperties(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined));
 }
@@ -143,7 +154,7 @@ function mapEvent(event) {
 }
 
 class CodexRuntimeHandle {
-  constructor(binding, host, secretGateway = null, catalogHost = null) {
+  constructor(binding, host, secretGateway = null, catalogHost = null, promptLedgerStore = null) {
     this.runtime = "codex";
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
@@ -165,7 +176,8 @@ class CodexRuntimeHandle {
     this.workspacePolicies = new Map();
     this.modelOnlySessions = new Set();
     this.compactionCycles = new Map();
-    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)({
+      store: promptLedgerStore, scope: "codex" });
   }
 
   get terminated() { return this.host.terminated; }
@@ -198,7 +210,9 @@ class CodexRuntimeHandle {
           contextUsage: codexRuntimeContextUsage(mapped.sessionId, mapped) });
         if (mapped.type === "context_compacted") {
           // Compacted history may no longer hold earlier injected rules/context.
-          this.promptLedger.reset(mapped.sessionId);
+          // Codex keeps developer items across compaction (observed in its
+          // replacement history), so the applied instructions stay recorded.
+          this.promptLedger.reset(mapped.sessionId, { keep: [APPLIED_INSTRUCTIONS_KEY] });
           const turnKey = mapped.turnId ? JSON.stringify([mapped.sessionId, mapped.turnId]) : null;
           // The item ID distinguishes multiple compactions within one turn.
           // A trailing legacy turn notice refers to the latest item in it.
@@ -269,9 +283,7 @@ class CodexRuntimeHandle {
     if (input.isolatedGeneration && input.persistent !== false) {
       throw adapterError("MODEL_ONLY_SESSION_INVALID", "Isolated generation requires a dedicated ephemeral thread");
     }
-    // Codex 0.159.2 advertises its native request_user_input tool even when
-    // the feature and MCP inventories pass the isolated generation checks.
-    if (input.isolatedGeneration && this.host.runtimeVersion === "0.159.2") {
+    if (input.isolatedGeneration && !isolatedGenerationVerified(this.host.runtimeVersion)) {
       throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "This Codex version exposes a native tool during isolated generation");
     }
     const isolationConfig = input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
@@ -299,6 +311,7 @@ class CodexRuntimeHandle {
       this.sessionInstructions.set(response.thread.id, {
         current: input.developerInstructions, applied: input.developerInstructions,
       });
+      this.promptLedger.record(response.thread.id, APPLIED_INSTRUCTIONS_KEY, input.developerInstructions);
     }
     if (input.isolatedGeneration) {
       this.modelOnlySessions.add(response.thread.id);
@@ -347,8 +360,13 @@ class CodexRuntimeHandle {
     this._rememberThreadProvider(input.sessionId, input);
     if (typeof input.developerInstructions === "string") {
       const previous = this.sessionInstructions.get(response.thread.id);
+      // A new Host or Service keeps no copy: the shared ledger proves which
+      // instructions this thread already holds, so unchanged ones are not repeated.
+      const recorded = this.promptLedger.deliveredHash(response.thread.id, APPLIED_INSTRUCTIONS_KEY)
+        === crypto.createHash("sha256").update(input.developerInstructions).digest("hex");
       this.sessionInstructions.set(response.thread.id, {
-        current: input.developerInstructions, applied: previous?.applied,
+        current: input.developerInstructions,
+        applied: previous ? previous.applied : recorded ? input.developerInstructions : undefined,
       });
     }
     return mapThreadEnvelope(response);
@@ -581,10 +599,9 @@ class CodexRuntimeHandle {
     // Injected items stay in the thread's history, so unchanged Run rules and
     // dynamic context are not injected again (see PromptBlockLedger); a
     // context_compacted event resets this. The Run ID is sent every turn.
-    const plan = this.promptLedger.plan(input.sessionId, { rules: turn.rules,
-      context: typeof input.context === "string" ? input.context : "" });
-    const turnInstructions = [plan.send.rules, delivery.unchangedBlocksNotice(plan.omitted), turn.run]
-      .filter(Boolean).join("\n\n");
+    const plan = delivery.promptBlockPlan(this.promptLedger, input.sessionId, { rules: turn.rules,
+      context: typeof input.context === "string" ? input.context : "", contextIndex: input.contextIndex ?? null });
+    const turnInstructions = [plan.rules, ...plan.notices, turn.run].filter(Boolean).join("\n\n");
     const instructions = this.sessionInstructions.get(input.sessionId);
     const policyUpdate = instructions && instructions.current !== instructions.applied ? instructions.current : undefined;
     const items = [];
@@ -629,13 +646,13 @@ class CodexRuntimeHandle {
       }
       if (effort === null) throw adapterError("RUNTIME_MODEL_CATALOG_INVALID", "Cannot resolve default reasoning effort");
     }
-    if (plan.send.context) {
+    if (plan.context) {
       // Raw Responses items are model-visible history, separate from the
       // native userMessage projection. Keep dynamic data at user authority;
       // never put memory/transcripts/catalog data into developer instructions.
       // Failed injection must block dispatch rather than omit frozen context.
       items.push({
-        type: "message", role: "user", content: [{ type: "input_text", text: plan.send.context }],
+        type: "message", role: "user", content: [{ type: "input_text", text: plan.context }],
       });
     }
     this.assertExecutionProviderCurrent();
@@ -643,7 +660,10 @@ class CodexRuntimeHandle {
       // One ordered request preserves the separate authority of policy, Run
       // rules and untrusted context without a round trip for each block.
       await this.host.threadInjectItems({ threadId: input.sessionId, items }, sendOptions("context"));
-      if (policyUpdate !== undefined) instructions.applied = policyUpdate;
+      if (policyUpdate !== undefined) {
+        instructions.applied = policyUpdate;
+        this.promptLedger.record(input.sessionId, APPLIED_INSTRUCTIONS_KEY, policyUpdate);
+      }
     }
     this.assertExecutionProviderCurrent();
     const started = await this.host.turnStart({ ...definedProperties({
@@ -844,11 +864,29 @@ class CodexRuntimeAdapter {
     }
     this.runtimePool = options.runtimePool;
     this.secretGateway = options.secretGateway || null;
+    this.promptLedgerStore = options.promptLedgerStore || null;
+    // Tool-free generation through an isolated ephemeral thread, approved only
+    // for conversation summaries (memory review uses its own Codex path).
+    this.modelOnly = true;
+    this.modelOnlyPurposes = Object.freeze(["conversation_compaction"]);
+    // The CLI version each Binding actually runs, as its Hosts report it. A
+    // Binding on a version without verified isolation cannot summarize, so the
+    // summary route is skipped before a task is created (native compaction runs).
+    this.observedRuntimeVersions = new Map();
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
 
   runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
+
+  // Unknown (no Host acquired yet) stays eligible; the session guard still
+  // refuses an unverified version when the isolated thread is created.
+  canGenerateModelOnlyFor(value, purpose) {
+    if (!this.modelOnlyPurposes.includes(purpose)) return false;
+    let version;
+    try { version = this.observedRuntimeVersions.get(runtimeVersionKey(runtimeBinding(value))); } catch { return true; }
+    return version === undefined || isolatedGenerationVerified(version);
+  }
 
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
@@ -871,6 +909,7 @@ class CodexRuntimeAdapter {
       ...acquireOptions,
       ...(projected ? { modelSecretProviderKind } : {}),
     });
+    if (typeof host?.runtimeVersion === "string") this.observedRuntimeVersions.set(runtimeVersionKey(binding), host.runtimeVersion);
     const existing = this.handles.get(host);
     if (existing?.runtimeProfileId === binding.runtimeProfileId
       && existing.runtimeAccountId === binding.runtimeAccountId) return existing;
@@ -881,7 +920,8 @@ class CodexRuntimeAdapter {
     // and selection checks read.
     const catalogHost = projected && modelSecretProviderKind === "chatgpt"
       ? () => this.runtimePool.get(binding, {}) : null;
-    const handle = Object.freeze(new CodexRuntimeHandle(binding, host, this.secretGateway, catalogHost));
+    const handle = Object.freeze(new CodexRuntimeHandle(binding, host, this.secretGateway, catalogHost,
+      this.promptLedgerStore));
     this.handles.set(host, handle);
     if (host.terminated && typeof host.terminated.then === "function") {
       Promise.resolve(host.terminated).finally(() => {

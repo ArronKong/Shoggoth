@@ -6,7 +6,7 @@ const { LIMITS, EVENT_NAME, DAILY_EVENT, STEP_EVENT, catalog, boundedList, exact
   isUtcDay, isUuid, getUtcDay, validateTelemetryEvent } = require("./product-telemetry-schema");
 
 const PAUSE_REASONS = new Set([null, "http_rejected", "protocol_error", "quota_limited"]);
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 const ownUid = typeof process.getuid === "function" ? process.getuid() : null;
 const safeOwner = (stat) => ownUid === null || stat.uid === ownUid;
 const sameFile = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
@@ -17,18 +17,27 @@ function validateState(state) {
     const keys = ["version", "distinctId", "lastActiveDay", "transportFingerprint", "pausedReason", "outbox"];
     const legacy = exactObject(state, keys) && state.version === 1;
     if (!legacy) keys.push("detail");
-    if (!exactObject(state, keys) || (!legacy && state.version !== STATE_VERSION)
+    if (!exactObject(state, keys) || ![1, 2, STATE_VERSION].includes(state.version)
       || !isUuid(state.distinctId) || !isUtcDay(state.lastActiveDay)
       || typeof state.transportFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(state.transportFingerprint)
       || !PAUSE_REASONS.has(state.pausedReason) || !boundedList(state.outbox, LIMITS.events, () => true)) return false;
     const detail = state.detail;
-    if (!legacy && (!exactObject(detail, ["lastSealedDay", "draft", "steps"])
+    const detailKeys = ["lastSealedDay", "draft", "steps"];
+    if (state.version === STATE_VERSION) detailKeys.push("pendingChats");
+    if (!legacy && (!exactObject(detail, detailKeys)
       || (detail.lastSealedDay !== null && !isUtcDay(detail.lastSealedDay))
       || !boundedList(detail.steps, catalog.steps.length, step => catalog.steps.includes(step))
       || new Set(detail.steps).size !== detail.steps.length
       || (detail.draft !== null && (!validateTelemetryEvent(detail.draft) || detail.draft.event !== DAILY_EVENT
         || detail.draft.distinct_id !== state.distinctId
         || (detail.lastSealedDay && detail.draft.properties.report_day <= detail.lastSealedDay))))) return false;
+    if (state.version === STATE_VERSION) {
+      if (!boundedList(detail.pendingChats, LIMITS.pending, row => {
+        if (!exactObject(row, ["operationId", "startedAt"]) || !isUuid(row.operationId)) return false;
+        const day = getUtcDay(row.startedAt);
+        return day !== null && day <= state.lastActiveDay;
+      }) || new Set(detail.pendingChats.map(row => row.operationId)).size !== detail.pendingChats.length) return false;
+    }
     const receipts = new Set();
     const ids = new Set();
     if (detail?.draft) ids.add(detail.draft.uuid);
